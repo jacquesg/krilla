@@ -55,6 +55,10 @@ pub(crate) struct ContentBuilder {
     /// A temporary buffer that's reused across the builder.
     scratch: Vec<u8>,
     pub(crate) active_marked_content: bool,
+    /// When true, root_transform and user transforms are written as separate
+    /// cm operators (matching AHF/reference renderer structure) so pdfium
+    /// correctly extracts font metadata from CSS-transformed text.
+    pub(crate) split_cm_for_text_extraction: bool,
 }
 
 /// Stores either a device-specific color space,
@@ -78,6 +82,7 @@ impl ContentBuilder {
             bbox: None,
             scratch: Vec::new(),
             active_marked_content: false,
+            split_cm_for_text_extraction: false,
         }
     }
 
@@ -942,10 +947,25 @@ impl ContentBuilder {
 
         prep(self, sc);
 
-        let transform = self.cur_transform_with_root_transform();
-
-        if transform != Transform::identity() {
-            self.content.transform(transform.to_pdf_transform());
+        if self.split_cm_for_text_extraction {
+            // Write root transform and user transforms as SEPARATE cm operators.
+            // This matches the structure used by AHF and other reference
+            // renderers, and ensures pdfium correctly extracts font metadata
+            // from text within CSS transforms.
+            if self.root_transform != Transform::identity() {
+                self.content.transform(self.root_transform.to_pdf_transform());
+            }
+            let user_transform = self.cur_transform();
+            if user_transform != Transform::identity() {
+                self.content.transform(user_transform.to_pdf_transform());
+            }
+        } else {
+            // Default: combined cm for precision (no floating-point rounding
+            // from separate matrix multiplications).
+            let transform = self.cur_transform_with_root_transform();
+            if transform != Transform::identity() {
+                self.content.transform(transform.to_pdf_transform());
+            }
         }
 
         let state = self.graphics_states.cur().ext_g_state().clone();
