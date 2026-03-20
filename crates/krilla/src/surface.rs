@@ -405,6 +405,16 @@ impl<'a> Surface<'a> {
         self.bd.get_mut().concat_transform(transform);
     }
 
+    /// Enable split cm output for text extraction compatibility.
+    ///
+    /// When enabled, `apply_isolated_op` writes the root transform and user
+    /// transforms as separate `cm` operators (matching the structure used by
+    /// reference PDF renderers like AHF). This ensures pdfium correctly
+    /// extracts font metadata from text within CSS transforms.
+    pub fn set_split_cm_for_text_extraction(&mut self, split: bool) {
+        self.bd.get_mut().split_cm_for_text_extraction = split;
+    }
+
     /// Push a new blend mode.
     pub fn push_blend_mode(&mut self, blend_mode: BlendMode) {
         self.push_instructions.push(PushInstruction::BlendMode);
