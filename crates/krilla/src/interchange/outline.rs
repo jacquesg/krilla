@@ -126,6 +126,12 @@ pub struct OutlineNode {
     text: String,
     /// The destination of the outline entry.
     destination: XyzDestination,
+    /// Whether the node is initially open (expanded) in the PDF viewer.
+    ///
+    /// When `true`, child entries are visible by default. When `false`,
+    /// the `/Count` entry is written as a negative value per the PDF spec,
+    /// indicating the node is initially collapsed.
+    open: bool,
 }
 
 impl OutlineNode {
@@ -139,6 +145,20 @@ impl OutlineNode {
             children: vec![],
             text,
             destination,
+            open: true,
+        }
+    }
+
+    /// Create a new outline node with an explicit open/closed state.
+    ///
+    /// When `open` is `false`, the node is initially collapsed in the PDF
+    /// viewer — its `/Count` entry will be negative per the PDF spec.
+    pub fn with_open(text: String, destination: XyzDestination, open: bool) -> Self {
+        Self {
+            children: vec![],
+            text,
+            destination,
+            open,
         }
     }
 
@@ -176,7 +196,7 @@ impl OutlineNode {
             &mut sub_chunks,
             sc,
             &mut outline_entry,
-            true,
+            !self.open,
         )?;
 
         outline_entry.title(TextStr(&self.text));
