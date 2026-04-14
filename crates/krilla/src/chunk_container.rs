@@ -90,43 +90,40 @@ impl ChunkContainer {
             chunk.renumber_into(&mut pdf, |old| remapper[&old]);
         })?;
 
-        let missing_title = self.metadata.as_ref().is_none_or(|m| m.title.is_none());
+        // Default `Metadata` has no title; the missing-title validation below
+        // catches that case explicitly. We materialise a default to avoid
+        // duplicating the XMP and Info-dict serialisation paths for the
+        // "no metadata set" case.
+        let metadata = self.metadata.unwrap_or_default();
+        let missing_title = metadata.title.is_none();
 
         if missing_title {
             sc.register_validation_error(ValidationError::NoDocumentTitle);
         }
 
         // Write the PDF document info metadata.
-        if let Some(metadata) = &self.metadata {
-            metadata.serialize_document_info(
-                &mut remapped_ref,
-                &mut pdf,
-                sc.serialize_settings().configuration,
-            );
-        }
+        metadata.serialize_document_info(
+            &mut remapped_ref,
+            &mut pdf,
+            sc.serialize_settings().configuration,
+        );
 
         let instance_id = stable_hash_base64(pdf.as_bytes());
 
-        let document_id = if let Some(metadata) = &self.metadata {
-            if let Some(document_id) = &metadata.document_id {
-                stable_hash_base64(&(sc.serialize_settings().pdf_version().as_str(), document_id))
-            } else if metadata.title.is_some() && metadata.authors.is_some() {
-                stable_hash_base64(&(
-                    sc.serialize_settings().pdf_version().as_str(),
-                    &metadata.title,
-                    &metadata.authors,
-                ))
-            } else {
-                instance_id.clone()
-            }
+        let document_id = if let Some(document_id) = &metadata.document_id {
+            stable_hash_base64(&(sc.serialize_settings().pdf_version().as_str(), document_id))
+        } else if metadata.title.is_some() && metadata.authors.is_some() {
+            stable_hash_base64(&(
+                sc.serialize_settings().pdf_version().as_str(),
+                &metadata.title,
+                &metadata.authors,
+            ))
         } else {
             instance_id.clone()
         };
 
         let mut xmp = XmpWriter::new();
-        if let Some(metadata) = &self.metadata {
-            metadata.serialize_xmp_metadata(&mut xmp, sc, &instance_id);
-        }
+        metadata.serialize_xmp_metadata(&mut xmp, sc, &instance_id);
 
         sc.serialize_settings().validator().write_xmp(&mut xmp);
 
@@ -185,7 +182,7 @@ impl ChunkContainer {
                 catalog.pair(Name(b"OutputIntents"), remapper[&oi.0]);
             }
 
-            if let Some(lang) = self.metadata.as_ref().and_then(|m| m.language.as_ref()) {
+            if let Some(lang) = metadata.language.as_ref() {
                 catalog.lang(TextStr(lang));
             } else {
                 sc.register_validation_error(ValidationError::NoDocumentLanguage);
@@ -208,7 +205,7 @@ impl ChunkContainer {
                 .serialize_settings()
                 .validator()
                 .requires_display_doc_title();
-            let text_direction = self.metadata.as_ref().and_then(|m| m.text_direction);
+            let text_direction = metadata.text_direction;
 
             if write_doc_title || text_direction.is_some() {
                 let mut vp = catalog.viewer_preferences();
@@ -222,7 +219,7 @@ impl ChunkContainer {
                 }
             }
 
-            let page_layout = self.metadata.as_ref().and_then(|m| m.page_layout);
+            let page_layout = metadata.page_layout;
             if let Some(layout) = page_layout {
                 // TwoPageLeft and TwoPageRight are only available PDF 1.5+
                 if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf15

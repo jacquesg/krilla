@@ -129,7 +129,7 @@ fn main() {
 
                     // Add the current glyph to our buffer of glyphs.
                     glyphs.push(KrillaGlyph::new(
-                        GlyphId::new(glyph.id as u32),
+                        GlyphId::new(glyph.id),
                         glyph.advance / font_size,
                         glyph.x / font_size,
                         glyph.y / font_size,

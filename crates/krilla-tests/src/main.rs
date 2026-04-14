@@ -33,6 +33,7 @@ use krilla::text::Font;
 use krilla::text::{GlyphId, KrillaGlyph};
 use krilla::Data;
 use krilla::Document;
+use krilla::ExternalOutputProfile;
 use krilla::SerializeSettings;
 use krilla_svg::{render_svg_glyph, SurfaceExt, SvgSettings};
 use once_cell::sync::Lazy;
@@ -140,6 +141,25 @@ lazy_font!(LIBERTINUS_SERIF, FONT_PATH.join("LibertinusSerif-Regular.otf"));
 lazy_font!(DEJAVU_SANS_MONO, FONT_PATH.join("DejaVuSansMono.ttf"));
 #[rustfmt::skip]
 lazy_font!(NEW_CM_MATH, FONT_PATH.join("NewCMMath-Regular.otf"));
+
+fn bundled_test_cmyk_output_profile() -> ICCProfile<4> {
+    ICCProfile::new(&std::fs::read(ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap()).unwrap()
+}
+
+/// A compact synthetic CMYK ICC profile used for PDF/X snapshot tests.
+///
+/// PDF/X always embeds the output-intent profile in the generated PDF, so
+/// `eciCMYK_v2.icc` (1.8 MB) would make each PDF/X snapshot unreviewable
+/// (~40k lines). This profile is a minimal valid CMYK profile that keeps
+/// snapshots under ~1k lines while still exercising the PDF/X output-intent
+/// wiring, XMP identification, Trapped handling, and structural validation.
+///
+/// CMYK *rendering fidelity* is covered separately by the `path_with_cmyk_icc_*`
+/// visreg tests, which continue to use the real `eciCMYK_v2.icc`.
+fn compact_test_cmyk_output_profile() -> ICCProfile<4> {
+    ICCProfile::new(&std::fs::read(ASSETS_PATH.join("icc/krilla-generic-cmyk-v2.icc")).unwrap())
+        .unwrap()
+}
 
 #[derive(Clone)]
 struct TestImage {
@@ -413,30 +433,31 @@ fn write_render_to_store(name: &str, content: &[u8]) {
     std::fs::write(&path, content).unwrap();
 }
 
+fn normalize_snapshot_text(content: &[u8]) -> String {
+    String::from_utf8_lossy(content).replace('\r', "")
+}
+
 pub fn check_snapshot(name: &str, actual: &[u8], storable: bool) {
     let path = SNAPSHOT_PATH.join(format!("{name}.txt"));
+    let actual_text = normalize_snapshot_text(actual);
 
     if STORE.is_some() && storable {
         write_snapshot_to_store(name, actual);
     }
 
     if !path.exists() {
-        std::fs::write(&path, actual).unwrap();
+        std::fs::write(&path, actual_text.as_bytes()).unwrap();
         panic!("new snapshot created");
     }
 
-    let expected = std::fs::read(&path).unwrap();
+    let expected_text = normalize_snapshot_text(&std::fs::read(&path).unwrap());
 
-    if REPLACE.is_some() && expected != actual {
-        std::fs::write(&path, actual).unwrap();
+    if REPLACE.is_some() && expected_text != actual_text {
+        std::fs::write(&path, actual_text.as_bytes()).unwrap();
         panic!("test was replaced");
     }
 
-    let changeset = Changeset::new(
-        &String::from_utf8_lossy(actual),
-        &String::from_utf8_lossy(&expected),
-        "\n",
-    );
+    let changeset = Changeset::new(&actual_text, &expected_text, "\n");
 
     if changeset.distance != 0 {
         for diff in changeset.diffs {
@@ -892,6 +913,7 @@ pub fn settings_1() -> SerializeSettings {
         enable_tagging: true,
         configuration: Configuration::new(),
         render_svg_glyph_fn: render_svg_glyph,
+        external_output_profile: None,
     }
 }
 
@@ -912,10 +934,7 @@ pub fn settings_5() -> SerializeSettings {
 pub fn settings_6() -> SerializeSettings {
     SerializeSettings {
         no_device_cs: true,
-        cmyk_profile: Some(
-            ICCProfile::new(&std::fs::read(ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap())
-                .unwrap(),
-        ),
+        cmyk_profile: Some(bundled_test_cmyk_output_profile()),
         ..settings_1()
     }
 }
@@ -930,10 +949,7 @@ pub fn settings_7() -> SerializeSettings {
 pub fn settings_8() -> SerializeSettings {
     SerializeSettings {
         configuration: Configuration::new_with_validator(Validator::A2_B),
-        cmyk_profile: Some(
-            ICCProfile::new(&std::fs::read(ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap())
-                .unwrap(),
-        ),
+        cmyk_profile: Some(bundled_test_cmyk_output_profile()),
         ..settings_1()
     }
 }
@@ -1083,6 +1099,101 @@ pub fn settings_30() -> SerializeSettings {
         xmp_metadata: true,
         ..settings_1()
     }
+}
+
+// PDF/X-4 validator. Uses the compact CMYK profile to keep snapshots reviewable.
+pub fn settings_31() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X4),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// PDF/X-3 validator. Uses the compact CMYK profile to keep snapshots reviewable.
+pub fn settings_32() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X3),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// PDF/X-1a validator. Uses the compact CMYK profile to keep snapshots reviewable.
+pub fn settings_33() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X1A),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// PDF/X-4p validator.
+pub fn settings_34() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X4P),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..settings_1()
+    }
+}
+
+// PDF/X-6 validator. Uses the compact CMYK profile to keep snapshots reviewable.
+pub fn settings_35() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X6),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// Combined PDF/A-1b + PDF/X-1a validator.
+pub fn settings_36() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::A1B_X1A),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// Combined PDF/A-2b + PDF/X-4 validator.
+pub fn settings_37() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::A2B_X4),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// Combined PDF/A-3b + PDF/X-4 validator.
+pub fn settings_38() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::A3B_X4),
+        cmyk_profile: Some(compact_test_cmyk_output_profile()),
+        ..settings_1()
+    }
+}
+
+// PDF/X-6p validator.
+pub fn settings_39() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X6P),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..settings_1()
+    }
+}
+
+pub fn pdfx_external_output_profile() -> ExternalOutputProfile {
+    ExternalOutputProfile::rgb(
+        ICCProfile::new(
+            &std::fs::read(WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap(),
+        )
+        .unwrap(),
+        vec!["https://example.com/profiles/sRGB-v4.icc".to_string()],
+        "Custom".to_string(),
+        "sRGB v4 ICC profile".to_string(),
+    )
+    .expect("test fixture ExternalOutputProfile is well-formed")
+    .with_output_condition("sRGB".to_string())
 }
 
 pub fn metadata_1() -> Metadata {

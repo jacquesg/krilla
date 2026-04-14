@@ -28,7 +28,7 @@ use std::fmt::Debug;
 
 use pdf_writer::types::OutputIntentSubtype;
 use pdf_writer::Finish;
-use xmp_writer::XmpWriter;
+use xmp_writer::{Namespace, XmpWriter};
 
 use crate::color::separation::SeparationColorant;
 use crate::color::separation::SeparationSpace;
@@ -39,7 +39,7 @@ use crate::surface::Location;
 use crate::text::Font;
 use crate::text::GlyphId;
 
-/// An error that occurred during validation/
+/// An error that occurred during validation.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ValidationError {
     /// There was a string that was longer than the maximum allowed length (32767).
@@ -81,6 +81,24 @@ pub enum ValidationError {
     /// Occurs if the export format requires a device-independent color representation,
     /// and a CMYK color was used in the document.
     MissingCMYKProfile,
+    /// No external output profile reference was provided for PDF/X-4p or
+    /// PDF/X-6p.
+    ///
+    /// Occurs if the export target is PDF/X-4p or PDF/X-6p and the caller did
+    /// not set [`SerializeSettings::external_output_profile`].
+    ///
+    /// [`SerializeSettings::external_output_profile`]:
+    /// crate::SerializeSettings::external_output_profile
+    MissingExternalOutputProfile,
+    /// An external output profile reference was provided for a validator
+    /// other than PDF/X-4p or PDF/X-6p.
+    ///
+    /// Occurs if a non-PDF/X-*p validator is configured but
+    /// [`SerializeSettings::external_output_profile`] is `Some`.
+    ///
+    /// [`SerializeSettings::external_output_profile`]:
+    /// crate::SerializeSettings::external_output_profile
+    ExternalOutputProfileUnsupportedByValidator,
     /// The same Separation colorant was used with multiple different fallback colors.
     ///
     /// Occurs if the user specified multiple Separation color spaces with the same colorant but a different fallback color.
@@ -140,9 +158,52 @@ pub enum ValidationError {
     /// This is currently forbidden in validated export because we cannot manually verify
     /// whether the file actually fulfills all the criteria for the export mode.
     EmbeddedPDF(Option<Location>),
+    /// The PDF contains an RGB color, which is forbidden by PDF/X-1a.
+    ///
+    /// Occurs if an RGB color was used in fills, strokes, gradients, images,
+    /// or separation fallback colors when exporting to PDF/X-1a. Grayscale
+    /// colors are permitted.
+    ContainsRgb(Option<Location>),
+    /// A gradient's stops are not all in the same color space.
+    ///
+    /// Occurs if the [`Stop`](crate::paint::Stop)s supplied to a
+    /// [`LinearGradient`](crate::paint::LinearGradient),
+    /// [`RadialGradient`](crate::paint::RadialGradient), or
+    /// [`SweepGradient`](crate::paint::SweepGradient) resolve to different
+    /// color spaces. krilla normalises the stops to the first stop's color
+    /// space when this happens.
+    MixedGradientColorSpaces(Option<Location>),
+    /// A page is missing both a TrimBox and an ArtBox, which is required by
+    /// PDF/X.
+    ///
+    /// Occurs if a page does not have either a TrimBox or an ArtBox set in
+    /// its [`PageSettings`](crate::page::PageSettings). The first field is
+    /// the zero-based index of the offending page.
+    MissingTrimOrArtBox(usize, Option<Location>),
+    /// The PDF contains annotations which are forbidden by PDF/X-1a.
+    ///
+    /// PDF/X-1a only allows TrapNet and PrinterMark annotations, neither of
+    /// which is supported by krilla.
+    ContainsAnnotation(Option<Location>),
 }
 
 /// A validator for exporting PDF documents to a specific subset of PDF.
+///
+/// # Variant naming
+///
+/// Variants follow the short-form ISO identifier of the standard they check:
+///
+/// - PDF/A part-and-conformance variants use `{Part}_{Conformance}` form
+///   (e.g. `A1_B`, `A2_U`, `A3_A`).
+/// - PDF/A-4 subforms (`A4`, `A4F`, `A4E`), PDF/UA (`UA1`), and PDF/X variants
+///   (`X1A`, `X4P`, `X6P`, …) use the ISO short-form without an internal
+///   separator, matching their specification names.
+/// - Combined PDF/A + PDF/X validators join the two short forms with an
+///   underscore, e.g. `A1B_X1A` = "PDF/A-1b + PDF/X-1a".
+///
+/// All identifiers are uppercase to match PDF-library conventions. The
+/// `#[allow(non_camel_case_types)]` attribute is required by the `A1_A`-style
+/// names and applies enum-wide.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[allow(non_camel_case_types)]
 pub enum Validator {
@@ -307,12 +368,103 @@ pub enum Validator {
     /// **Requirements**:
     /// - All requirements of PDF/A-4
     A4E,
+    /// The validator for the PDF/X-1a:2003 standard (ISO 15930-4).
+    ///
+    /// **Requirements**:
+    /// - A CMYK ICC profile must be provided via the `cmyk_profile` setting.
+    /// - Only CMYK, grayscale, and Separation colors may be used (no RGB).
+    /// - No transparency is allowed.
+    /// - No annotations are allowed (krilla only supports Link annotations,
+    ///   which are not permitted by PDF/X-1a).
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A document title must be set via metadata.
+    /// - A creation date must be set via metadata.
+    X1A,
+    /// The validator for the PDF/X-3:2003 standard (ISO 15930-6).
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    /// - No transparency is allowed.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A document title must be set via metadata.
+    /// - A creation date must be set via metadata.
+    X3,
+    /// The validator for the PDF/X-4 standard (ISO 15930-7).
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    X4,
+    /// The validator for the PDF/X-4p standard (ISO 15930-7).
+    ///
+    /// Like PDF/X-4, but the output intent ICC profile is referenced
+    /// externally instead of being embedded.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/X-4.
+    /// - The `external_output_profile` setting must be provided.
+    X4P,
+    /// The validator for the PDF/X-6 standard (ISO 15930-9).
+    ///
+    /// Based on PDF 2.0.
+    ///
+    /// **Requirements**:
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    X6,
+    /// The validator for the PDF/X-6p standard (ISO 15930-9).
+    ///
+    /// Like PDF/X-6, but the output intent ICC profile is referenced
+    /// externally instead of being embedded.
+    ///
+    /// Based on PDF 2.0.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/X-6.
+    /// - The `external_output_profile` setting must be provided.
+    X6P,
+    /// Combined PDF/A-1b + PDF/X-1a:2003 validator.
+    ///
+    /// Both standards are enforced simultaneously. The most restrictive
+    /// requirement from each standard applies.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/A-1b.
+    /// - All requirements of PDF/X-1a.
+    A1B_X1A,
+    /// Combined PDF/A-2b + PDF/X-4 validator.
+    ///
+    /// Both standards are enforced simultaneously. The most restrictive
+    /// requirement from each standard applies.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/A-2b.
+    /// - All requirements of PDF/X-4.
+    A2B_X4,
+    /// Combined PDF/A-3b + PDF/X-4 validator.
+    ///
+    /// Both standards are enforced simultaneously. The most restrictive
+    /// requirement from each standard applies.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/A-3b.
+    /// - All requirements of PDF/X-4.
+    A3B_X4,
 }
 
 impl Validator {
     pub(crate) fn prohibits(&self, validation_error: &ValidationError) -> bool {
         match self {
-            Validator::None => false,
+            Validator::None => matches!(
+                validation_error,
+                ValidationError::MixedGradientColorSpaces(_)
+                    | ValidationError::ExternalOutputProfileUnsupportedByValidator
+            ),
             Validator::A1_A | Validator::A1_B => match validation_error {
                 ValidationError::TooLongString => true,
                 ValidationError::TooLongName => true,
@@ -323,6 +475,8 @@ impl Validator {
                 ValidationError::TooHighQNestingLevel => true,
                 ValidationError::ContainsPostScript(_) => true,
                 ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
                 ValidationError::InconsistentSeparationFallback(_) => false,
                 ValidationError::ContainsNotDefGlyph(_, _, _) => self.requires_codepoint_mappings(),
                 ValidationError::NoCodepointMapping(_, _, _) => self.requires_codepoint_mappings(),
@@ -351,6 +505,10 @@ impl Validator {
                 ValidationError::MissingTagging => *self == Validator::A1_A,
                 ValidationError::MissingDocumentDate => true,
                 ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
             },
             Validator::A2_A | Validator::A2_B | Validator::A2_U => match validation_error {
                 ValidationError::TooLongString => true,
@@ -362,6 +520,8 @@ impl Validator {
                 ValidationError::TooHighQNestingLevel => true,
                 ValidationError::ContainsPostScript(_) => true,
                 ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
                 ValidationError::InconsistentSeparationFallback(_) => true,
                 ValidationError::ContainsNotDefGlyph(_, _, _) => true,
                 ValidationError::NoCodepointMapping(_, _, _)
@@ -392,6 +552,10 @@ impl Validator {
                 ValidationError::MissingTagging => *self == Validator::A2_A,
                 ValidationError::MissingDocumentDate => true,
                 ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
             },
             Validator::A3_A | Validator::A3_B | Validator::A3_U => match validation_error {
                 ValidationError::TooLongString => true,
@@ -403,6 +567,8 @@ impl Validator {
                 ValidationError::TooHighQNestingLevel => true,
                 ValidationError::ContainsPostScript(_) => true,
                 ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
                 ValidationError::InconsistentSeparationFallback(_) => true,
                 ValidationError::ContainsNotDefGlyph(_, _, _) => true,
                 ValidationError::NoCodepointMapping(_, _, _)
@@ -428,6 +594,10 @@ impl Validator {
                 ValidationError::MissingTagging => *self == Validator::A3_A,
                 ValidationError::MissingDocumentDate => true,
                 ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
             },
             Validator::A4 | Validator::A4F | Validator::A4E => match validation_error {
                 ValidationError::TooLongString => false,
@@ -439,6 +609,8 @@ impl Validator {
                 ValidationError::TooHighQNestingLevel => false,
                 ValidationError::ContainsPostScript(_) => false,
                 ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
                 ValidationError::InconsistentSeparationFallback(_) => true,
                 ValidationError::ContainsNotDefGlyph(_, _, _) => true,
                 ValidationError::NoCodepointMapping(_, _, _)
@@ -470,6 +642,10 @@ impl Validator {
                 ValidationError::MissingTagging => false,
                 ValidationError::MissingDocumentDate => true,
                 ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
             },
             Validator::UA1 => match validation_error {
                 ValidationError::TooLongString => false,
@@ -481,6 +657,8 @@ impl Validator {
                 ValidationError::TooHighQNestingLevel => false,
                 ValidationError::ContainsPostScript(_) => false,
                 ValidationError::MissingCMYKProfile => false,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
                 ValidationError::InconsistentSeparationFallback(_) => false,
                 ValidationError::ContainsNotDefGlyph(_, _, _) => true,
                 ValidationError::NoCodepointMapping(_, _, _)
@@ -506,6 +684,283 @@ impl Validator {
                 ValidationError::MissingTagging => true,
                 ValidationError::MissingDocumentDate => false,
                 ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
+            Validator::X1A => match validation_error {
+                ValidationError::TooLongString => true,
+                ValidationError::TooLongName => true,
+                ValidationError::TooLongArray => true,
+                ValidationError::TooLargeFloat => true,
+                ValidationError::TooLongDictionary => true,
+                ValidationError::TooManyIndirectObjects => true,
+                ValidationError::TooHighQNestingLevel => true,
+                ValidationError::ContainsPostScript(_) => true,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => false,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => true,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => true,
+                ValidationError::ImageInterpolation(_) => false,
+                // ISO 15930-4 forbids embedded files.
+                ValidationError::EmbeddedFile(e, _) => match e {
+                    EmbedError::Existence => true,
+                    EmbedError::MissingDate => false,
+                    EmbedError::MissingDescription => false,
+                    EmbedError::MissingMimeType => false,
+                },
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => true,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => true,
+            },
+            Validator::X3 => match validation_error {
+                ValidationError::TooLongString => true,
+                ValidationError::TooLongName => true,
+                ValidationError::TooLongArray => true,
+                ValidationError::TooLargeFloat => true,
+                ValidationError::TooLongDictionary => true,
+                ValidationError::TooManyIndirectObjects => true,
+                ValidationError::TooHighQNestingLevel => true,
+                ValidationError::ContainsPostScript(_) => true,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => true,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => true,
+                ValidationError::ImageInterpolation(_) => false,
+                ValidationError::EmbeddedFile(_, _) => false,
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
+            Validator::X4 | Validator::X4P => match validation_error {
+                ValidationError::TooLongString => false,
+                ValidationError::TooLongName => false,
+                ValidationError::TooLongArray => false,
+                ValidationError::TooLargeFloat => false,
+                ValidationError::TooLongDictionary => false,
+                ValidationError::TooManyIndirectObjects => false,
+                ValidationError::TooHighQNestingLevel => false,
+                ValidationError::ContainsPostScript(_) => false,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => *self == Validator::X4P,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => {
+                    *self != Validator::X4P
+                }
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => false,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => false,
+                ValidationError::ImageInterpolation(_) => false,
+                ValidationError::EmbeddedFile(_, _) => false,
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
+            Validator::X6 | Validator::X6P => match validation_error {
+                ValidationError::TooLongString => false,
+                ValidationError::TooLongName => false,
+                ValidationError::TooLongArray => false,
+                ValidationError::TooLargeFloat => false,
+                ValidationError::TooLongDictionary => false,
+                ValidationError::TooManyIndirectObjects => false,
+                ValidationError::TooHighQNestingLevel => false,
+                ValidationError::ContainsPostScript(_) => false,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => *self == Validator::X6P,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => {
+                    *self != Validator::X6P
+                }
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => false,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => false,
+                ValidationError::ImageInterpolation(_) => false,
+                ValidationError::EmbeddedFile(_, _) => false,
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
+            // Composite: union of A1_B and X1A restrictions.
+            Validator::A1B_X1A => match validation_error {
+                ValidationError::TooLongString => true,
+                ValidationError::TooLongName => true,
+                ValidationError::TooLongArray => true,
+                ValidationError::TooLargeFloat => true,
+                ValidationError::TooLongDictionary => true,
+                ValidationError::TooManyIndirectObjects => true,
+                ValidationError::TooHighQNestingLevel => true,
+                ValidationError::ContainsPostScript(_) => true,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => false,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => true,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => true,
+                ValidationError::ImageInterpolation(_) => true,
+                ValidationError::EmbeddedFile(e, _) => match e {
+                    EmbedError::Existence => true,
+                    EmbedError::MissingDate => false,
+                    EmbedError::MissingDescription => false,
+                    EmbedError::MissingMimeType => false,
+                },
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => true,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => true,
+            },
+            // Composite: union of A2_B and X4 restrictions.
+            Validator::A2B_X4 => match validation_error {
+                ValidationError::TooLongString => true,
+                ValidationError::TooLongName => true,
+                ValidationError::TooLongArray => false,
+                ValidationError::TooLargeFloat => false,
+                ValidationError::TooLongDictionary => false,
+                ValidationError::TooManyIndirectObjects => true,
+                ValidationError::TooHighQNestingLevel => true,
+                ValidationError::ContainsPostScript(_) => true,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => false,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => false,
+                ValidationError::ImageInterpolation(_) => true,
+                ValidationError::EmbeddedFile(e, _) => match e {
+                    EmbedError::Existence => true,
+                    EmbedError::MissingDate => false,
+                    EmbedError::MissingDescription => false,
+                    EmbedError::MissingMimeType => false,
+                },
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
+            // Composite: union of A3_B and X4 restrictions.
+            Validator::A3B_X4 => match validation_error {
+                ValidationError::TooLongString => true,
+                ValidationError::TooLongName => true,
+                ValidationError::TooLongArray => false,
+                ValidationError::TooLargeFloat => false,
+                ValidationError::TooLongDictionary => false,
+                ValidationError::TooManyIndirectObjects => true,
+                ValidationError::TooHighQNestingLevel => true,
+                ValidationError::ContainsPostScript(_) => true,
+                ValidationError::MissingCMYKProfile => true,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => false,
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                ValidationError::NoDocumentLanguage => false,
+                ValidationError::NoDocumentTitle => false,
+                ValidationError::MissingAltText(_) => false,
+                ValidationError::MissingHeadingTitle => false,
+                ValidationError::MissingDocumentOutline => false,
+                ValidationError::MissingAnnotationAltText(_) => false,
+                ValidationError::Transparency(_) => false,
+                ValidationError::ImageInterpolation(_) => true,
+                ValidationError::EmbeddedFile(er, _) => match er {
+                    EmbedError::Existence => false,
+                    EmbedError::MissingDate => true,
+                    EmbedError::MissingDescription => true,
+                    EmbedError::MissingMimeType => true,
+                },
+                ValidationError::MissingTagging => false,
+                ValidationError::MissingDocumentDate => true,
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => true,
+                ValidationError::ContainsAnnotation(_) => false,
             },
         }
     }
@@ -520,6 +975,11 @@ impl Validator {
             // It can be any 2.x version, but we're not there yet.
             Validator::A4 | Validator::A4F | Validator::A4E => pdf_version == PdfVersion::Pdf20,
             Validator::UA1 => pdf_version <= PdfVersion::Pdf17,
+            Validator::X1A | Validator::X3 | Validator::A1B_X1A => pdf_version <= PdfVersion::Pdf14,
+            Validator::X4 | Validator::X4P | Validator::A2B_X4 | Validator::A3B_X4 => {
+                pdf_version == PdfVersion::Pdf16
+            }
+            Validator::X6 | Validator::X6P => pdf_version == PdfVersion::Pdf20,
         }
     }
 
@@ -532,9 +992,19 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => PdfVersion::Pdf17,
             Validator::A4 | Validator::A4F | Validator::A4E => PdfVersion::Pdf20,
             Validator::UA1 => PdfVersion::Pdf17,
+            Validator::X1A | Validator::X3 | Validator::A1B_X1A => PdfVersion::Pdf14,
+            Validator::X4 | Validator::X4P | Validator::A2B_X4 | Validator::A3B_X4 => {
+                PdfVersion::Pdf16
+            }
+            Validator::X6 | Validator::X6P => PdfVersion::Pdf20,
         }
     }
 
+    /// Whether this validator enforces any PDF/A standard.
+    ///
+    /// Includes combined PDF/A + PDF/X validators (`A1B_X1A`, `A2B_X4`,
+    /// `A3B_X4`) — those must satisfy both the PDF/A and the PDF/X
+    /// requirements, so the PDF/A leg reports `true` here.
     fn is_pdf_a(&self) -> bool {
         matches!(
             self,
@@ -549,6 +1019,25 @@ impl Validator {
                 | Validator::A4
                 | Validator::A4F
                 | Validator::A4E
+                | Validator::A1B_X1A
+                | Validator::A2B_X4
+                | Validator::A3B_X4
+        )
+    }
+
+    /// Whether this validator enforces any PDF/X standard.
+    pub(crate) fn is_pdf_x(&self) -> bool {
+        matches!(
+            self,
+            Validator::X1A
+                | Validator::X3
+                | Validator::X4
+                | Validator::X4P
+                | Validator::X6
+                | Validator::X6P
+                | Validator::A1B_X1A
+                | Validator::A2B_X4
+                | Validator::A3B_X4
         )
     }
 
@@ -561,6 +1050,17 @@ impl Validator {
                 .properties()
                 .describe_instance_id();
             extension_schemas.pdf().properties().describe_all();
+            if self.requires_pdfx_extension_schema() {
+                let mut schema = extension_schemas.add_schema();
+                schema.namespace(Namespace::PdfXId);
+                schema
+                    .properties()
+                    .add_property()
+                    .category(true)
+                    .description("Version of the PDF/X standard to which the document conforms")
+                    .name("GTS_PDFXVersion")
+                    .value_type("Text");
+            }
             extension_schemas.finish();
         }
 
@@ -615,6 +1115,32 @@ impl Validator {
             Validator::UA1 => {
                 xmp.pdfua_part(1);
             }
+            Validator::X1A => {
+                xmp.pdfx_version("PDF/X-1a:2003");
+            }
+            Validator::X3 => {
+                xmp.pdfx_version("PDF/X-3:2003");
+            }
+            Validator::X4 | Validator::X4P | Validator::X6 | Validator::X6P => {
+                if let Some(v) = self.gts_pdfx_version_string() {
+                    xmp.pdfx_version(v);
+                }
+            }
+            Validator::A1B_X1A => {
+                xmp.pdfa_part(1);
+                xmp.pdfa_conformance("B");
+                xmp.pdfx_version("PDF/X-1a:2003");
+            }
+            Validator::A2B_X4 => {
+                xmp.pdfa_part(2);
+                xmp.pdfa_conformance("B");
+                xmp.pdfx_version("PDF/X-4");
+            }
+            Validator::A3B_X4 => {
+                xmp.pdfa_part(3);
+                xmp.pdfa_conformance("B");
+                xmp.pdfx_version("PDF/X-4");
+            }
         }
     }
 
@@ -626,6 +1152,16 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => *self != Validator::A3_B,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => true,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P => false,
+            // Composites inherit from their PDF/A constituent.
+            Validator::A1B_X1A => false, // A1_B doesn't require it
+            Validator::A2B_X4 => false,  // A2_B doesn't require it
+            Validator::A3B_X4 => false,  // A3_B doesn't require it
         }
     }
 
@@ -637,6 +1173,15 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => true,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => false,
         }
     }
 
@@ -648,6 +1193,14 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            Validator::X1A | Validator::A1B_X1A => false,
+            Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => true,
         }
     }
 
@@ -658,6 +1211,10 @@ impl Validator {
             Validator::A2_A | Validator::A2_B | Validator::A2_U => true,
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
+            // X1A forbids annotations entirely, so flags are irrelevant.
+            Validator::X1A | Validator::A1B_X1A => false,
+            Validator::X3 | Validator::X4 | Validator::X4P | Validator::X6 | Validator::X6P => true,
+            Validator::A2B_X4 | Validator::A3B_X4 => true,
         }
     }
 
@@ -672,6 +1229,15 @@ impl Validator {
             Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => true,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => false,
         }
     }
 
@@ -683,6 +1249,15 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => true,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => true,
         }
     }
 
@@ -694,6 +1269,15 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => true,
         }
     }
 
@@ -705,6 +1289,14 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P => false,
+            // Composites inherit from PDF/A.
+            Validator::A1B_X1A | Validator::A2B_X4 | Validator::A3B_X4 => true,
         }
     }
 
@@ -716,17 +1308,40 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => false,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P => false,
+            // A1B_X1A inherits from A1_B.
+            Validator::A1B_X1A => true,
+            Validator::A2B_X4 | Validator::A3B_X4 => false,
         }
     }
 
-    pub(crate) fn output_intent(&self) -> Option<OutputIntentSubtype<'_>> {
+    /// Return the output intent subtypes required by this validator.
+    pub(crate) fn output_intents(&self) -> Vec<OutputIntentSubtype<'_>> {
         match self {
-            Validator::None => None,
-            Validator::A1_A | Validator::A1_B => Some(OutputIntentSubtype::PDFA),
-            Validator::A2_A | Validator::A2_B | Validator::A2_U => Some(OutputIntentSubtype::PDFA),
-            Validator::A3_A | Validator::A3_B | Validator::A3_U => Some(OutputIntentSubtype::PDFA),
-            Validator::A4 | Validator::A4F | Validator::A4E => Some(OutputIntentSubtype::PDFA),
-            Validator::UA1 => None,
+            Validator::None | Validator::UA1 => vec![],
+            Validator::A1_A | Validator::A1_B => vec![OutputIntentSubtype::PDFA],
+            Validator::A2_A | Validator::A2_B | Validator::A2_U => {
+                vec![OutputIntentSubtype::PDFA]
+            }
+            Validator::A3_A | Validator::A3_B | Validator::A3_U => {
+                vec![OutputIntentSubtype::PDFA]
+            }
+            Validator::A4 | Validator::A4F | Validator::A4E => vec![OutputIntentSubtype::PDFA],
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P => vec![OutputIntentSubtype::PDFX],
+            // Composites need both output intents.
+            Validator::A1B_X1A | Validator::A2B_X4 | Validator::A3B_X4 => {
+                vec![OutputIntentSubtype::PDFA, OutputIntentSubtype::PDFX]
+            }
         }
     }
 
@@ -743,6 +1358,15 @@ impl Validator {
             | Validator::A3_U
             | Validator::UA1 => true,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
+            Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => true,
         }
     }
 
@@ -759,7 +1383,16 @@ impl Validator {
             | Validator::A3_U
             | Validator::A4
             | Validator::A4E
-            | Validator::UA1 => !is_empty,
+            | Validator::UA1
+            | Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4
+            | Validator::A3B_X4 => !is_empty,
             // For this one we always need to write an `EmbeddedFiles` entry,
             // even if empty.
             Validator::A4F => true,
@@ -779,7 +1412,17 @@ impl Validator {
             | Validator::A2_A
             | Validator::A2_B
             | Validator::A2_U
-            | Validator::UA1 => false,
+            | Validator::UA1
+            | Validator::X1A
+            | Validator::X3
+            | Validator::X4
+            | Validator::X4P
+            | Validator::X6
+            | Validator::X6P
+            | Validator::A1B_X1A
+            | Validator::A2B_X4 => false,
+            // A3B_X4 inherits from A3_B which allows associated files.
+            Validator::A3B_X4 => true,
         }
     }
 
@@ -799,6 +1442,123 @@ impl Validator {
             Validator::A4F => "PDF/A-4f",
             Validator::A4E => "PDF/A-4e",
             Validator::UA1 => "PDF/UA-1",
+            Validator::X1A => "PDF/X-1a",
+            Validator::X3 => "PDF/X-3",
+            Validator::X4 => "PDF/X-4",
+            Validator::X4P => "PDF/X-4p",
+            Validator::X6 => "PDF/X-6",
+            Validator::X6P => "PDF/X-6p",
+            Validator::A1B_X1A => "PDF/A-1b + PDF/X-1a",
+            Validator::A2B_X4 => "PDF/A-2b + PDF/X-4",
+            Validator::A3B_X4 => "PDF/A-3b + PDF/X-4",
+        }
+    }
+}
+
+impl core::fmt::Display for Validator {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Validator {
+    /// Whether this validator requires CMYK-only colors (no RGB).
+    pub(crate) fn requires_cmyk_only(&self) -> bool {
+        matches!(self, Validator::X1A | Validator::A1B_X1A)
+    }
+
+    pub(crate) fn requires_external_output_profile(&self) -> bool {
+        matches!(self, Validator::X4P | Validator::X6P)
+    }
+
+    pub(crate) fn requires_pdfx_extension_schema(&self) -> bool {
+        self.is_pdf_a() && self.is_pdf_x()
+    }
+
+    /// Whether this validator forbids all annotations.
+    pub(crate) fn forbids_annotations(&self) -> bool {
+        matches!(self, Validator::X1A | Validator::A1B_X1A)
+    }
+
+    /// Whether this validator requires a TrimBox or ArtBox on every page.
+    pub(crate) fn requires_trim_or_art_box(&self) -> bool {
+        self.is_pdf_x()
+    }
+
+    /// Whether this validator requires trapping metadata to be written.
+    pub(crate) fn requires_trapping_metadata(&self) -> bool {
+        self.is_pdf_x()
+    }
+
+    /// Whether a CMYK output profile should be used when emitting the
+    /// OutputIntent dictionary for the given subtype.
+    ///
+    /// For plain PDF/X validators this is true for the PDFX subtype; the PDFA
+    /// subtype (if emitted) uses sRGB.
+    ///
+    /// For combined PDF/A + PDF/X validators this returns `true` for **both**
+    /// subtypes: the PDFA and PDFX OutputIntent dictionaries reference the
+    /// same CMYK device target. That is expected by prepress workflows and is
+    /// permitted by ISO 15930-7 (PDF/X-4) and ISO 19005-2 §6.2.2 (PDF/A-2),
+    /// which allow multiple OutputIntents provided they name the same output
+    /// condition.
+    pub(crate) fn uses_cmyk_output_profile_for_subtype(
+        &self,
+        subtype: OutputIntentSubtype<'_>,
+    ) -> bool {
+        self.is_pdf_x()
+            && !self.requires_external_output_profile()
+            && (subtype == OutputIntentSubtype::PDFX || self.is_pdf_a())
+    }
+
+    pub(crate) fn requires_xmp_metadata_date(&self) -> bool {
+        matches!(
+            self,
+            Validator::X4
+                | Validator::X4P
+                | Validator::X6
+                | Validator::X6P
+                | Validator::A2B_X4
+                | Validator::A3B_X4
+        )
+    }
+
+    pub(crate) fn requires_xmp_version_id(&self) -> bool {
+        matches!(
+            self,
+            Validator::X4
+                | Validator::X4P
+                | Validator::X6
+                | Validator::X6P
+                | Validator::A2B_X4
+                | Validator::A3B_X4
+        )
+    }
+
+    /// The GTS_PDFXVersion identification string for this validator.
+    ///
+    /// Returns `None` for non-PDF/X validators.
+    pub(crate) fn gts_pdfx_version_string(&self) -> Option<&'static str> {
+        match self {
+            Validator::None
+            | Validator::A1_A
+            | Validator::A1_B
+            | Validator::A2_A
+            | Validator::A2_B
+            | Validator::A2_U
+            | Validator::A3_A
+            | Validator::A3_B
+            | Validator::A3_U
+            | Validator::A4
+            | Validator::A4F
+            | Validator::A4E
+            | Validator::UA1 => None,
+            Validator::X1A | Validator::A1B_X1A => Some("PDF/X-1a:2003"),
+            Validator::X3 => Some("PDF/X-3:2003"),
+            Validator::X4 | Validator::A2B_X4 | Validator::A3B_X4 => Some("PDF/X-4"),
+            Validator::X4P => Some("PDF/X-4p"),
+            Validator::X6 => Some("PDF/X-6"),
+            Validator::X6P => Some("PDF/X-6p"),
         }
     }
 }

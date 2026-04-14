@@ -396,6 +396,9 @@ impl Image {
         let cs = {
             let cs = match self.color_space() {
                 ImageColorspace::Rgb => {
+                    if sc.serialize_settings().validator().requires_cmyk_only() {
+                        sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                    }
                     rgb::color_space(sc.serialize_settings().no_device_cs).into()
                 }
                 ImageColorspace::Luma => {

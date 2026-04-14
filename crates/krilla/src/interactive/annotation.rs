@@ -68,6 +68,12 @@ impl Annotation {
         root_ref: Ref,
         page_height: f32,
     ) -> KrillaResult<Chunk> {
+        // PDF/X-1a: only TrapNet and PrinterMark annotations are allowed.
+        // krilla only supports Link annotations, which are forbidden.
+        if sc.serialize_settings().validator().forbids_annotations() {
+            sc.register_validation_error(ValidationError::ContainsAnnotation(self.location));
+        }
+
         let mut chunk = Chunk::new();
         let mut annotation = chunk
             .indirect(root_ref)

@@ -953,7 +953,8 @@ impl ContentBuilder {
             // renderers, and ensures pdfium correctly extracts font metadata
             // from text within CSS transforms.
             if self.root_transform != Transform::identity() {
-                self.content.transform(self.root_transform.to_pdf_transform());
+                self.content
+                    .transform(self.root_transform.to_pdf_transform());
             }
             let user_transform = self.cur_transform();
             if user_transform != Transform::identity() {
@@ -1001,6 +1002,12 @@ impl ContentBuilder {
              sc: &mut SerializeContext,
              transform: Transform,
              content_builder: &mut ContentBuilder| {
+                if gradient_props.is_empty() {
+                    // No stops means there's nothing to render. Avoid
+                    // allocating a shading reference that we wouldn't be able
+                    // to serialise.
+                    return;
+                }
                 if let Some((color, opacity)) = gradient_props.single_stop_color() {
                     // Write gradients with one stop as a solid color fill.
                     content_builder.set_fill_opacity(opacity);

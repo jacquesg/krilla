@@ -1,14 +1,11 @@
 [workspace]
 resolver = "2"
-members = [
-    "crates/*",
-    "codegen",
-]
+members = ["crates/*", "codegen"]
 
 [workspace.package]
 authors = ["Laurenz Stampfl <laurenz.stampfl@gmail.com>"]
 edition = "2021"
-rust-version = "1.89" # also change in ci.yml
+rust-version = "1.89"                                     # also change in ci.yml
 repository = "https://github.com/LaurenzV/krilla"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
@@ -18,7 +15,7 @@ base64 = "0.22.1"
 bumpalo = "3.16.0"
 comemo = "0.5.0"
 difference = "2.0.0"
-flate2 = {version = "1.1.0", default-features = false, features = ["zlib-rs"]}
+flate2 = { version = "1.1.0", default-features = false, features = ["zlib-rs"] }
 float-cmp = "0.10.0"
 fontdb = "0.23.0"
 gif = "0.13.1"
@@ -27,6 +24,7 @@ image = { version = "0.25.1", default-features = false }
 imagesize = "0.14.0"
 image-webp = "0.2.1"
 indexmap = "2.10.0"
+md-5 = "0.10.6"
 krilla = { path = "crates/krilla", version = "0.7.0" }
 krilla-svg = { path = "crates/krilla-svg", version = "0.7.0" }
 krilla-macros = { path = "crates/krilla-macros" }
@@ -55,4 +53,4 @@ xmp-writer = "0.3.2"
 yoke = { version = "0.8.0", features = ["derive"] }
 png = "0.17.16"
 zune-jpeg = "0.5.5"
- 
+

@@ -8,7 +8,7 @@ use pdf_writer::types::TabOrder;
 use pdf_writer::writers::NumberTree;
 use pdf_writer::{Chunk, Finish, Ref, TextStr};
 
-use crate::configure::PdfVersion;
+use crate::configure::{PdfVersion, ValidationError};
 use crate::content::ContentBuilder;
 use crate::error::KrillaResult;
 use crate::geom::{Rect, Size, Transform};
@@ -444,6 +444,20 @@ impl InternalPage {
         if let Some(art_box) = self.page_settings.art_box() {
             let art_box = transform_rect(art_box);
             page.art_box(art_box.to_pdf_rect());
+        }
+
+        // PDF/X: every page must have a TrimBox or ArtBox.
+        if sc
+            .serialize_settings()
+            .validator()
+            .requires_trim_or_art_box()
+            && self.page_settings.trim_box().is_none()
+            && self.page_settings.art_box().is_none()
+        {
+            sc.register_validation_error(ValidationError::MissingTrimOrArtBox(
+                self.page_index,
+                sc.location,
+            ));
         }
 
         if let Some(rotate) = self.page_settings.rotate() {

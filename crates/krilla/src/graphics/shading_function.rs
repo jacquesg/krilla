@@ -11,7 +11,7 @@ use crate::chunk_container::ChunkContainerFn;
 use crate::configure::ValidationError;
 use crate::geom::{Rect, Transform};
 use crate::graphics::color::luma;
-use crate::graphics::color::Color;
+use crate::graphics::color::{Color, ColorSpace};
 use crate::graphics::paint::{LinearGradient, RadialGradient, SweepGradient};
 use crate::graphics::paint::{SpreadMethod, Stop};
 use crate::num::NormalizedF32;
@@ -100,6 +100,17 @@ impl GradientProperties {
         }
 
         None
+    }
+
+    /// Whether this gradient has no stops at all. Such a gradient is not
+    /// renderable and should be skipped rather than fall through to shading
+    /// serialisation — the `stops` field on the public gradient structs is
+    /// `pub Vec<Stop>`, so an empty vector is constructible by callers.
+    pub(crate) fn is_empty(&self) -> bool {
+        match self {
+            GradientProperties::RadialAxialGradient(rag) => rag.stops.is_empty(),
+            GradientProperties::PostScriptGradient(psg) => psg.stops.is_empty(),
+        }
     }
 }
 
@@ -250,6 +261,43 @@ impl Resourceable for ShadingFunction {
     type Resource = resource::Shading;
 }
 
+/// Normalise gradient stops so they all share a single colour space.
+///
+/// Returns `None` if `stops` is empty — callers should skip emitting a
+/// shading altogether in that case. An empty `stops` vector is permitted by
+/// the public `LinearGradient`/`RadialGradient`/`SweepGradient` structs, so we
+/// cannot assume non-emptiness here.
+fn sanitize_gradient_stops(
+    stops: &[Stop],
+    sc: &mut SerializeContext,
+) -> Option<(Vec<Stop>, ColorSpace)> {
+    let (first, rest) = stops.split_first()?;
+    let first_color_space = first.color.color_space(sc);
+    let mut sanitized = Vec::with_capacity(stops.len());
+    let mut mixed_color_spaces = false;
+
+    sanitized.push(first.clone());
+
+    for stop in rest {
+        let stop_color_space = stop.color.color_space(sc);
+
+        if stop_color_space == first_color_space {
+            sanitized.push(stop.clone());
+        } else {
+            mixed_color_spaces = true;
+            let mut sanitized_stop = stop.clone();
+            sanitized_stop.color = first.color.clone();
+            sanitized.push(sanitized_stop);
+        }
+    }
+
+    if mixed_color_spaces {
+        sc.register_validation_error(ValidationError::MixedGradientColorSpaces(sc.location));
+    }
+
+    Some((sanitized, first_color_space))
+}
+
 fn serialize_postscript_shading(
     sc: &mut SerializeContext,
     chunk: &mut Chunk,
@@ -258,14 +306,25 @@ fn serialize_postscript_shading(
     use_opacities: bool,
 ) {
     let domain = post_script_gradient.domain;
+    let Some((stops, color_space)) = sanitize_gradient_stops(&post_script_gradient.stops, sc)
+    else {
+        // Empty stop list: no visible gradient to emit.
+        return;
+    };
 
     let bump = Bump::new();
-    let function_ref =
-        select_postscript_function(post_script_gradient, chunk, sc, &bump, use_opacities);
+    let function_ref = select_postscript_function(
+        post_script_gradient,
+        &stops,
+        chunk,
+        sc,
+        &bump,
+        use_opacities,
+    );
     let cs = if use_opacities {
         luma::color_space(sc.serialize_settings().no_device_cs).into()
     } else {
-        post_script_gradient.stops[0].color.color_space(sc)
+        color_space
     };
 
     let mut shading = chunk.function_shading(root_ref);
@@ -290,12 +349,16 @@ fn serialize_axial_radial_shading(
     radial_axial_gradient: &RadialAxialGradient,
     use_opacities: bool,
 ) {
-    let function_ref =
-        select_axial_radial_function(radial_axial_gradient, chunk, sc, use_opacities);
+    let Some((stops, color_space)) = sanitize_gradient_stops(&radial_axial_gradient.stops, sc)
+    else {
+        // Empty stop list: no visible gradient to emit.
+        return;
+    };
+    let function_ref = select_axial_radial_function(&stops, chunk, sc, use_opacities);
     let cs = if use_opacities {
         luma::color_space(sc.serialize_settings().no_device_cs).into()
     } else {
-        radial_axial_gradient.stops[0].color.color_space(sc)
+        color_space
     };
 
     let mut shading = chunk.function_shading(root_ref);
@@ -315,14 +378,14 @@ fn serialize_axial_radial_shading(
 }
 
 fn select_axial_radial_function(
-    properties: &RadialAxialGradient,
+    stops: &[Stop],
     chunk: &mut Chunk,
     sc: &mut SerializeContext,
     use_opacities: bool,
 ) -> Ref {
-    debug_assert!(properties.stops.len() > 1);
+    debug_assert!(stops.len() > 1);
 
-    let mut stops = properties.stops.clone();
+    let mut stops = stops.to_vec();
 
     if let Some(first) = stops.first() {
         if first.offset.get() != 0.0 {
@@ -371,17 +434,18 @@ fn select_axial_radial_function(
 
 fn select_postscript_function(
     properties: &PostScriptGradient,
+    stops: &[Stop],
     chunk: &mut Chunk,
     sc: &mut SerializeContext,
     bump: &Bump,
     use_opacities: bool,
 ) -> Ref {
-    debug_assert!(properties.stops.len() > 1);
+    debug_assert!(stops.len() > 1);
 
     if properties.gradient_type == GradientType::Linear {
-        serialize_linear_postscript(properties, chunk, sc, use_opacities)
+        serialize_linear_postscript(properties, stops, chunk, sc, use_opacities)
     } else if properties.gradient_type == GradientType::Sweep {
-        serialize_sweep_postscript(properties, chunk, sc, bump, use_opacities)
+        serialize_sweep_postscript(properties, stops, chunk, sc, bump, use_opacities)
     } else {
         todo!();
     }
@@ -419,6 +483,7 @@ fn select_postscript_function(
 
 fn serialize_sweep_postscript(
     properties: &PostScriptGradient,
+    stops: &[Stop],
     chunk: &mut Chunk,
     sc: &mut SerializeContext,
     bump: &Bump,
@@ -457,7 +522,7 @@ fn serialize_sweep_postscript(
     ]);
 
     encode_spread_method(min, max, &mut code, bump, properties.spread_method);
-    encode_postscript_stops(&properties.stops, min, max, &mut code, bump, use_opacities);
+    encode_postscript_stops(stops, min, max, &mut code, bump, use_opacities);
 
     let encoded = PostScriptOp::encode(&code);
     sc.register_limits(encoded.limits());
@@ -499,6 +564,7 @@ fn trim_stops(stops: &[Stop]) -> Vec<Stop> {
 
 fn serialize_linear_postscript(
     properties: &PostScriptGradient,
+    stops: &[Stop],
     chunk: &mut Chunk,
     sc: &mut SerializeContext,
     use_opacities: bool,
@@ -520,7 +586,7 @@ fn serialize_linear_postscript(
     ]);
 
     encode_spread_method(min, max, &mut code, &bump, properties.spread_method);
-    encode_postscript_stops(&properties.stops, min, max, &mut code, &bump, use_opacities);
+    encode_postscript_stops(stops, min, max, &mut code, &bump, use_opacities);
 
     let encoded = PostScriptOp::encode(&code);
     sc.register_limits(encoded.limits());

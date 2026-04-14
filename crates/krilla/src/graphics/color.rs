@@ -129,7 +129,12 @@ impl Color {
 impl RegularColor {
     pub(crate) fn color_space(&self, sc: &mut SerializeContext) -> RegularColorSpace {
         match self {
-            Self::Rgb(r) => r.color_space(sc.serialize_settings().no_device_cs),
+            Self::Rgb(r) => {
+                if sc.serialize_settings().validator().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
+                r.color_space(sc.serialize_settings().no_device_cs)
+            }
             Self::Luma(_) => luma::color_space(sc.serialize_settings().no_device_cs),
             Self::Cmyk(_) => match cmyk::color_space(&sc.serialize_settings()) {
                 None => {

@@ -1,6 +1,6 @@
 use krilla::action::LinkAction;
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
-use krilla::color::{rgb, separation};
+use krilla::color::{cmyk, luma, rgb, separation};
 use krilla::configure::ValidationError;
 use krilla::embed::EmbedError;
 use krilla::error::KrillaError;
@@ -8,8 +8,7 @@ use krilla::geom::{Point, Rect, Size};
 use krilla::metadata::{DateTime, Metadata};
 use krilla::num::NormalizedF32;
 use krilla::outline::Outline;
-use krilla::page::Page;
-use krilla::paint::{Fill, FillRule, LinearGradient, SpreadMethod};
+use krilla::paint::{Fill, FillRule, LinearGradient, SpreadMethod, Stop};
 use krilla::tagging::{ArtifactType, ContentTag, SpanTag, TagGroup, TagKind, TagTree};
 use krilla::tagging::{ListNumbering, TableHeaderScope, Tag};
 use krilla::text::{Font, TextDirection};
@@ -19,14 +18,17 @@ use krilla_macros::snapshot;
 use crate::embed::{embedded_file_impl, file_1};
 use crate::{
     blue_fill, cmyk_fill, dummy_text_with_spans, green_fill, load_jpg_image, load_png_image, loc,
-    metadata_1, rect_to_path, red_fill, settings_13, settings_15, settings_19, settings_20,
-    settings_23, settings_24, settings_7, settings_8, settings_9, stops_with_2_solid_1,
-    youtube_link, NOTO_SANS,
+    metadata_1, pdfx_external_output_profile, rect_to_path, red_fill, settings_13, settings_15,
+    settings_19, settings_20, settings_23, settings_24, settings_31, settings_32, settings_33,
+    settings_34, settings_35, settings_36, settings_37, settings_38, settings_39, settings_7,
+    settings_8, settings_9, stops_with_2_solid_1, youtube_link, NOTO_SANS,
 };
 use crate::{Document, SerializeSettings};
 
 fn pdfa_document() -> Document {
-    Document::new_with(settings_7())
+    let mut document = Document::new_with(settings_7());
+    document.set_metadata(metadata_1());
+    document
 }
 
 fn q_nesting_impl(settings: SerializeSettings) -> Document {
@@ -44,6 +46,7 @@ fn q_nesting_impl(settings: SerializeSettings) -> Document {
 
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     document
 }
@@ -60,6 +63,10 @@ pub fn validate_pdf_a_q_nesting_28(document: &mut Document) {
     for _ in 0..28 {
         surface.pop();
     }
+
+    surface.finish();
+    page.finish();
+    document.set_metadata(metadata_1());
 }
 
 #[test]
@@ -88,8 +95,10 @@ pub fn validate_pdf_a_string_length() {
     );
 }
 
-#[snapshot(settings_7)]
-fn validate_pdf_a_annotation(page: &mut Page) {
+#[snapshot(document, settings_7)]
+fn validate_pdf_a_annotation(document: &mut Document) {
+    let page_settings = krilla::page::PageSettings::from_wh(200.0, 200.0).unwrap();
+    let mut page = document.start_page_with(page_settings);
     page.add_annotation(
         LinkAnnotation::new(
             Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
@@ -97,6 +106,8 @@ fn validate_pdf_a_annotation(page: &mut Page) {
         )
         .into(),
     );
+    page.finish();
+    document.set_metadata(metadata_1());
 }
 
 #[test]
@@ -153,6 +164,7 @@ fn cmyk_document_impl(document: &mut Document) {
 
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 }
 
 #[test]
@@ -228,6 +240,7 @@ fn validate_pdfa2u_text_with_location() {
     );
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -264,6 +277,7 @@ fn validate_pdfa1b_transparency_with_location() {
 
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -362,6 +376,7 @@ fn invalid_codepoint_impl(document: &mut Document, font: Font, text: &str) {
     );
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 }
 
 #[test]
@@ -407,6 +422,7 @@ fn validate_pdfa_no_codepoint() {
     );
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     match document.finish() {
         Err(KrillaError::Validation(errors)) => {
@@ -781,6 +797,7 @@ fn validate_pdf_a1_limits() {
 
     page.add_annotation(youtube_link(66000.1, 66000.1, 100.0, 100.0));
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -811,6 +828,7 @@ fn validate_pdf_a3_missing_fields() {
     f1.description = None;
     f1.modification_date = None;
     d.embed_file(f1);
+    d.set_metadata(metadata_1());
 
     assert_eq!(
         d.finish(),
@@ -868,6 +886,7 @@ fn validate_pdf_a1_b_cmyk_image_without_icc_profile() {
 
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -923,6 +942,7 @@ fn validate_deduplicate_errors() {
     surface.draw_path(&rect_to_path(0.0, 0.0, 20.0, 20.0));
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -970,6 +990,7 @@ fn validate_inconsistent_separation_fallback() {
 
     surface.finish();
     page.finish();
+    document.set_metadata(metadata_1());
 
     assert_eq!(
         document.finish(),
@@ -979,4 +1000,1316 @@ fn validate_inconsistent_separation_fallback() {
             )
         ]))
     );
+}
+
+// ---- PDF/X tests ----
+
+use krilla::page::PageSettings;
+
+fn pdfx_page_settings() -> PageSettings {
+    let ps = PageSettings::from_wh(200.0, 200.0).unwrap();
+    let trim = Rect::from_xywh(0.0, 0.0, 200.0, 200.0).unwrap();
+    ps.with_trim_box(Some(trim))
+}
+
+/// Helper that creates a valid PDF/X document with text and a shape.
+/// Uses CMYK fill for X-1a compatibility.
+fn validate_pdf_x_full_example_cmyk(document: &mut Document) {
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(30.0, 30.0, 70.0, 70.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X Document".to_string());
+    document.set_metadata(metadata);
+}
+
+/// Helper that creates a valid PDF/X document using RGB (for X-3, X-4).
+fn validate_pdf_x_full_example_rgb(document: &mut Document) {
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(30.0, 30.0, 70.0, 70.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X Document".to_string());
+    document.set_metadata(metadata);
+}
+
+fn pdfx_validation_document(settings: SerializeSettings) -> Document {
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    document
+}
+
+// ---- PDF/X snapshot tests ----
+
+#[snapshot(document, settings_31)]
+fn validate_pdf_x4_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_32)]
+fn validate_pdf_x3_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_33)]
+fn validate_pdf_x1a_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_cmyk(document);
+}
+
+#[snapshot(document, settings_34)]
+fn validate_pdf_x4p_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_35)]
+fn validate_pdf_x6_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_39)]
+fn validate_pdf_x6p_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_37)]
+fn validate_pdf_a2b_x4_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_38)]
+fn validate_pdf_a3b_x4_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_rgb(document);
+}
+
+#[snapshot(document, settings_36)]
+fn validate_pdf_a1b_x1a_full_example(document: &mut Document) {
+    validate_pdf_x_full_example_cmyk(document);
+}
+
+// ---- PDF/X unit tests ----
+
+#[test]
+fn validate_pdf_x1a_no_rgb() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ContainsRgb(_))));
+        }
+        other => panic!("expected ContainsRgb error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x1a_no_rgb_image() {
+    use krilla::image::Image;
+
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let image_data = std::fs::read(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets/images/rgb8.png"),
+    )
+    .unwrap();
+    let image = Image::from_png(image_data.into(), false).unwrap();
+    surface.draw_image(image, Size::from_wh(50.0, 50.0).unwrap());
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ContainsRgb(_))));
+        }
+        other => panic!("expected ContainsRgb error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x1a_luma_ok() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let fill = Fill {
+        paint: luma::Color::new(128).into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::default(),
+    };
+    surface.set_fill(Some(fill));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x1a_no_annotations() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+
+    page.add_annotation(Annotation::new_link(
+        LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 100.0, 20.0).unwrap(),
+            Target::Action(LinkAction::new("https://example.com".to_string()).into()),
+        ),
+        None,
+    ));
+
+    let mut surface = page.surface();
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::ContainsAnnotation(None)));
+        }
+        other => panic!("expected ContainsAnnotation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x1a_no_transparency() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(0.5)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::Transparency(None)));
+        }
+        other => panic!("expected Transparency error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x3_no_transparency() {
+    let mut document = Document::new_with(settings_32());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(0.5)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-3".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::Transparency(None)));
+        }
+        other => panic!("expected Transparency error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x4_transparency_ok() {
+    let mut document = Document::new_with(settings_31());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(0.5)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x_missing_trim_art_box() {
+    let mut document = Document::new_with(settings_31());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::MissingTrimOrArtBox(0, _))));
+        }
+        other => panic!("expected MissingTrimOrArtBox error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x_with_trim_box() {
+    let mut document = Document::new_with(settings_31());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x_with_art_box() {
+    let mut document = Document::new_with(settings_31());
+    let ps = PageSettings::from_wh(200.0, 200.0).unwrap();
+    let art = Rect::from_xywh(0.0, 0.0, 200.0, 200.0).unwrap();
+    let page_settings = ps.with_art_box(Some(art));
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x1a_cmyk_fill_ok() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x_missing_date() {
+    let mut document = Document::new_with(settings_31());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new().language("en".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingDocumentDate));
+        }
+        other => panic!("expected MissingDocumentDate error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x1a_no_title() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::NoDocumentTitle));
+        }
+        other => panic!("expected NoDocumentTitle error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x3_no_title() {
+    let mut document = Document::new_with(settings_32());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::NoDocumentTitle));
+        }
+        other => panic!("expected NoDocumentTitle error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x4_no_title_ok() {
+    let mut document = Document::new_with(settings_31());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    // PDF/X-4 does NOT require a title.
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x1a_separation_cmyk_fallback_ok() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let space = separation::SeparationSpace::new(
+        separation::SeparationColorant::Custom("PANTONE 185 C".to_string()),
+        cmyk::Color::new(0, 255, 255, 0).into(),
+    );
+    let color: krilla::color::Color = separation::Color::new(255, space).into();
+    let fill = Fill {
+        paint: color.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::default(),
+    };
+    surface.set_fill(Some(fill));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x1a_separation_rgb_fallback() {
+    let mut document = Document::new_with(settings_33());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    let space = separation::SeparationSpace::new(
+        separation::SeparationColorant::Custom("PANTONE 185 C".to_string()),
+        rgb::Color::new(255, 0, 0).into(),
+    );
+    let color: krilla::color::Color = separation::Color::new(255, space).into();
+    let fill = Fill {
+        paint: color.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::default(),
+    };
+    surface.set_fill(Some(fill));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors
+                .iter()
+                .any(|e| matches!(e, ValidationError::ContainsRgb(_))));
+        }
+        other => panic!("expected ContainsRgb error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x1a_missing_cmyk_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    // X1A without a CMYK profile should trigger MissingCMYKProfile.
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X1A),
+        // No cmyk_profile provided.
+        ..crate::settings_1()
+    };
+    let mut document = Document::new_with(settings);
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingCMYKProfile));
+        }
+        other => panic!("expected MissingCMYKProfile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_a1b_x1a_combined_rejects_rgb() {
+    // The combined A1B_X1A validator should reject RGB (from X1A)
+    // AND transparency (from both A1B and X1A).
+    let mut document = Document::new_with(settings_36());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    // RGB fill: forbidden by X1A constituent.
+    surface.set_fill(Some(red_fill(0.5))); // Also transparent: forbidden by A1B.
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001))
+        .title("PDF/A-1b + PDF/X-1a".to_string());
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::ContainsRgb(_))),
+                "expected ContainsRgb, got {errors:?}"
+            );
+            assert!(
+                errors.contains(&ValidationError::Transparency(None)),
+                "expected Transparency, got {errors:?}"
+            );
+        }
+        other => panic!("expected validation errors, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x_variants_require_document_date_without_metadata_object() {
+    for (name, settings) in [
+        ("X4", settings_31()),
+        ("X4P", settings_34()),
+        ("X6", settings_35()),
+        ("X6P", settings_39()),
+        ("A2B_X4", settings_37()),
+        ("A3B_X4", settings_38()),
+    ] {
+        let document = pdfx_validation_document(settings);
+
+        match document.finish() {
+            Err(KrillaError::Validation(errors)) => {
+                assert!(
+                    errors.contains(&ValidationError::MissingDocumentDate),
+                    "{name}: expected MissingDocumentDate, got {errors:?}"
+                );
+            }
+            other => panic!("{name}: expected MissingDocumentDate error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn validate_pdf_x_embedded_output_intent_variants_require_cmyk_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    for (name, validator) in [
+        ("X3", Validator::X3),
+        ("X4", Validator::X4),
+        ("X6", Validator::X6),
+        ("A2B_X4", Validator::A2B_X4),
+        ("A3B_X4", Validator::A3B_X4),
+    ] {
+        let settings = SerializeSettings {
+            configuration: Configuration::new_with_validator(validator),
+            ..crate::settings_1()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page_with(pdfx_page_settings());
+        let mut surface = page.surface();
+
+        surface.set_fill(Some(red_fill(1.0)));
+        surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+        surface.finish();
+        page.finish();
+
+        document.set_metadata(
+            Metadata::new()
+                .language("en".to_string())
+                .creation_date(DateTime::new(2001))
+                .title(name.to_string()),
+        );
+
+        match document.finish() {
+            Err(KrillaError::Validation(errors)) => {
+                assert!(
+                    errors.contains(&ValidationError::MissingCMYKProfile),
+                    "{name}: expected MissingCMYKProfile, got {errors:?}"
+                );
+            }
+            other => panic!("{name}: expected MissingCMYKProfile error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn validate_pdf_x4_writes_required_xmp_fields() {
+    let mut document = Document::new_with(settings_31());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(0.5)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.finish();
+    page.finish();
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .title("PDF/X-4".to_string()),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(pdf_text.starts_with("%PDF-1.6"));
+    assert!(pdf_text.contains("<xmp:MetadataDate>2001-01-01T00:00:00Z</xmp:MetadataDate>"));
+    assert!(pdf_text.contains("<xmpMM:VersionID>1</xmpMM:VersionID>"));
+}
+
+#[test]
+fn validate_pdf_x1a_gradient_checks_every_stop() {
+    let mut document = Document::new_with(settings_33());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    let gradient = LinearGradient {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 100.0,
+        y2: 0.0,
+        transform: Default::default(),
+        spread_method: SpreadMethod::Pad,
+        stops: vec![
+            Stop {
+                offset: NormalizedF32::ZERO,
+                color: cmyk::Color::new(255, 0, 0, 0).into(),
+                opacity: NormalizedF32::ONE,
+            },
+            Stop {
+                offset: NormalizedF32::ONE,
+                color: rgb::Color::new(255, 0, 0).into(),
+                opacity: NormalizedF32::ONE,
+            },
+        ],
+        anti_alias: false,
+    };
+
+    surface.set_fill(Some(Fill {
+        paint: gradient.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::default(),
+    }));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .title("PDF/X-1a".to_string()),
+    );
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::ContainsRgb(_))),
+                "expected ContainsRgb, got {errors:?}"
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MixedGradientColorSpaces(_))),
+                "expected MixedGradientColorSpaces, got {errors:?}"
+            );
+        }
+        other => panic!("expected gradient validation errors, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_mixed_gradient_stop_spaces_fail_cleanly_without_a_validator() {
+    let mut document = pdfx_validation_document(crate::settings_1());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    let gradient = LinearGradient {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 100.0,
+        y2: 0.0,
+        transform: Default::default(),
+        spread_method: SpreadMethod::Pad,
+        stops: vec![
+            Stop {
+                offset: NormalizedF32::ZERO,
+                color: cmyk::Color::new(255, 0, 0, 0).into(),
+                opacity: NormalizedF32::ONE,
+            },
+            Stop {
+                offset: NormalizedF32::ONE,
+                color: luma::Color::new(0).into(),
+                opacity: NormalizedF32::ONE,
+            },
+        ],
+        anti_alias: false,
+    };
+
+    surface.set_fill(Some(Fill {
+        paint: gradient.into(),
+        opacity: NormalizedF32::ONE,
+        rule: FillRule::default(),
+    }));
+    surface.draw_path(&rect_to_path(60.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| matches!(e, ValidationError::MixedGradientColorSpaces(_))),
+                "expected MixedGradientColorSpaces, got {errors:?}"
+            );
+        }
+        other => panic!("expected MixedGradientColorSpaces error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x4p_requires_external_output_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X4P),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingExternalOutputProfile));
+        }
+        other => panic!("expected MissingExternalOutputProfile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn external_output_profile_rejects_invalid_input() {
+    use krilla::icc::ICCProfile;
+    use krilla::{ExternalOutputProfile, ExternalOutputProfileError};
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+
+    assert_eq!(
+        ExternalOutputProfile::rgb(
+            profile.clone(),
+            vec![],
+            "Custom".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(ExternalOutputProfileError::EmptyUrls)
+    );
+
+    assert_eq!(
+        ExternalOutputProfile::rgb(
+            profile.clone(),
+            vec!["   ".to_string()],
+            "Custom".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(ExternalOutputProfileError::EmptyUrls)
+    );
+
+    assert_eq!(
+        ExternalOutputProfile::rgb(
+            profile.clone(),
+            vec!["https://example.com/profile.icc".to_string()],
+            "   ".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(ExternalOutputProfileError::EmptyIdentifier)
+    );
+
+    assert_eq!(
+        ExternalOutputProfile::rgb(
+            profile,
+            vec!["https://example.com/profile.icc".to_string()],
+            "Custom".to_string(),
+            "   ".to_string(),
+        )
+        .err(),
+        Some(ExternalOutputProfileError::EmptyInfo)
+    );
+}
+
+#[test]
+fn validate_x4_rejects_external_output_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X4),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::ExternalOutputProfileUnsupportedByValidator));
+        }
+        other => {
+            panic!("expected ExternalOutputProfileUnsupportedByValidator error, got {other:?}")
+        }
+    }
+}
+
+#[test]
+fn validate_pdf_x4p_with_external_profile_reference() {
+    use krilla::configure::{Configuration, Validator};
+
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X4P),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(pdf_text.contains("/DestOutputProfileRef <<"));
+    assert!(pdf_text.contains("/URLs ["));
+    assert!(pdf_text.contains("/FS /URL"));
+    assert!(pdf_text.contains("/F (https://example.com/profiles/sRGB-v4.icc)"));
+    assert!(pdf_text.contains("/OutputConditionIdentifier (Custom)"));
+    assert!(pdf_text.contains("/OutputCondition (sRGB)"));
+    assert!(pdf_text.contains("/Info (sRGB v4 ICC profile)"));
+    assert!(pdf_text.contains("/CheckSum <"));
+    assert!(pdf_text.contains("/ICCVersion ("));
+    assert!(pdf_text.contains("/ProfileCS ("));
+    assert!(!pdf_text.contains("/DestOutputProfile "));
+}
+
+fn output_profile_refs(pdf_text: &str) -> Vec<&str> {
+    let mut refs = Vec::new();
+    let mut remainder = pdf_text;
+
+    while let Some(start) = remainder.find("/DestOutputProfile ") {
+        let tail = &remainder[start + "/DestOutputProfile ".len()..];
+        let end = tail.find(" R").unwrap();
+        refs.push(&tail[..end]);
+        remainder = &tail[end + 2..];
+    }
+
+    refs
+}
+
+#[test]
+fn validate_combined_pdfa_pdfx_declares_pdfx_extension_schema() {
+    for (settings, use_cmyk) in [
+        (settings_36(), true),
+        (settings_37(), false),
+        (settings_38(), false),
+    ] {
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page_with(pdfx_page_settings());
+        let mut surface = page.surface();
+
+        surface.set_fill(Some(if use_cmyk {
+            cmyk_fill(1.0)
+        } else {
+            red_fill(1.0)
+        }));
+        surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+        surface.finish();
+        page.finish();
+
+        document.set_metadata(
+            Metadata::new()
+                .language("en".to_string())
+                .creation_date(DateTime::new(2001))
+                .title("Combined".to_string()),
+        );
+
+        let pdf = document.finish().unwrap();
+        let pdf_text = String::from_utf8_lossy(&pdf);
+
+        assert!(
+            pdf_text.contains("xmlns:pdfxid=\"http://www.npes.org/pdfx/ns/id/\""),
+            "missing pdfxid namespace declaration"
+        );
+        assert!(
+            pdf_text.contains("<pdfaSchema:namespaceURI>http://www.npes.org/pdfx/ns/id/</pdfaSchema:namespaceURI>"),
+            "missing PDF/A extension schema for pdfxid"
+        );
+        assert!(
+            pdf_text.contains("<pdfaProperty:name>GTS_PDFXVersion</pdfaProperty:name>"),
+            "missing PDF/A extension property declaration for GTS_PDFXVersion"
+        );
+    }
+}
+
+#[test]
+fn validate_a1b_x1a_uses_one_output_profile_for_both_intents() {
+    let mut document = Document::new_with(settings_36());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .title("PDF/A-1b + PDF/X-1a".to_string()),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+    let refs = output_profile_refs(&pdf_text);
+
+    assert_eq!(refs.len(), 2, "expected two output intents");
+    assert_eq!(
+        refs[0], refs[1],
+        "combined output intents must share one ICC profile"
+    );
+}
+
+#[test]
+fn validate_pdf_x1a_uses_device_cmyk_for_page_content() {
+    let mut document = Document::new_with(settings_33());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .title("PDF/X-1a".to_string()),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(
+        !pdf_text.contains("/ColorSpace <<"),
+        "PDF/X-1a page resources must not declare ICCBased aliases for page content"
+    );
+    assert!(
+        !pdf_text.contains(" scn\n"),
+        "PDF/X-1a page content should use device operators instead of ICCBased scn painting"
+    );
+}
+
+#[test]
+fn validate_a1b_x1a_uses_device_cmyk_for_page_content() {
+    let mut document = Document::new_with(settings_36());
+    let mut page = document.start_page_with(pdfx_page_settings());
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(cmyk_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .title("PDF/A-1b + PDF/X-1a".to_string()),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(
+        !pdf_text.contains("/ColorSpace <<"),
+        "PDF/A-1b + PDF/X-1a page resources must not declare ICCBased aliases for page content"
+    );
+    assert!(
+        !pdf_text.contains(" scn\n"),
+        "PDF/A-1b + PDF/X-1a page content should use device operators instead of ICCBased scn painting"
+    );
+}
+
+#[test]
+fn validate_pdfx_downgrades_unknown_trapping_to_not_trapped() {
+    use krilla::metadata::Trapping;
+    let mut document = pdfx_validation_document(settings_35());
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001))
+            .trapped(Trapping::Unknown),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    // PDF/X forbids the Unknown trapping state; krilla downgrades it to
+    // NotTrapped in both the Info dict and the XMP metadata.
+    assert!(
+        pdf_text.contains("/Trapped /False"),
+        "PDF/X-6 with Trapping::Unknown must still write /Trapped /False"
+    );
+    assert!(pdf_text.contains("<pdf:Trapped>False</pdf:Trapped>"));
+    assert!(!pdf_text.contains("/Trapped /Unknown"));
+}
+
+#[test]
+fn validate_pdf_x6_writes_trapped_in_info_dict() {
+    // ISO 15930-9 (PDF/X-6) mandates /Trapped in the Document Info dictionary
+    // despite PDF 2.0's general deprecation of Info-dict keys. Ensure we
+    // always emit it for X-6, plus the XMP pdf:Trapped counterpart.
+    let mut document = pdfx_validation_document(settings_35());
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(
+        pdf_text.contains("/Trapped /False"),
+        "expected /Trapped in Info dict for PDF/X-6"
+    );
+    assert!(pdf_text.contains("<pdf:Trapped>False</pdf:Trapped>"));
+}
+
+#[test]
+fn validate_pdf_x6p_requires_external_output_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X6P),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingExternalOutputProfile));
+        }
+        other => panic!("expected MissingExternalOutputProfile error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_pdf_x6p_transparency_ok() {
+    let mut document = Document::new_with(settings_39());
+    let page_settings = pdfx_page_settings();
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+
+    surface.set_fill(Some(red_fill(0.5)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+
+    surface.finish();
+    page.finish();
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .creation_date(DateTime::new(2001));
+    document.set_metadata(metadata);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_pdf_x6p_with_external_profile_reference() {
+    use krilla::configure::{Configuration, Validator};
+
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X6P),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+
+    let pdf = document.finish().unwrap();
+    let pdf_text = String::from_utf8_lossy(&pdf);
+
+    assert!(pdf_text.starts_with("%PDF-2.0"));
+    assert!(pdf_text.contains("/DestOutputProfileRef <<"));
+    assert!(pdf_text.contains("/S /GTS_PDFX"));
+    assert!(!pdf_text.contains("/DestOutputProfile "));
+    assert!(pdf_text.contains("GTS_PDFXVersion"));
+    assert!(pdf_text.contains("PDF/X-6p"));
+}
+
+#[test]
+fn validate_x6_rejects_external_output_profile() {
+    use krilla::configure::{Configuration, Validator};
+
+    // X6 (not X6P) should reject external output profile.
+    let settings = SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::X6),
+        external_output_profile: Some(pdfx_external_output_profile()),
+        ..crate::settings_1()
+    };
+    let mut document = pdfx_validation_document(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::ExternalOutputProfileUnsupportedByValidator));
+        }
+        other => {
+            panic!("expected ExternalOutputProfileUnsupportedByValidator error, got {other:?}")
+        }
+    }
 }

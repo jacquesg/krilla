@@ -1,4 +1,7 @@
 //! Configuring PDF version and export mode.
+//!
+//! See [`Validator`] for validator-specific requirements. Repository-level
+//! implementation notes for PDF/X live in `PDF_X.md` next to this module.
 
 pub mod validate;
 mod version;
@@ -31,15 +34,19 @@ impl Configuration {
         }
     }
 
-    /// Create a new configuration from a validator. An appropriate PDF version will be set
-    /// automatically.
+    /// Create a new configuration from a validator. An appropriate PDF
+    /// version will be set automatically.
     pub fn new_with_validator(validator: Validator) -> Self {
-        Self::new_with(validator, validator.recommended_version()).unwrap()
+        Self::new_with(validator, validator.recommended_version()).expect(
+            "recommended_version is invariant-compatible with the validator — see \
+             Validator::recommended_version and Validator::compatible_with_version",
+        )
     }
 
     /// Create a new configuration from a PDF version and no validator.
     pub fn new_with_version(version: PdfVersion) -> Self {
-        Self::new_with(Validator::None, version).unwrap()
+        Self::new_with(Validator::None, version)
+            .expect("Validator::None is compatible with every PDF version")
     }
 
     /// Create a new configuration without any validator.
@@ -68,5 +75,79 @@ mod tests {
             Configuration::new_with(Validator::A1_B, PdfVersion::Pdf17),
             None
         );
+    }
+
+    #[test]
+    fn invalid_x1a_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::X1A, PdfVersion::Pdf17),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_x4_pdf14() {
+        assert_eq!(
+            Configuration::new_with(Validator::X4, PdfVersion::Pdf14),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_x4_pdf16() {
+        assert!(Configuration::new_with(Validator::X4, PdfVersion::Pdf16).is_some());
+    }
+
+    #[test]
+    fn invalid_x4_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::X4, PdfVersion::Pdf17),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_x6_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::X6, PdfVersion::Pdf17),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_x6_pdf20() {
+        assert!(Configuration::new_with(Validator::X6, PdfVersion::Pdf20).is_some());
+    }
+
+    #[test]
+    fn valid_x6p_pdf20() {
+        assert!(Configuration::new_with(Validator::X6P, PdfVersion::Pdf20).is_some());
+    }
+
+    #[test]
+    fn invalid_x6p_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::X6P, PdfVersion::Pdf17),
+            None
+        );
+    }
+
+    #[test]
+    fn invalid_a2b_x4_pdf14() {
+        assert_eq!(
+            Configuration::new_with(Validator::A2B_X4, PdfVersion::Pdf14),
+            None
+        );
+    }
+
+    #[test]
+    fn recommended_versions() {
+        assert_eq!(Validator::X1A.recommended_version(), PdfVersion::Pdf14);
+        assert_eq!(Validator::X3.recommended_version(), PdfVersion::Pdf14);
+        assert_eq!(Validator::X4.recommended_version(), PdfVersion::Pdf16);
+        assert_eq!(Validator::X6.recommended_version(), PdfVersion::Pdf20);
+        assert_eq!(Validator::X6P.recommended_version(), PdfVersion::Pdf20);
+        assert_eq!(Validator::A1B_X1A.recommended_version(), PdfVersion::Pdf14);
+        assert_eq!(Validator::A2B_X4.recommended_version(), PdfVersion::Pdf16);
     }
 }
