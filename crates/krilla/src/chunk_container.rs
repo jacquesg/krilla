@@ -6,7 +6,7 @@ use xmp_writer::{RenditionClass, XmpWriter};
 use crate::configure::{PdfVersion, ValidationError};
 use crate::error::KrillaResult;
 use crate::interchange::metadata::Metadata;
-use crate::metadata::PageLayout;
+use crate::metadata::{PageLayout, PageMode};
 use crate::serialize::SerializeContext;
 use crate::util::{stable_hash_base64, Deferred};
 
@@ -201,21 +201,66 @@ impl ChunkContainer {
                 mark_info.finish();
             }
 
-            let write_doc_title = sc
+            let validator_requires_display_doc_title = sc
                 .serialize_settings()
                 .validator()
                 .requires_display_doc_title();
             let text_direction = metadata.text_direction;
+            let vp_struct = &metadata.viewer_preferences;
+            // `DisplayDocTitle` may be requested by the validator
+            // (PDF/UA-1 mandates `true`) or by the author via
+            // `ViewerPreferences::display_doc_title`. The latter wins
+            // when set explicitly; a `false` from the author when the
+            // validator demands `true` is a documented author error
+            // but is still emitted faithfully so the validator's own
+            // post-emit check surfaces the violation.
+            let effective_display_doc_title = vp_struct
+                .display_doc_title
+                .or_else(|| if validator_requires_display_doc_title { Some(true) } else { None });
 
-            if write_doc_title || text_direction.is_some() {
+            let needs_viewer_prefs = effective_display_doc_title.is_some()
+                || text_direction.is_some()
+                || !vp_struct.is_empty();
+
+            if needs_viewer_prefs {
                 let mut vp = catalog.viewer_preferences();
 
-                if write_doc_title {
-                    vp.display_doc_title(true);
+                if let Some(display) = effective_display_doc_title {
+                    vp.display_doc_title(display);
                 }
 
                 if let Some(dir) = text_direction {
                     vp.direction(dir.to_pdf());
+                }
+
+                if let Some(hide) = vp_struct.hide_toolbar {
+                    vp.hide_toolbar(hide);
+                }
+                if let Some(hide) = vp_struct.hide_menubar {
+                    vp.hide_menubar(hide);
+                }
+                if let Some(hide) = vp_struct.hide_window_ui {
+                    // pdf-writer's ViewerPreferences derefs to Dict;
+                    // /HideWindowUI is a plain boolean in the spec.
+                    vp.pair(Name(b"HideWindowUI"), hide);
+                }
+                if let Some(fit) = vp_struct.fit_window {
+                    vp.fit_window(fit);
+                }
+                if let Some(center) = vp_struct.center_window {
+                    vp.center_window(center);
+                }
+                if let Some(mode) = vp_struct.non_fullscreen_page_mode {
+                    vp.non_full_screen_page_mode(mode.to_pdf());
+                }
+                if let Some(scaling) = vp_struct.print_scaling {
+                    vp.pair(Name(b"PrintScaling"), scaling.to_pdf_name());
+                }
+                if let Some(duplex) = vp_struct.duplex {
+                    vp.pair(Name(b"Duplex"), duplex.to_pdf_name());
+                }
+                if let Some(enabled) = vp_struct.pick_tray_by_pdf_size {
+                    vp.pair(Name(b"PickTrayByPDFSize"), enabled);
                 }
             }
 
@@ -226,6 +271,19 @@ impl ChunkContainer {
                     || !matches!(layout, PageLayout::TwoPageLeft | PageLayout::TwoPageRight)
                 {
                     catalog.page_layout(layout.to_pdf());
+                }
+            }
+            if let Some(mode) = metadata.page_mode {
+                // `UseOC` is PDF 1.5+; `UseAttachments` is PDF 1.6+.
+                // Versions below that silently fall back to UseNone.
+                let pdf_version = sc.serialize_settings().pdf_version();
+                let supports_mode = match mode {
+                    PageMode::UseOC => pdf_version >= PdfVersion::Pdf15,
+                    PageMode::UseAttachments => pdf_version >= PdfVersion::Pdf16,
+                    _ => true,
+                };
+                if supports_mode {
+                    catalog.page_mode(mode.to_pdf());
                 }
             }
 
