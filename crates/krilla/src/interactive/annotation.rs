@@ -1,19 +1,22 @@
 //! PDF annotations, allowing you to add extra "content" to specific pages.
 //!
 //! PDF has the concept of annotations, which allow you to associate certain regions of
-//! a page with an "annotation". krilla currently supports three families of annotations:
+//! a page with an "annotation". krilla currently supports four families of annotations:
 //!
 //! - [`LinkAnnotation`]: hyperlinks targeting destinations or actions.
 //! - [`TextAnnotation`]: sticky-note style comments (ISO 32000-2 §12.5.6.4).
 //! - [`MarkupAnnotation`]: highlight / underline / strike-out / squiggly markup
 //!   over a region of page content (ISO 32000-2 §12.5.6.10).
+//! - [`WidgetAnnotation`]: AcroForm widget annotations for interactive form
+//!   fields — text inputs, buttons (checkbox / radio / pushbutton) and choice
+//!   fields (combo / list) per ISO 32000-2 §12.7.
 //!
 //! Additional annotation subtypes can be added on demand.
 
 use core::f32;
 
-use pdf_writer::types::AnnotationFlags;
-use pdf_writer::{Chunk, Finish, Name, Ref, TextStr};
+use pdf_writer::types::{AnnotationFlags, FieldFlags};
+use pdf_writer::{Chunk, Finish, Name, Ref, Str, TextStr};
 
 use crate::color::Color;
 use crate::configure::{PdfVersion, ValidationError};
@@ -74,6 +77,21 @@ impl Annotation {
         }
     }
 
+    /// Create a new AcroForm widget annotation.
+    ///
+    /// The widget is added to the page like any other annotation; its
+    /// indirect reference is additionally registered with the document
+    /// catalogue's `/AcroForm /Fields` array so PDF viewers expose it
+    /// as a fillable form field.
+    pub fn new_widget(annotation: WidgetAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Widget(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
@@ -114,6 +132,17 @@ impl From<MarkupAnnotation> for Annotation {
     }
 }
 
+impl From<WidgetAnnotation> for Annotation {
+    fn from(value: WidgetAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Widget(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
 impl Annotation {
     pub(crate) fn serialize(
         &self,
@@ -137,7 +166,7 @@ impl Annotation {
             .serialize_type(sc, &mut annotation, page_height)?;
 
         // Link annotations only set the /F PRINT flag when they have a visible
-        // border (so borderless links don't print). Text and Markup
+        // border (so borderless links don't print). Text, Markup and Widget
         // annotations are visible page artefacts and should always print.
         if let AnnotationType::Link(l) = &self.annotation_type {
             // TODO: No need to write the print flag even if it is `None`,
@@ -159,15 +188,32 @@ impl Annotation {
             annotation.struct_parent(struct_parent);
         }
 
-        if let Some(alt_text) = &self.alt {
-            annotation.contents(TextStr(alt_text));
+        // Widget annotations carry their value via /V (and friends) — the
+        // /Contents key is not meaningful and the alt-text validator does
+        // not apply (form fields are exposed via their /T partial name and
+        // /TU alternate name, not /Contents).
+        let is_widget = matches!(self.annotation_type, AnnotationType::Widget(_));
+        if !is_widget {
+            if let Some(alt_text) = &self.alt {
+                annotation.contents(TextStr(alt_text));
+            }
         }
 
-        if self.alt.as_ref().is_none_or(String::is_empty) {
+        if !is_widget && self.alt.as_ref().is_none_or(String::is_empty) {
             sc.register_validation_error(ValidationError::MissingAnnotationAltText(self.location));
         }
 
         annotation.finish();
+
+        // AcroForm catalogue wiring (ISO 32000-2 §12.7.3): every widget
+        // annotation's indirect reference participates in the catalogue's
+        // `/AcroForm /Fields` array. We register the ref *after* the
+        // annotation chunk has been emitted; `ChunkContainer::finish`
+        // remaps the ref through the same remapper used for every other
+        // indirect object and writes the array entry.
+        if is_widget {
+            sc.register_widget_field(root_ref);
+        }
 
         Ok(chunk)
     }
@@ -181,6 +227,8 @@ pub enum AnnotationType {
     Text(TextAnnotation),
     /// A markup annotation (highlight, underline, strike-out, squiggly).
     Markup(MarkupAnnotation),
+    /// A widget annotation (AcroForm interactive form field).
+    Widget(WidgetAnnotation),
 }
 
 impl AnnotationType {
@@ -194,6 +242,7 @@ impl AnnotationType {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
             AnnotationType::Text(t) => t.serialize_type(sc, annotation, page_height),
             AnnotationType::Markup(m) => m.serialize_type(sc, annotation, page_height),
+            AnnotationType::Widget(w) => w.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -636,6 +685,377 @@ impl MarkupAnnotation {
     }
 }
 
+/// Sub-kind for a [`ButtonField`].
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ButtonKind {
+    /// A check box. State stored in `/V` as `/Yes` or `/Off`.
+    Checkbox,
+    /// A radio button. The radio flag (bit 16) is set on `/Ff`.
+    Radio,
+    /// A pushbutton — non-stateful, used as a UI affordance. The
+    /// pushbutton flag (bit 17) is set on `/Ff`.
+    PushButton,
+}
+
+/// An AcroForm text field (`/FT /Tx`) — single-line or multi-line text
+/// input. The multi-line flag (bit 13) is set via [`TextFieldFlags`].
+pub struct TextField {
+    /// Current value of the field. Becomes `/V`.
+    pub value: String,
+    /// Default value used by `/DV`.
+    pub default_value: String,
+    /// `/MaxLen` (max character length); `None` for no limit.
+    pub max_length: Option<u16>,
+    /// Per-field flag bits — see [`TextFieldFlags`].
+    pub flags: TextFieldFlags,
+}
+
+/// An AcroForm button field (`/FT /Btn`) — checkbox, radio button or
+/// pushbutton, distinguished by [`ButtonKind`].
+pub struct ButtonField {
+    /// Whether the button is checked. Ignored for pushbuttons.
+    pub checked: bool,
+    /// Sub-kind. Sets the appropriate `/Ff` bit (radio / pushbutton).
+    pub kind: ButtonKind,
+    /// Pushbutton caption (written into `/MK /CA`); empty for the other
+    /// kinds.
+    pub caption: String,
+    /// Per-field flag bits — see [`ButtonFieldFlags`].
+    pub flags: ButtonFieldFlags,
+}
+
+/// An AcroForm choice field (`/FT /Ch`) — combo box or list box. Set
+/// the combo flag via [`ChoiceFieldFlags::with_combo`] to make it a
+/// dropdown.
+pub struct ChoiceField {
+    /// Current value (`/V`).
+    pub value: String,
+    /// Default value (`/DV`).
+    pub default_value: String,
+    /// `(export-value, display-name)` pairs written into `/Opt`.
+    pub options: Vec<(String, String)>,
+    /// Per-field flag bits — see [`ChoiceFieldFlags`].
+    pub flags: ChoiceFieldFlags,
+}
+
+/// The field-type-specific payload of a [`WidgetAnnotation`].
+pub enum WidgetField {
+    /// `/Tx` text field.
+    Text(TextField),
+    /// `/Btn` button field (checkbox, radio, pushbutton).
+    Button(ButtonField),
+    /// `/Ch` choice field (combo / list box).
+    Choice(ChoiceField),
+}
+
+/// Flag bits for an AcroForm text field (`/FT /Tx`).
+///
+/// The general flags `READ_ONLY` and `REQUIRED` are shared with the
+/// other field types; the multi-line / password / file-select / comb
+/// bits are text-specific. See ISO 32000-2 §12.7.4.3, Table 230.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct TextFieldFlags {
+    /// Set bit 1 (`/Ff` 1): the field is read-only.
+    pub read_only: bool,
+    /// Set bit 13 (4096): multi-line text input.
+    pub multiline: bool,
+    /// Set bit 14 (8192): password — characters not echoed.
+    pub password: bool,
+}
+
+impl TextFieldFlags {
+    /// Set the read-only flag (bit 1).
+    pub fn with_read_only(mut self, value: bool) -> Self {
+        self.read_only = value;
+        self
+    }
+
+    /// Set the multi-line flag (bit 13).
+    pub fn with_multiline(mut self, value: bool) -> Self {
+        self.multiline = value;
+        self
+    }
+
+    /// Set the password flag (bit 14).
+    pub fn with_password(mut self, value: bool) -> Self {
+        self.password = value;
+        self
+    }
+
+    fn to_bits(self) -> u32 {
+        let mut flags = FieldFlags::empty();
+        if self.read_only {
+            flags |= FieldFlags::READ_ONLY;
+        }
+        if self.multiline {
+            flags |= FieldFlags::MULTILINE;
+        }
+        if self.password {
+            flags |= FieldFlags::PASSWORD;
+        }
+        flags.bits()
+    }
+}
+
+/// Flag bits for an AcroForm button field (`/FT /Btn`).
+///
+/// The button-specific bits (radio / pushbutton / radios-in-unison)
+/// configure the sub-kind. They are mutually exclusive at the spec
+/// level: a checkbox sets neither, a radio sets `radio` (bit 16) and
+/// optionally `radios_in_unison` (bit 26), a pushbutton sets
+/// `pushbutton` (bit 17). See ISO 32000-2 §12.7.4.2, Table 229.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ButtonFieldFlags {
+    /// Set bit 1 (`/Ff` 1): the field is read-only.
+    pub read_only: bool,
+    /// Set bit 16 (32768): the field is a radio button group.
+    pub radio: bool,
+    /// Set bit 17 (65536): the field is a pushbutton.
+    pub pushbutton: bool,
+    /// Set bit 26 (33554432): grouped radios with the same `/V` toggle
+    /// in unison.
+    pub radios_in_unison: bool,
+}
+
+impl ButtonFieldFlags {
+    /// Set the read-only flag (bit 1).
+    pub fn with_read_only(mut self, value: bool) -> Self {
+        self.read_only = value;
+        self
+    }
+
+    /// Set the radio flag (bit 16).
+    pub fn with_radio(mut self, value: bool) -> Self {
+        self.radio = value;
+        self
+    }
+
+    /// Set the pushbutton flag (bit 17).
+    pub fn with_pushbutton(mut self, value: bool) -> Self {
+        self.pushbutton = value;
+        self
+    }
+
+    /// Set the radios-in-unison flag (bit 26).
+    pub fn with_radios_in_unison(mut self, value: bool) -> Self {
+        self.radios_in_unison = value;
+        self
+    }
+
+    fn to_bits(self) -> u32 {
+        let mut flags = FieldFlags::empty();
+        if self.read_only {
+            flags |= FieldFlags::READ_ONLY;
+        }
+        if self.radio {
+            flags |= FieldFlags::RADIO;
+        }
+        if self.pushbutton {
+            flags |= FieldFlags::PUSHBUTTON;
+        }
+        if self.radios_in_unison {
+            flags |= FieldFlags::RADIOS_IN_UNISON;
+        }
+        flags.bits()
+    }
+}
+
+/// Flag bits for an AcroForm choice field (`/FT /Ch`).
+///
+/// The combo flag distinguishes a drop-down (combo) from a list box.
+/// `MULTI_SELECT` is permissible but moegoe currently emits only
+/// single-select fields; the API is provided for completeness.
+/// See ISO 32000-2 §12.7.4.4, Table 232.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub struct ChoiceFieldFlags {
+    /// Set bit 1 (`/Ff` 1): the field is read-only.
+    pub read_only: bool,
+    /// Set bit 18 (131072): combo box (drop-down) instead of list box.
+    pub combo: bool,
+    /// Set bit 22 (2097152): multi-select.
+    pub multi_select: bool,
+}
+
+impl ChoiceFieldFlags {
+    /// Set the read-only flag (bit 1).
+    pub fn with_read_only(mut self, value: bool) -> Self {
+        self.read_only = value;
+        self
+    }
+
+    /// Set the combo flag (bit 18).
+    pub fn with_combo(mut self, value: bool) -> Self {
+        self.combo = value;
+        self
+    }
+
+    /// Set the multi-select flag (bit 22).
+    pub fn with_multi_select(mut self, value: bool) -> Self {
+        self.multi_select = value;
+        self
+    }
+
+    fn to_bits(self) -> u32 {
+        let mut flags = FieldFlags::empty();
+        if self.read_only {
+            flags |= FieldFlags::READ_ONLY;
+        }
+        if self.combo {
+            flags |= FieldFlags::COMBO;
+        }
+        if self.multi_select {
+            flags |= FieldFlags::MULTI_SELECT;
+        }
+        flags.bits()
+    }
+}
+
+/// An AcroForm widget annotation (ISO 32000-2 §12.5.6.19 / §12.7).
+///
+/// A widget annotation is both an annotation (rectangle on a page) and
+/// a form field (entry in the catalogue's `/AcroForm /Fields` array).
+/// krilla emits the merged form (annotation dictionary that also
+/// carries `/FT`, `/T`, `/V`, etc.) — the merged form is what every
+/// modern PDF viewer expects for terminal fields.
+///
+/// v1 of the moegoe integration does not emit `/AP` (appearance
+/// streams); the catalogue sets `/NeedAppearances true` so Acrobat
+/// generates appearances from `/V + /DA` on first save. The default
+/// appearance written here is `(/Helv 10 Tf 0 g)`.
+pub struct WidgetAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) partial_name: String,
+    pub(crate) field: WidgetField,
+}
+
+impl WidgetAnnotation {
+    /// Create a new widget annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates and identifies the
+    /// region of the page on which the field appears. `partial_name`
+    /// becomes the field's `/T` partial name — the value that PDF form
+    /// processors and Acrobat surface in dropdowns, validation messages
+    /// and field-name maps. `field` selects the field type and carries
+    /// its type-specific payload (text / button / choice).
+    pub fn new(rect: Rect, partial_name: impl Into<String>, field: WidgetField) -> Self {
+        Self {
+            rect,
+            partial_name: partial_name.into(),
+            field,
+        }
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<()> {
+        annotation.subtype(pdf_writer::types::AnnotationType::Widget);
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+
+        // /T is required on every terminal field; /FT identifies the
+        // field type. The values pulled out of `WidgetField` populate
+        // /V, /DV, /MaxLen, /Opt and /Ff.
+        annotation.pair(Name(b"T"), TextStr(&self.partial_name));
+
+        // /DA is mandatory on every variable-text field (and harmless
+        // elsewhere). A minimal default appearance — Helvetica 10pt
+        // black — matches what Acrobat falls back to when /DA is
+        // missing but `/NeedAppearances true` is set at the catalogue.
+        const DEFAULT_APPEARANCE: &[u8] = b"/Helv 10 Tf 0 g";
+
+        // Field-type names (`/Tx`, `/Btn`, `/Ch`) and checkbox/radio
+        // state names (`/Yes`, `/Off`) are pinned by ISO 32000-2
+        // §12.7.4 and emitted as PDF name objects. `pdf_writer`
+        // re-exports the `FieldType` / `CheckBoxState` enums but
+        // gates the `to_name()` mapping behind `pub(crate)`, so we
+        // write the canonical bytes directly here.
+        match &self.field {
+            WidgetField::Text(text) => {
+                annotation.pair(Name(b"FT"), Name(b"Tx"));
+                annotation.pair(Name(b"Ff"), text.flags.to_bits() as i32);
+                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
+                annotation.pair(Name(b"V"), TextStr(&text.value));
+                annotation.pair(Name(b"DV"), TextStr(&text.default_value));
+                if let Some(max_len) = text.max_length {
+                    annotation.pair(Name(b"MaxLen"), i32::from(max_len));
+                }
+            }
+            WidgetField::Button(button) => {
+                annotation.pair(Name(b"FT"), Name(b"Btn"));
+                annotation.pair(Name(b"Ff"), button.flags.to_bits() as i32);
+                match button.kind {
+                    ButtonKind::Checkbox => {
+                        let state: Name = if button.checked {
+                            Name(b"Yes")
+                        } else {
+                            Name(b"Off")
+                        };
+                        annotation.pair(Name(b"V"), state);
+                        annotation.pair(Name(b"DV"), state);
+                        annotation.pair(Name(b"AS"), state);
+                    }
+                    ButtonKind::Radio => {
+                        // Each radio widget in a group stores its export
+                        // value in /AS; the group's /V selects which one
+                        // is on. v1 of the integration emits a single
+                        // widget per HTML `<input type="radio">` element
+                        // — the convert layer aggregates radios by `name`
+                        // into a field with shared `/T`. The export-value
+                        // surfacing belongs to the embedder.
+                        let state: Name = if button.checked {
+                            Name(b"Yes")
+                        } else {
+                            Name(b"Off")
+                        };
+                        annotation.pair(Name(b"V"), state);
+                        annotation.pair(Name(b"AS"), state);
+                    }
+                    ButtonKind::PushButton => {
+                        // Pushbuttons have no persistent value. /MK /CA
+                        // gives Acrobat a label to draw — written as a
+                        // best-effort caption derived from the HTML
+                        // element's text content.
+                        if !button.caption.is_empty() {
+                            let mut mk = annotation.insert(Name(b"MK")).dict();
+                            mk.pair(Name(b"CA"), TextStr(&button.caption));
+                            mk.finish();
+                        }
+                    }
+                }
+            }
+            WidgetField::Choice(choice) => {
+                annotation.pair(Name(b"FT"), Name(b"Ch"));
+                annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
+                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
+                annotation.pair(Name(b"V"), TextStr(&choice.value));
+                annotation.pair(Name(b"DV"), TextStr(&choice.default_value));
+                // /Opt is an array of pairs `[export display]`. The
+                // moegoe v1 stub passes an empty Vec — viewers render
+                // a combo box with no choices, which is the
+                // best-effort representation when `<option>` parsing
+                // has not been wired through.
+                let mut opt = annotation.insert(Name(b"Opt")).array();
+                for (export, display) in &choice.options {
+                    let mut entry = opt.push().array();
+                    entry.item(TextStr(export));
+                    entry.item(TextStr(display));
+                    entry.finish();
+                }
+                opt.finish();
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Emit a `/C` colour entry on an annotation using the regular-colour
 /// projection. Centralised so Link, Text and Markup share the same
 /// device-space handling.
@@ -767,5 +1187,183 @@ mod tests {
         let annotation: Annotation = markup.into();
         assert!(matches!(annotation.annotation_type, AnnotationType::Markup(_)));
         assert!(annotation.alt.is_none());
+    }
+
+    fn widget_rect() -> Rect {
+        Rect::from_xywh(20.0, 30.0, 100.0, 18.0).unwrap()
+    }
+
+    #[test]
+    fn widget_annotation_text_emits_subtype_field_type_and_value() {
+        let text = WidgetField::Text(TextField {
+            value: "alice".into(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "username", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/Subtype /Widget"), "missing /Subtype /Widget");
+        assert!(contains(&pdf, b"/FT /Tx"), "missing /FT /Tx");
+        assert!(contains(&pdf, b"/T (username)"), "missing partial name /T");
+        assert!(contains(&pdf, b"/V (alice)"), "missing field value /V");
+        assert!(contains(&pdf, b"/AcroForm"), "missing /AcroForm");
+        assert!(
+            contains(&pdf, b"/NeedAppearances true"),
+            "missing /NeedAppearances true"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_text_multiline_sets_flag_bit_13() {
+        let text = WidgetField::Text(TextField {
+            value: "hello\nworld".into(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_multiline(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "bio", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Multiline = bit 13 = 4096
+        assert!(contains(&pdf, b"/Ff 4096"), "missing multiline /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_text_password_sets_flag_bit_14() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: Some(64),
+            flags: TextFieldFlags::default().with_password(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "pw", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Password = bit 14 = 8192
+        assert!(contains(&pdf, b"/Ff 8192"), "missing password /Ff bit");
+        assert!(contains(&pdf, b"/MaxLen 64"), "missing /MaxLen");
+    }
+
+    #[test]
+    fn widget_annotation_checkbox_checked_emits_yes_state() {
+        let button = WidgetField::Button(ButtonField {
+            checked: true,
+            kind: ButtonKind::Checkbox,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "opt-in", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/FT /Btn"), "missing /FT /Btn");
+        assert!(contains(&pdf, b"/AS /Yes"), "missing /AS /Yes");
+        assert!(contains(&pdf, b"/V /Yes"), "missing /V /Yes");
+    }
+
+    #[test]
+    fn widget_annotation_checkbox_unchecked_emits_off_state() {
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::Checkbox,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "opt-in", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/AS /Off"));
+        assert!(contains(&pdf, b"/V /Off"));
+    }
+
+    #[test]
+    fn widget_annotation_radio_sets_flag_bit_16() {
+        let button = WidgetField::Button(ButtonField {
+            checked: true,
+            kind: ButtonKind::Radio,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_radio(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "size", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Radio = bit 16 = 32768
+        assert!(contains(&pdf, b"/Ff 32768"), "missing radio /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_pushbutton_sets_flag_bit_17_and_caption() {
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: "Submit".into(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "go", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Pushbutton = bit 17 = 65536
+        assert!(contains(&pdf, b"/Ff 65536"), "missing pushbutton /Ff bit");
+        assert!(contains(&pdf, b"(Submit)"), "missing pushbutton caption");
+    }
+
+    #[test]
+    fn widget_annotation_choice_combo_sets_flag_bit_18() {
+        let choice = WidgetField::Choice(ChoiceField {
+            value: "US".into(),
+            default_value: "US".into(),
+            options: vec![
+                ("US".into(), "United States".into()),
+                ("CA".into(), "Canada".into()),
+            ],
+            flags: ChoiceFieldFlags::default().with_combo(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "country", choice);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/FT /Ch"), "missing /FT /Ch");
+        // Combo = bit 18 = 131072
+        assert!(contains(&pdf, b"/Ff 131072"), "missing combo /Ff bit");
+        assert!(contains(&pdf, b"/Opt"), "missing /Opt array");
+        assert!(contains(&pdf, b"(US)"), "missing US export");
+    }
+
+    #[test]
+    fn widget_annotation_read_only_sets_flag_bit_1() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_read_only(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "ro", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Read-only = bit 1 = 1
+        assert!(contains(&pdf, b"/Ff 1"), "missing read-only /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_from_trait_wraps_without_alt() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "f", text);
+        let annotation: Annotation = widget.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Widget(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn document_with_no_widgets_does_not_emit_acroform() {
+        let mut document = Document::new();
+        let page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        page.finish();
+        let pdf = document.finish().expect("document serialisation should succeed");
+        assert!(!contains(&pdf, b"/AcroForm"));
     }
 }
