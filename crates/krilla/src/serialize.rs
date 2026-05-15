@@ -709,6 +709,15 @@ impl SerializeContext {
         self.global_objects.named_destinations.insert(nd, dest_ref);
     }
 
+    /// Register the indirect reference of an AcroForm widget annotation
+    /// so the document catalogue's `/AcroForm /Fields` array includes
+    /// it (ISO 32000-2 §12.7.3). Called from
+    /// [`crate::interactive::annotation::Annotation::serialize`] when
+    /// the annotation type is [`AnnotationType::Widget`].
+    pub(crate) fn register_widget_field(&mut self, ref_: Ref) {
+        self.global_objects.widget_fields.push(ref_);
+    }
+
     pub(crate) fn register_page(&mut self, page: InternalPage) {
         let ref_ = self.new_ref();
         self.page_infos.push(PageInfo::Krilla {
@@ -1261,6 +1270,13 @@ pub(crate) struct GlobalObjects {
     /// All named destinations that have been registered, including a Ref to their destination.
     // Needs to be pub(crate) because writing of named destinations happens in `ChunkContainer`.
     pub(crate) named_destinations: MaybeTaken<HashMap<NamedDestination, Ref>>,
+    /// Indirect references of every AcroForm widget annotation emitted
+    /// across all pages. Populated by
+    /// [`SerializeContext::register_widget_field`] during annotation
+    /// serialisation; consumed in [`ChunkContainer::finish`] to write
+    /// the document catalogue's `/AcroForm /Fields` array (ISO 32000-2
+    /// §12.7.3).
+    pub(crate) widget_fields: MaybeTaken<Vec<Ref>>,
     /// A map from fonts to font container.
     font_map: MaybeTaken<IndexMap<Font, Rc<RefCell<FontContainer>>>>,
     /// All XYZ destinations used in the document. The reason we need to store them
@@ -1291,6 +1307,7 @@ pub(crate) struct GlobalObjects {
 impl GlobalObjects {
     pub(crate) fn assert_all_taken(&self) {
         assert!(self.named_destinations.is_taken());
+        assert!(self.widget_fields.is_taken());
         assert!(self.font_map.is_taken());
         assert!(self.xyz_destinations.is_taken());
         assert!(self.pages.is_taken());
