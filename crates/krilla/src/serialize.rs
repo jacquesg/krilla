@@ -553,6 +553,32 @@ impl SerializeContext {
         self.cur_ref.bump()
     }
 
+    /// Indirect ref of the document-level Type1 Helvetica font dict
+    /// used for AcroForm widget appearance streams (ISO 32000-2 §12.7.4).
+    ///
+    /// Lazily allocates the ref and emits the font dict into
+    /// `chunk_container.fonts` on first call; subsequent calls return
+    /// the same ref. Standard-14 Type1 (`/BaseFont /Helvetica`) with
+    /// `WinAnsiEncoding` so widget appearance content streams can draw
+    /// Latin-1 byte strings via `Tj`.
+    pub(crate) fn standard_helvetica_ref(&mut self) -> Ref {
+        if let Some(ref_) = self.global_objects.standard_helvetica_font {
+            return ref_;
+        }
+        let font_ref = self.cur_ref.bump();
+        let mut chunk = Chunk::new();
+        chunk
+            .indirect(font_ref)
+            .dict()
+            .pair(Name(b"Type"), Name(b"Font"))
+            .pair(Name(b"Subtype"), Name(b"Type1"))
+            .pair(Name(b"BaseFont"), Name(b"Helvetica"))
+            .pair(Name(b"Encoding"), Name(b"WinAnsiEncoding"));
+        self.chunk_container.fonts.push(chunk);
+        self.global_objects.standard_helvetica_font = Some(font_ref);
+        font_ref
+    }
+
     pub(crate) fn serialize_settings(&self) -> Arc<SerializeSettings> {
         self.serialize_settings.clone()
     }
@@ -1277,6 +1303,13 @@ pub(crate) struct GlobalObjects {
     /// the document catalogue's `/AcroForm /Fields` array (ISO 32000-2
     /// §12.7.3).
     pub(crate) widget_fields: MaybeTaken<Vec<Ref>>,
+    /// Indirect ref of the document-level Type1 Helvetica font dict
+    /// used by AcroForm widget appearance streams. `None` until the
+    /// first widget appearance stream requests it via
+    /// [`SerializeContext::standard_helvetica_ref`]; serialised into
+    /// [`ChunkContainer::fonts`] at the moment of allocation, so no
+    /// take-once semantics are needed.
+    pub(crate) standard_helvetica_font: Option<Ref>,
     /// A map from fonts to font container.
     font_map: MaybeTaken<IndexMap<Font, Rc<RefCell<FontContainer>>>>,
     /// All XYZ destinations used in the document. The reason we need to store them
