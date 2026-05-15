@@ -29,6 +29,37 @@ use crate::page::page_root_transform;
 use crate::serialize::SerializeContext;
 use crate::surface::Location;
 
+/// A single Form XObject the widget appearance pipeline emits as an
+/// indirect object alongside the annotation dict. The widget's `/AP`
+/// references one or two of these — single-state widgets use one;
+/// checkbox / radio widgets use two (`/Yes` + `/Off`).
+pub(crate) struct AppearanceStream {
+    pub(crate) xobject_ref: Ref,
+    pub(crate) bbox_w: f32,
+    pub(crate) bbox_h: f32,
+    pub(crate) content: Vec<u8>,
+    /// Whether the content stream references the document-level
+    /// Helvetica resource via `/Helv`. When `false` the XObject is
+    /// emitted with an empty resource dict (used for vector-only
+    /// strokes such as the radio dot or checkbox tick path).
+    pub(crate) uses_helvetica: bool,
+}
+
+/// The set of Form XObjects produced by widget appearance generation
+/// for one annotation. Consumed by [`Annotation::serialize`] after the
+/// annotation dict has been finalised — every stream becomes one
+/// indirect object in the same chunk as the annotation.
+pub(crate) struct AppearanceJob {
+    /// Document-level Helvetica font ref. Cached on the job so
+    /// emission does not have to round-trip through
+    /// [`SerializeContext`] a second time.
+    pub(crate) helv_ref: Ref,
+    /// "On" state stream (single-state widgets use this slot too).
+    pub(crate) on: AppearanceStream,
+    /// "Off" state stream — `Some` only for checkbox / radio.
+    pub(crate) off: Option<AppearanceStream>,
+}
+
 /// An annotation.
 pub struct Annotation {
     pub(crate) annotation_type: AnnotationType,
@@ -157,7 +188,8 @@ impl Annotation {
             .indirect(root_ref)
             .start::<pdf_writer::writers::Annotation>();
 
-        self.annotation_type
+        let appearance_job = self
+            .annotation_type
             .serialize_type(sc, &mut annotation, page_height)?;
 
         // Link annotations only set the /F PRINT flag when they have a visible
@@ -210,8 +242,51 @@ impl Annotation {
             sc.register_widget_field(root_ref);
         }
 
+        // Emit any Form XObjects produced by widget appearance generation
+        // into a dedicated chunk in `chunk_container.x_objects`. The
+        // widget's `/AP /N` indirect refs were allocated before the
+        // annotation dict was written, so the cross-reference between
+        // the annotation and the XObjects is already in place.
+        if let Some(job) = appearance_job {
+            let mut xchunk = Chunk::new();
+            emit_appearance_xobjects(&mut xchunk, job);
+            chunk_container.streams.x_objects.push(xchunk);
+        }
+
         Ok(())
     }
+}
+
+/// Emit one or two Form XObject indirect objects into `chunk` —
+/// referenced from the widget annotation's `/AP` entry. Each XObject
+/// carries a widget-local `/BBox` (`[0 0 w h]`) and a `/Resources`
+/// dict containing `/Font /Helv <helv_ref>` when the content stream
+/// references Helvetica.
+fn emit_appearance_xobjects(chunk: &mut Chunk, job: AppearanceJob) {
+    write_form_xobject(chunk, &job.on, job.helv_ref);
+    if let Some(off) = job.off {
+        write_form_xobject(chunk, &off, job.helv_ref);
+    }
+}
+
+fn write_form_xobject(chunk: &mut Chunk, stream: &AppearanceStream, helv_ref: Ref) {
+    let mut xobj = chunk.form_xobject(stream.xobject_ref, &stream.content);
+    xobj.bbox(pdf_writer::Rect::new(
+        0.0,
+        0.0,
+        stream.bbox_w,
+        stream.bbox_h,
+    ));
+    {
+        let mut resources = xobj.resources();
+        if stream.uses_helvetica {
+            let mut fonts = resources.fonts();
+            fonts.pair(Name(b"Helv"), helv_ref);
+            fonts.finish();
+        }
+        resources.finish();
+    }
+    xobj.finish();
 }
 
 /// A type of annotation.
@@ -232,7 +307,7 @@ impl AnnotationType {
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
-    ) -> KrillaResult<()> {
+    ) -> KrillaResult<Option<AppearanceJob>> {
         match self {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
             AnnotationType::Text(t) => t.serialize_type(sc, annotation, page_height),
@@ -343,7 +418,7 @@ impl LinkAnnotation {
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
-    ) -> KrillaResult<()> {
+    ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(pdf_writer::types::AnnotationType::Link);
 
         let actual_rect = self
@@ -374,10 +449,12 @@ impl LinkAnnotation {
 
         match &self.target {
             Target::Destination(destination) => {
-                destination.serialize(sc, annotation.insert(Name(b"Dest")))
+                destination.serialize(sc, annotation.insert(Name(b"Dest")))?
             }
-            Target::Action(action) => action.serialize(sc, annotation.action()),
-        }
+            Target::Action(action) => action.serialize(sc, annotation.action())?,
+        };
+
+        Ok(None)
     }
 }
 
@@ -490,7 +567,7 @@ impl TextAnnotation {
         _sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
-    ) -> KrillaResult<()> {
+    ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(pdf_writer::types::AnnotationType::Text);
 
         let actual_rect = self
@@ -513,7 +590,7 @@ impl TextAnnotation {
             write_color(annotation, color);
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -645,7 +722,7 @@ impl MarkupAnnotation {
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
-    ) -> KrillaResult<()> {
+    ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(self.subtype.to_pdf());
 
         let actual_rect = self
@@ -674,7 +751,7 @@ impl MarkupAnnotation {
             write_color(annotation, color);
         }
 
-        Ok(())
+        Ok(None)
     }
 }
 
@@ -911,10 +988,16 @@ impl ChoiceFieldFlags {
 /// carries `/FT`, `/T`, `/V`, etc.) — the merged form is what every
 /// modern PDF viewer expects for terminal fields.
 ///
-/// v1 of the moegoe integration does not emit `/AP` (appearance
-/// streams); the catalogue sets `/NeedAppearances true` so Acrobat
-/// generates appearances from `/V + /DA` on first save. The default
-/// appearance written here is `(/Helv 10 Tf 0 g)`.
+/// Every widget emits a `/AP /N` appearance stream — a Form XObject
+/// (single state for text/choice/pushbutton; `/Yes`+`/Off` sub-states
+/// for checkbox/radio) drawn in widget-local coordinates with `/BBox
+/// [0 0 w h]`. Text and choice streams reference the document-level
+/// Helvetica resource (allocated lazily via
+/// [`SerializeContext::standard_helvetica_ref`]); checkbox / radio
+/// streams use vector paths only. The catalogue still sets
+/// `/NeedAppearances true` so Acrobat regenerates appearances from
+/// `/V` + `/DA` on the first save when a non-ASCII value triggers
+/// the placeholder substitution.
 pub struct WidgetAnnotation {
     pub(crate) rect: Rect,
     pub(crate) partial_name: String,
@@ -940,10 +1023,10 @@ impl WidgetAnnotation {
 
     fn serialize_type(
         &self,
-        _sc: &mut SerializeContext,
+        sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
-    ) -> KrillaResult<()> {
+    ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(pdf_writer::types::AnnotationType::Widget);
 
         let actual_rect = self
@@ -963,6 +1046,16 @@ impl WidgetAnnotation {
         // missing but `/NeedAppearances true` is set at the catalogue.
         const DEFAULT_APPEARANCE: &[u8] = b"/Helv 10 Tf 0 g";
 
+        let bbox_w = self.rect.width();
+        let bbox_h = self.rect.height();
+
+        // Per-widget content stream(s) for `/AP /N`. Pre-allocated here
+        // so we can write the `/AP` reference into the annotation dict;
+        // the actual Form XObject indirect objects are emitted by
+        // `Annotation::serialize` after `annotation.finish()`.
+        let helv_ref = sc.standard_helvetica_ref();
+        let job: AppearanceJob;
+
         // Field-type names (`/Tx`, `/Btn`, `/Ch`) and checkbox/radio
         // state names (`/Yes`, `/Off`) are pinned by ISO 32000-2
         // §12.7.4 and emitted as PDF name objects. `pdf_writer`
@@ -979,6 +1072,19 @@ impl WidgetAnnotation {
                 if let Some(max_len) = text.max_length {
                     annotation.pair(Name(b"MaxLen"), i32::from(max_len));
                 }
+                let ap_ref = sc.new_ref();
+                write_ap_single(annotation, ap_ref);
+                job = AppearanceJob {
+                    helv_ref,
+                    on: AppearanceStream {
+                        xobject_ref: ap_ref,
+                        bbox_w,
+                        bbox_h,
+                        content: build_text_appearance_content(&text.value, bbox_h),
+                        uses_helvetica: true,
+                    },
+                    off: None,
+                };
             }
             WidgetField::Button(button) => {
                 annotation.pair(Name(b"FT"), Name(b"Btn"));
@@ -993,6 +1099,26 @@ impl WidgetAnnotation {
                         annotation.pair(Name(b"V"), state);
                         annotation.pair(Name(b"DV"), state);
                         annotation.pair(Name(b"AS"), state);
+                        let on_ref = sc.new_ref();
+                        let off_ref = sc.new_ref();
+                        write_ap_on_off(annotation, on_ref, off_ref);
+                        job = AppearanceJob {
+                            helv_ref,
+                            on: AppearanceStream {
+                                xobject_ref: on_ref,
+                                bbox_w,
+                                bbox_h,
+                                content: build_checkbox_on_content(bbox_w, bbox_h),
+                                uses_helvetica: false,
+                            },
+                            off: Some(AppearanceStream {
+                                xobject_ref: off_ref,
+                                bbox_w,
+                                bbox_h,
+                                content: build_empty_box_content(bbox_w, bbox_h),
+                                uses_helvetica: false,
+                            }),
+                        };
                     }
                     ButtonKind::Radio => {
                         // Each radio widget in a group stores its export
@@ -1009,6 +1135,26 @@ impl WidgetAnnotation {
                         };
                         annotation.pair(Name(b"V"), state);
                         annotation.pair(Name(b"AS"), state);
+                        let on_ref = sc.new_ref();
+                        let off_ref = sc.new_ref();
+                        write_ap_on_off(annotation, on_ref, off_ref);
+                        job = AppearanceJob {
+                            helv_ref,
+                            on: AppearanceStream {
+                                xobject_ref: on_ref,
+                                bbox_w,
+                                bbox_h,
+                                content: build_radio_on_content(bbox_w, bbox_h),
+                                uses_helvetica: false,
+                            },
+                            off: Some(AppearanceStream {
+                                xobject_ref: off_ref,
+                                bbox_w,
+                                bbox_h,
+                                content: build_radio_off_content(bbox_w, bbox_h),
+                                uses_helvetica: false,
+                            }),
+                        };
                     }
                     ButtonKind::PushButton => {
                         // Pushbuttons have no persistent value. /MK /CA
@@ -1020,6 +1166,19 @@ impl WidgetAnnotation {
                             mk.pair(Name(b"CA"), TextStr(&button.caption));
                             mk.finish();
                         }
+                        let ap_ref = sc.new_ref();
+                        write_ap_single(annotation, ap_ref);
+                        job = AppearanceJob {
+                            helv_ref,
+                            on: AppearanceStream {
+                                xobject_ref: ap_ref,
+                                bbox_w,
+                                bbox_h,
+                                content: build_pushbutton_content(&button.caption, bbox_w, bbox_h),
+                                uses_helvetica: true,
+                            },
+                            off: None,
+                        };
                     }
                 }
             }
@@ -1029,11 +1188,6 @@ impl WidgetAnnotation {
                 annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
                 annotation.pair(Name(b"V"), TextStr(&choice.value));
                 annotation.pair(Name(b"DV"), TextStr(&choice.default_value));
-                // /Opt is an array of pairs `[export display]`. The
-                // moegoe v1 stub passes an empty Vec — viewers render
-                // a combo box with no choices, which is the
-                // best-effort representation when `<option>` parsing
-                // has not been wired through.
                 let mut opt = annotation.insert(Name(b"Opt")).array();
                 for (export, display) in &choice.options {
                     let mut entry = opt.push().array();
@@ -1042,11 +1196,209 @@ impl WidgetAnnotation {
                     entry.finish();
                 }
                 opt.finish();
+                let ap_ref = sc.new_ref();
+                write_ap_single(annotation, ap_ref);
+                // Find display string for the current /V (export value).
+                let display = choice
+                    .options
+                    .iter()
+                    .find(|(export, _)| export == &choice.value)
+                    .map(|(_, display)| display.as_str())
+                    .unwrap_or(choice.value.as_str());
+                job = AppearanceJob {
+                    helv_ref,
+                    on: AppearanceStream {
+                        xobject_ref: ap_ref,
+                        bbox_w,
+                        bbox_h,
+                        content: build_text_appearance_content(display, bbox_h),
+                        uses_helvetica: true,
+                    },
+                    off: None,
+                };
             }
         }
 
-        Ok(())
+        Ok(Some(job))
     }
+}
+
+/// Write `/AP << /N <ap_ref> >>` into a widget annotation dict.
+fn write_ap_single(annotation: &mut pdf_writer::writers::Annotation, ap_ref: Ref) {
+    let mut ap = annotation.insert(Name(b"AP")).dict();
+    ap.pair(Name(b"N"), ap_ref);
+    ap.finish();
+}
+
+/// Write `/AP << /N << /Yes <on_ref> /Off <off_ref> >> >>` into a
+/// widget annotation dict (checkbox / radio).
+fn write_ap_on_off(annotation: &mut pdf_writer::writers::Annotation, on_ref: Ref, off_ref: Ref) {
+    let mut ap = annotation.insert(Name(b"AP")).dict();
+    let mut n = ap.insert(Name(b"N")).dict();
+    n.pair(Name(b"Yes"), on_ref);
+    n.pair(Name(b"Off"), off_ref);
+    n.finish();
+    ap.finish();
+}
+
+/// Escape a UTF-8 string for inclusion in a PDF content-stream literal
+/// `(...)`. Non-ASCII codepoints become `?` (Acrobat regenerates the
+/// proper appearance from `/V` on first save via `/NeedAppearances`).
+fn escape_pdf_string_ascii(value: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(value.len() + 2);
+    for ch in value.chars() {
+        match ch {
+            '(' | ')' | '\\' => {
+                out.push(b'\\');
+                out.push(ch as u8);
+            }
+            c if (c as u32) >= 0x20 && (c as u32) <= 0x7E => {
+                out.push(c as u8);
+            }
+            _ => out.push(b'?'),
+        }
+    }
+    out
+}
+
+/// Build a single-line text appearance: `BT /Helv 10 Tf 0 g 2 y Td (value) Tj ET`.
+/// `bbox_h` chooses a baseline ~3pt below the vertical centre.
+fn build_text_appearance_content(value: &str, bbox_h: f32) -> Vec<u8> {
+    let baseline_y = ((bbox_h - 10.0) / 2.0).max(2.0);
+    let mut out = Vec::with_capacity(value.len() + 48);
+    out.extend_from_slice(b"BT\n/Helv 10 Tf\n0 g\n2 ");
+    out.extend_from_slice(format!("{:.2}", baseline_y).as_bytes());
+    out.extend_from_slice(b" Td\n(");
+    out.extend_from_slice(&escape_pdf_string_ascii(value));
+    out.extend_from_slice(b") Tj\nET\n");
+    out
+}
+
+/// Build a checkbox "on" stream: 1pt black border + a stroked X.
+fn build_checkbox_on_content(bbox_w: f32, bbox_h: f32) -> Vec<u8> {
+    let inset = 1.0_f32;
+    let w = (bbox_w - 2.0 * inset).max(0.0);
+    let h = (bbox_h - 2.0 * inset).max(0.0);
+    let pad = 2.0_f32;
+    let x1 = inset + pad;
+    let y1 = inset + pad;
+    let x2 = inset + w - pad;
+    let y2 = inset + h - pad;
+    format!(
+        "q\n0 0 0 RG\n0.5 w\n{inset} {inset} {w} {h} re\nS\n{x1:.2} {y1:.2} m\n{x2:.2} {y2:.2} l\n{x1:.2} {y2:.2} m\n{x2:.2} {y1:.2} l\nS\nQ\n"
+    )
+    .into_bytes()
+}
+
+/// Build a checkbox "off" stream: just the 1pt black border.
+fn build_empty_box_content(bbox_w: f32, bbox_h: f32) -> Vec<u8> {
+    let inset = 1.0_f32;
+    let w = (bbox_w - 2.0 * inset).max(0.0);
+    let h = (bbox_h - 2.0 * inset).max(0.0);
+    format!("q\n0 0 0 RG\n0.5 w\n{inset} {inset} {w} {h} re\nS\nQ\n").into_bytes()
+}
+
+/// Build a radio "on" stream: a stroked circle plus a filled dot.
+fn build_radio_on_content(bbox_w: f32, bbox_h: f32) -> Vec<u8> {
+    let cx = bbox_w / 2.0;
+    let cy = bbox_h / 2.0;
+    let r_outer = (bbox_w.min(bbox_h) / 2.0 - 1.0).max(0.5);
+    let r_inner = r_outer * 0.55;
+    let mut out = String::new();
+    out.push_str("q\n0 0 0 RG\n0 0 0 rg\n0.5 w\n");
+    append_circle(&mut out, cx, cy, r_outer, "S");
+    append_circle(&mut out, cx, cy, r_inner, "f");
+    out.push_str("Q\n");
+    out.into_bytes()
+}
+
+/// Build a radio "off" stream: just the stroked outer circle.
+fn build_radio_off_content(bbox_w: f32, bbox_h: f32) -> Vec<u8> {
+    let cx = bbox_w / 2.0;
+    let cy = bbox_h / 2.0;
+    let r_outer = (bbox_w.min(bbox_h) / 2.0 - 1.0).max(0.5);
+    let mut out = String::new();
+    out.push_str("q\n0 0 0 RG\n0.5 w\n");
+    append_circle(&mut out, cx, cy, r_outer, "S");
+    out.push_str("Q\n");
+    out.into_bytes()
+}
+
+/// Build a pushbutton appearance: light grey fill, dark border, centred caption.
+fn build_pushbutton_content(caption: &str, bbox_w: f32, bbox_h: f32) -> Vec<u8> {
+    let baseline_y = ((bbox_h - 10.0) / 2.0).max(2.0);
+    let approx_glyph_w = 5.5_f32;
+    let text_x = ((bbox_w - approx_glyph_w * caption.len() as f32) / 2.0).max(2.0);
+    let mut out = Vec::with_capacity(caption.len() + 96);
+    out.extend_from_slice(b"q\n0.85 0.85 0.85 rg\n0 0 ");
+    out.extend_from_slice(format!("{:.2}", bbox_w).as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(format!("{:.2}", bbox_h).as_bytes());
+    out.extend_from_slice(b" re\nf\n0 0 0 RG\n0.5 w\n0 0 ");
+    out.extend_from_slice(format!("{:.2}", bbox_w).as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(format!("{:.2}", bbox_h).as_bytes());
+    out.extend_from_slice(b" re\nS\nBT\n/Helv 10 Tf\n0 g\n");
+    out.extend_from_slice(format!("{:.2}", text_x).as_bytes());
+    out.push(b' ');
+    out.extend_from_slice(format!("{:.2}", baseline_y).as_bytes());
+    out.extend_from_slice(b" Td\n(");
+    out.extend_from_slice(&escape_pdf_string_ascii(caption));
+    out.extend_from_slice(b") Tj\nET\nQ\n");
+    out
+}
+
+/// Approximate a circle with four cubic Bezier segments and emit the
+/// trailing operator (`S` for stroke, `f` for fill).
+fn append_circle(out: &mut String, cx: f32, cy: f32, r: f32, op: &str) {
+    let k = 0.5522847_f32 * r;
+    use std::fmt::Write as _;
+    writeln!(out, "{:.2} {:.2} m", cx + r, cy).unwrap();
+    writeln!(
+        out,
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx + r,
+        cy + k,
+        cx + k,
+        cy + r,
+        cx,
+        cy + r
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx - k,
+        cy + r,
+        cx - r,
+        cy + k,
+        cx - r,
+        cy
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx - r,
+        cy - k,
+        cx - k,
+        cy - r,
+        cx,
+        cy - r
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "{:.2} {:.2} {:.2} {:.2} {:.2} {:.2} c",
+        cx + k,
+        cy - r,
+        cx + r,
+        cy - k,
+        cx + r,
+        cy
+    )
+    .unwrap();
+    writeln!(out, "{}", op).unwrap();
 }
 
 /// Emit a `/C` colour entry on an annotation using the regular-colour
