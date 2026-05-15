@@ -913,6 +913,53 @@ pub struct ChoiceField {
     pub flags: ChoiceFieldFlags,
 }
 
+/// An AcroForm signature field (`/FT /Sig`) per ISO 32000-2 §12.7.4.5.
+///
+/// krilla emits the signature widget structure but does not sign the
+/// document. The resulting field is *unsigned* — `/V` is omitted, ready
+/// for a downstream signing pipeline (PAdES / PKCS#7) to populate the
+/// signature dictionary. The optional [`SignatureLock`] becomes a
+/// `/Lock` sub-dictionary on the widget that records which other fields
+/// the signing tool must lock alongside this one (ISO 32000-2
+/// §12.7.4.5, Table 232 — `SigFieldLock`).
+///
+/// Appearance: krilla emits an empty Form XObject so PDF viewers
+/// render the field as a blank rectangle until it has been signed.
+/// Signing tools typically replace the appearance stream when they
+/// populate `/V`.
+pub struct SignatureField {
+    /// `/Lock` sub-dictionary contents. `SignatureLock::None` omits
+    /// the `/Lock` entry entirely.
+    pub lock: SignatureLock,
+}
+
+/// `/Lock` sub-dictionary of a signature field (ISO 32000-2
+/// §12.7.4.5, Table 232 — `SigFieldLock`).
+///
+/// Determines which other fields a downstream signing tool must lock
+/// after applying the signature. `None` omits the dictionary; the
+/// signing tool is then free to lock or leave fields alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SignatureLock {
+    /// No `/Lock` dictionary emitted.
+    None,
+    /// `/Lock << /Type /SigFieldLock /Action /All >>` — every field
+    /// in the document is locked when the signature is applied.
+    All,
+    /// `/Lock << /Type /SigFieldLock /Action /Include /Fields [...] >>`
+    /// — only the listed field names are locked.
+    Include {
+        /// Fully qualified field names written into `/Fields`.
+        fields: Vec<String>,
+    },
+    /// `/Lock << /Type /SigFieldLock /Action /Exclude /Fields [...] >>`
+    /// — every field *except* the listed names is locked.
+    Exclude {
+        /// Fully qualified field names written into `/Fields`.
+        fields: Vec<String>,
+    },
+}
+
 /// A single child widget of a [`RadioGroupField`] — one HTML
 /// `<input type="radio">` element. Each child contributes a widget
 /// annotation to its page; the field-tree wiring (parent dict, `/T`,
@@ -1020,6 +1067,13 @@ pub enum WidgetField {
     /// by [`crate::page::Page::add_radio_group`]; callers do not build
     /// this variant directly.
     RadioGroupChild(RadioGroupChild),
+    /// `/Sig` signature field — an unsigned signature widget that a
+    /// downstream signing pipeline (e.g. PAdES, PKCS#7) fills in with
+    /// the signature dictionary. krilla itself does not sign documents;
+    /// it emits the widget structure (`/FT /Sig`, `/T`, optional
+    /// `/Lock`) so the document is ready to be signed. See
+    /// [`SignatureField`].
+    Signature(SignatureField),
 }
 
 /// One radio-group child widget — the field-tree dispatch payload for
@@ -1613,6 +1667,63 @@ impl WidgetAnnotation {
                     }),
                 };
             }
+            WidgetField::Signature(sig) => {
+                // ISO 32000-2 §12.7.4.5: a signature field carries
+                // `/FT /Sig` plus optional `/Lock` and `/SV` (seed value).
+                // krilla emits the field unsigned — `/V` is *omitted*
+                // entirely so a downstream signing pipeline can fill it
+                // in without rewriting the widget structure.
+                annotation.pair(Name(b"FT"), Name(b"Sig"));
+                match &sig.lock {
+                    SignatureLock::None => {}
+                    SignatureLock::All => {
+                        let mut lock = annotation.insert(Name(b"Lock")).dict();
+                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
+                        lock.pair(Name(b"Action"), Name(b"All"));
+                        lock.finish();
+                    }
+                    SignatureLock::Include { fields } => {
+                        let mut lock = annotation.insert(Name(b"Lock")).dict();
+                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
+                        lock.pair(Name(b"Action"), Name(b"Include"));
+                        let mut arr = lock.insert(Name(b"Fields")).array();
+                        for f in fields {
+                            arr.item(TextStr(f));
+                        }
+                        arr.finish();
+                        lock.finish();
+                    }
+                    SignatureLock::Exclude { fields } => {
+                        let mut lock = annotation.insert(Name(b"Lock")).dict();
+                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
+                        lock.pair(Name(b"Action"), Name(b"Exclude"));
+                        let mut arr = lock.insert(Name(b"Fields")).array();
+                        for f in fields {
+                            arr.item(TextStr(f));
+                        }
+                        arr.finish();
+                        lock.finish();
+                    }
+                }
+                // An empty appearance stream — the field is unsigned so
+                // there is nothing to display. Signing tools replace this
+                // when they populate `/V`. We still emit a Form XObject
+                // reference so viewers do not synthesise a fallback
+                // appearance from `/V` (which is absent).
+                let ap_ref = sc.new_ref();
+                write_ap_single(annotation, ap_ref);
+                job = AppearanceJob {
+                    helv_ref,
+                    on: AppearanceStream {
+                        xobject_ref: ap_ref,
+                        bbox_w,
+                        bbox_h,
+                        content: build_empty_signature_content(),
+                        uses_helvetica: false,
+                    },
+                    off: None,
+                };
+            }
             WidgetField::Choice(choice) => {
                 annotation.pair(Name(b"FT"), Name(b"Ch"));
                 annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
@@ -1774,6 +1885,14 @@ fn build_checkbox_on_content(bbox_w: f32, bbox_h: f32) -> Vec<u8> {
         "q\n0 0 0 RG\n0.5 w\n{inset} {inset} {w} {h} re\nS\n{x1:.2} {y1:.2} m\n{x2:.2} {y2:.2} l\n{x1:.2} {y2:.2} m\n{x2:.2} {y1:.2} l\nS\nQ\n"
     )
     .into_bytes()
+}
+
+/// Build an empty signature appearance — no visible glyphs, just an
+/// empty marked-content stream. PDF viewers fall back to viewer-default
+/// rendering for an unsigned signature field; this keeps the AP form
+/// XObject well-formed so the viewer does not synthesise a placeholder.
+fn build_empty_signature_content() -> Vec<u8> {
+    Vec::new()
 }
 
 /// Build a checkbox "off" stream: just the 1pt black border.
