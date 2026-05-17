@@ -62,7 +62,7 @@ fn metadata_pdf_20_author(document: &mut Document) {
 fn minimal_page(document: &mut Document) {
     use krilla::page::PageSettings;
     let mut page = document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
-    let mut surface = page.surface();
+    let surface = page.surface();
     surface.finish();
     page.finish();
 }

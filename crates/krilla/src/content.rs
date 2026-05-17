@@ -188,6 +188,26 @@ impl ContentBuilder {
         }
     }
 
+    /// Apply overprint state (ISO 32000-2 §8.6.7) — installs `OP`, `op`
+    /// and `OPM` entries on the current graphics state. An empty
+    /// [`Overprint`](crate::overprint::Overprint) is a no-op.
+    pub(crate) fn set_overprint(&mut self, overprint: crate::overprint::Overprint) {
+        if overprint.is_empty() {
+            return;
+        }
+        let mut state = ExtGState::new();
+        if let Some(stroking) = overprint.stroking {
+            state = state.stroking_overprint(stroking);
+        }
+        if let Some(non_stroking) = overprint.non_stroking {
+            state = state.non_stroking_overprint(non_stroking);
+        }
+        if let Some(mode) = overprint.mode {
+            state = state.overprint_mode(mode.to_pdf());
+        }
+        self.graphics_states.combine(&state);
+    }
+
     pub(crate) fn expand_bbox(&mut self, new_bbox: Rect) {
         let new_bbox = self.graphics_states.transform_bbox(new_bbox);
         if let Some(bbox) = &mut self.bbox {
