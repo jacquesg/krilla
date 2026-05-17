@@ -567,3 +567,90 @@ fn text_rendering_setting_switches_glyph_to_vector_emission() {
              moveto={has_moveto} fill={has_fill}",
     );
 }
+
+/// Render the same string under each [`FontEmbedding`] mode and verify
+/// the embedded font programme behaves as documented:
+///
+/// - `Subset`: the document references `/FontFile2` and the resulting
+///   PDF is small (subset of NOTO_SANS).
+/// - `Full`: the document references `/FontFile2` and the resulting
+///   PDF is materially larger than the subset PDF — the full NOTO_SANS
+///   font programme is several hundred kilobytes, whereas a one-word
+///   subset is well under twenty kilobytes.
+/// - `None`: the document does not reference `/FontFile2` or
+///   `/FontFile3` at all.
+#[test]
+fn font_embedding_setting_controls_fontfile_emission() {
+    use krilla::{FontEmbedding, SerializeSettings};
+
+    fn render(setting: FontEmbedding) -> Vec<u8> {
+        let settings = SerializeSettings {
+            compress_content_streams: false,
+            font_embedding: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn contains(pdf: &[u8], needle: &[u8]) -> bool {
+        pdf.windows(needle.len()).any(|w| w == needle)
+    }
+
+    let subset_pdf = render(FontEmbedding::Subset);
+    let full_pdf = render(FontEmbedding::Full);
+    let none_pdf = render(FontEmbedding::None);
+
+    // Subset and Full both reference `/FontFile2` (NOTO_SANS is
+    // TrueType, so the descriptor entry is FontFile2, not FontFile3).
+    assert!(
+        contains(&subset_pdf, b"/FontFile2"),
+        "subset embedding must reference /FontFile2",
+    );
+    assert!(
+        contains(&full_pdf, b"/FontFile2"),
+        "full embedding must reference /FontFile2",
+    );
+
+    // None embedding omits the font programme entirely.
+    assert!(
+        !contains(&none_pdf, b"/FontFile2") && !contains(&none_pdf, b"/FontFile3"),
+        "none embedding must not reference /FontFile2 or /FontFile3",
+    );
+
+    // The font programme dominates the PDF size for these tiny
+    // documents. Full-embedding the entire NOTO_SANS file produces a
+    // document at least four times the size of the two-glyph subset.
+    // (NOTO_SANS Regular ships at ~500 KiB on disk; a "Hi" subset is
+    // well under 20 KiB.) We use a 4x ratio as the assertion to leave
+    // generous head-room for any future flate-encoding wins, while
+    // still cleanly distinguishing the two embedding modes.
+    let subset_len = subset_pdf.len();
+    let full_len = full_pdf.len();
+    assert!(
+        full_len >= subset_len * 4,
+        "full embedding must produce a materially larger PDF than \
+             subset embedding (subset={subset_len} bytes, full={full_len} bytes)",
+    );
+
+    // None embedding strips the largest stream from the PDF, so it
+    // must be smaller than the subset PDF.
+    let none_len = none_pdf.len();
+    assert!(
+        none_len < subset_len,
+        "none embedding must produce a smaller PDF than subset \
+             embedding (none={none_len} bytes, subset={subset_len} bytes)",
+    );
+}

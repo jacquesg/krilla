@@ -897,6 +897,7 @@ pub fn settings_1() -> SerializeSettings {
         render_svg_glyph_fn: render_svg_glyph,
         output_intents: Vec::new(),
         text_rendering: krilla::TextRendering::Glyphs,
+        font_embedding: krilla::FontEmbedding::Subset,
     }
 }
 
