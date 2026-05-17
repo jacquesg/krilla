@@ -208,7 +208,23 @@ impl ChunkContainer {
             || self.non_stream.destination_profiles.is_some()
             || self.non_stream.struct_tree_root.is_some()
         {
-            let meta_ref = if sc.serialize_settings().xmp_metadata {
+            // Raw-XMP override: when the caller supplied a verbatim XMP
+            // packet via `Metadata::raw_xmp`, write those bytes into the
+            // `/Metadata` stream instead of finishing the in-memory
+            // [`XmpWriter`]. This is an explicit opt-in, so it forces the
+            // catalogue to carry a `/Metadata` entry even when
+            // `SerializeSettings::xmp_metadata` is `false`.
+            let meta_ref = if let Some(raw) = self
+                .metadata
+                .as_ref()
+                .and_then(|m| m.raw_xmp.as_deref())
+            {
+                let meta_ref = remapped_ref.bump();
+                pdf.stream(meta_ref, raw)
+                    .pair(Name(b"Type"), Name(b"Metadata"))
+                    .pair(Name(b"Subtype"), Name(b"XML"));
+                Some(meta_ref)
+            } else if sc.serialize_settings().xmp_metadata {
                 let meta_ref = remapped_ref.bump();
                 let xmp_buf = xmp.finish(None);
                 pdf.stream(meta_ref, xmp_buf.as_bytes())
