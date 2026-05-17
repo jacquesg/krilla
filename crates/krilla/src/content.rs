@@ -1151,7 +1151,15 @@ impl ContentBuilder {
                     // stops would alter interpolation.
                     content_builder.set_fill_opacity(opacity);
                     let policy = sc.serialize_settings().colour_conversion;
-                    let projected = color.clone().project(policy);
+                    // Compose colour_conversion projection with the
+                    // `rgb_grey_to_devicegray` promotion: project
+                    // first (e.g. ForceRgb materialises an RGB
+                    // triple), then promote `r == g == b` to Luma so
+                    // the final fill emits as `g` instead of `rg`.
+                    let projected = color
+                        .clone()
+                        .project(policy)
+                        .maybe_promote_grey_to_luma(sc);
                     let cs = projected.color_space(sc);
                     let color_space_resource =
                         Self::cs_to_content_cs(content_builder, sc, chunk_container, cs);
@@ -1202,8 +1210,18 @@ impl ContentBuilder {
                 // This is the only solid-paint dispatch point in the
                 // content builder; it covers fill, stroke, and the
                 // glyph paint paths (all routed through `set_solid_fn`).
+                //
+                // After projection, the `rgb_grey_to_devicegray`
+                // setting promotes `r == g == b` to Luma so the fill
+                // emits as `g` (DeviceGray) instead of `rg`. The
+                // `preserve_black` setting is consumed inside
+                // `color_space()` to bypass per-paint ICC routing for
+                // pure black.
                 let policy = sc.serialize_settings().colour_conversion;
-                let projected = c.clone().project(policy);
+                let projected = c
+                    .clone()
+                    .project(policy)
+                    .maybe_promote_grey_to_luma(sc);
                 let cs = projected.color_space(sc);
                 let color_space_resource = Self::cs_to_content_cs(self, sc, chunk_container, cs);
                 set_solid_fn(&mut self.content, color_space_resource, &projected);
