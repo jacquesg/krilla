@@ -273,6 +273,59 @@ pub struct SerializeSettings {
     /// cascade) can carry an authored value through to the serialiser
     /// without losing it; a real simplification pass is future work.
     pub shape_optimisation: ShapeOptimisation,
+    /// Promote RGB greys to `/DeviceGray` at paint dispatch.
+    ///
+    /// When `true`, every solid RGB colour whose channels are equal
+    /// (`r == g == b`) is reclassified as a Luma colour before colour-
+    /// space selection, so the content stream emits a `g` (DeviceGray)
+    /// operator instead of `rg`. Implements ISO 32000-2 §8.6.4 by
+    /// choosing the narrowest device space that represents the source
+    /// value exactly.
+    ///
+    /// Maps to moegoe's `-bd-pdf-colour-options: use-true-black`
+    /// (Prince warrant): print workflows that route greyscale content
+    /// through `/DeviceGray` avoid an unnecessary three-channel
+    /// representation and the slight ink-laydown asymmetry that comes
+    /// with it.
+    ///
+    /// The default is `false`, preserving the source colour space
+    /// exactly (existing behaviour).
+    ///
+    /// This setting composes with [`colour_conversion`]: projection
+    /// runs first, then `r == g == b` promotion is applied to the
+    /// projected value. A `ForceRgb` policy with this flag therefore
+    /// still produces `/DeviceGray` for greyscale inputs.
+    ///
+    /// [`colour_conversion`]: SerializeSettings::colour_conversion
+    pub rgb_grey_to_devicegray: bool,
+    /// Bypass the ICC reclassification path for pure black at paint
+    /// dispatch.
+    ///
+    /// When `true`, solid paints sourced from `rgb(0, 0, 0)` or
+    /// `device-cmyk(0, 0, 0, 1)` are emitted in their device space
+    /// (`DeviceRGB` / `DeviceCMYK`) regardless of [`no_device_cs`].
+    /// This short-circuits the per-paint sRGB / cmyk-profile routing
+    /// that would otherwise replace pure black with the ICC-transformed
+    /// equivalent — which, through a fallback CMYK profile, can become
+    /// a near-black mixed value rather than the intended single-channel
+    /// black.
+    ///
+    /// Maps to moegoe's `-bd-pdf-colour-options: preserve-black`
+    /// (a moegoe extension): authors who set this flag are asserting
+    /// that pure black must remain device-black in print, even when
+    /// the rest of the document is colour-managed.
+    ///
+    /// The default is `false`, preserving existing behaviour.
+    ///
+    /// **Validator interaction.** PDF/A and PDF/X variants force
+    /// [`no_device_cs`] to `true` and forbid device colour spaces in
+    /// many content positions; combining `preserve_black` with such a
+    /// validator may cause emission of a device-space colour that the
+    /// validator subsequently rejects. The flag is intended for
+    /// non-validated, print-oriented workflows.
+    ///
+    /// [`no_device_cs`]: SerializeSettings::no_device_cs
+    pub preserve_black: bool,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -802,6 +855,8 @@ impl Default for SerializeSettings {
             glyph_layout: GlyphLayout::Optical,
             colour_conversion: ColourConversion::Auto,
             shape_optimisation: ShapeOptimisation::Auto,
+            rgb_grey_to_devicegray: false,
+            preserve_black: false,
         }
     }
 }
