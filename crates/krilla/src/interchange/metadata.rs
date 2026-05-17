@@ -30,6 +30,10 @@ pub struct Metadata {
     pub(crate) page_mode: Option<PageMode>,
     pub(crate) viewer_preferences: ViewerPreferences,
     pub(crate) trapped: Option<Trapping>,
+    /// Author-supplied verbatim XMP packet. When set, it replaces the
+    /// stream payload that krilla would otherwise build via [`XmpWriter`].
+    /// See [`Metadata::raw_xmp`].
+    pub(crate) raw_xmp: Option<Vec<u8>>,
 }
 
 /// Trapping status for a PDF document.
@@ -180,6 +184,29 @@ impl Metadata {
     /// PDF/X validator is active.
     pub fn trapped(mut self, trapped: Trapping) -> Self {
         self.trapped = Some(trapped);
+        self
+    }
+
+    /// Override the XMP metadata stream with the supplied bytes verbatim.
+    ///
+    /// When set, the `/Metadata` stream the catalogue points at will contain
+    /// exactly the bytes the caller supplied (typically a fully formed
+    /// `<?xpacket begin="..."?>...<?xpacket end="w"?>` packet), and krilla
+    /// will not invoke [`XmpWriter`] for this document. The fields normally
+    /// reflected into XMP (title, authors, dates, validator metadata, etc.)
+    /// are still written to the Document Information dictionary where
+    /// applicable, but they will not be merged into the XMP packet — the
+    /// caller is responsible for the full contents.
+    ///
+    /// Supplying raw XMP forces emission of a `/Metadata` stream regardless
+    /// of [`crate::SerializeSettings::xmp_metadata`]: the explicit override
+    /// is treated as opt-in.
+    ///
+    /// Default behaviour (no call to this method) is unchanged.
+    ///
+    /// [`XmpWriter`]: xmp_writer::XmpWriter
+    pub fn raw_xmp(mut self, bytes: Vec<u8>) -> Self {
+        self.raw_xmp = Some(bytes);
         self
     }
 
