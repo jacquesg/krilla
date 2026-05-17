@@ -255,6 +255,18 @@ impl<'a> Surface<'a> {
     /// This is a very low-level method, which gives you full control over how to place
     /// the glyphs that make up the text. This means that you must have your own text processing
     /// logic for dealing with bidirectional text, font fallback, text layouting, etc.
+    ///
+    /// When the active document was constructed with
+    /// [`SerializeSettings::text_rendering`] set to
+    /// [`TextRendering::Vector`], the `outlined` argument is ignored and
+    /// glyphs are emitted as filled vector paths regardless. The
+    /// document-level setting therefore acts as a one-way override that
+    /// can promote text-as-glyphs emission to vector emission, but never
+    /// downgrades an explicit per-call `outlined: true` request.
+    ///
+    /// [`SerializeSettings::text_rendering`]:
+    ///     crate::SerializeSettings::text_rendering
+    /// [`TextRendering::Vector`]: crate::TextRendering::Vector
     pub fn draw_glyphs(
         &mut self,
         start: Point,
@@ -265,6 +277,11 @@ impl<'a> Surface<'a> {
         outlined: bool,
     ) {
         let context_color = self.context_color();
+        let outlined = outlined
+            || matches!(
+                self.sc.serialize_settings().text_rendering,
+                crate::serialize::TextRendering::Vector,
+            );
         if outlined {
             self.outline_glyphs(glyphs, context_color, start, font, font_size);
         } else {

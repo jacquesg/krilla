@@ -487,3 +487,82 @@ fn text_variable_font_cff2(surface: &mut Surface) {
         "I love variable fonts!",
     );
 }
+
+/// Render the word "Hi" once with [`TextRendering::Glyphs`] and once
+/// with [`TextRendering::Vector`], then assert the byte stream emits
+/// text-showing operators in the first case and path operators in the
+/// second.
+///
+/// Both passes disable content-stream compression
+/// ([`SerializeSettings::compress_content_streams`] = `false`) so the
+/// page content stream is inspectable as ASCII PDF operators. krilla
+/// writes several auxiliary streams (CID-to-GID maps, embedded font
+/// programmes) interleaved with the page content stream — rather than
+/// trying to identify "the" page stream we scan the entire PDF for the
+/// presence and absence of the operators of interest, which is
+/// equivalent because the auxiliary streams never contain `BT`/`ET`
+/// text-block markers.
+#[test]
+fn text_rendering_setting_switches_glyph_to_vector_emission() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    fn render(setting: TextRendering) -> Vec<u8> {
+        let settings = SerializeSettings {
+            compress_content_streams: false,
+            text_rendering: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            // `outlined: false` — the document-level setting must be the
+            // only thing that flips the emission path.
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn contains_op(pdf: &[u8], op: &[u8]) -> bool {
+        pdf.windows(op.len()).any(|w| w == op)
+    }
+
+    let glyphs_pdf = render(TextRendering::Glyphs);
+    let vector_pdf = render(TextRendering::Vector);
+
+    // Glyphs mode: text-block operators (`BT`/`ET`) frame a `Tj` call.
+    assert!(
+        contains_op(&glyphs_pdf, b"\nBT\n") || contains_op(&glyphs_pdf, b" BT\n"),
+        "glyphs mode must emit a `BT` text-block operator",
+    );
+    assert!(
+        contains_op(&glyphs_pdf, b"\nET\n") || contains_op(&glyphs_pdf, b" ET\n"),
+        "glyphs mode must emit a matching `ET` text-block operator",
+    );
+
+    // Vector mode: text-block operators absent in the page content
+    // stream. (Auxiliary streams produced by krilla — font programmes,
+    // CMap, /ToUnicode — never embed `BT`/`ET`.)
+    assert!(
+        !contains_op(&vector_pdf, b"\nBT\n") && !contains_op(&vector_pdf, b" BT\n"),
+        "vector mode must NOT emit a `BT` text-block operator",
+    );
+
+    // Vector mode: path operators (`m`/`l`/`c`/`h`/`f`) are present.
+    // We assert on at least `moveto` + `fill`; the curve/line operator
+    // is glyph-shape-dependent and not strictly required.
+    let has_moveto = contains_op(&vector_pdf, b" m\n") || contains_op(&vector_pdf, b"\nm\n");
+    let has_fill = contains_op(&vector_pdf, b" f\n") || contains_op(&vector_pdf, b"\nf\n");
+    assert!(
+        has_moveto && has_fill,
+        "vector mode must emit path operators (`m` and `f`); \
+             moveto={has_moveto} fill={has_fill}",
+    );
+}
