@@ -410,6 +410,22 @@ impl<'a> Surface<'a> {
         self.bd.get_mut().set_blend_mode(blend_mode.to_pdf());
     }
 
+    /// Push a new overprint state (ISO 32000-2 §8.6.7).
+    ///
+    /// Subsequent painting operations on this surface (up to the matching
+    /// [`Surface::pop`]) honour the supplied [`Overprint`] flags and
+    /// mode. Defaults — where a field is absent — match PDF defaults
+    /// (no overprint, [`OverprintMode::OverrideAllColorants`]).
+    ///
+    /// [`Overprint`]: crate::overprint::Overprint
+    /// [`OverprintMode::OverrideAllColorants`]:
+    ///     crate::overprint::OverprintMode::OverrideAllColorants
+    pub fn push_overprint(&mut self, overprint: crate::overprint::Overprint) {
+        self.push_instructions.push(PushInstruction::Overprint);
+        self.bd.get_mut().save_graphics_state();
+        self.bd.get_mut().set_overprint(overprint);
+    }
+
     /// Push a new clip path.
     pub fn push_clip_path(&mut self, path: &Path, clip_rule: &FillRule) {
         self.push_instructions.push(PushInstruction::ClipPath);
@@ -494,6 +510,7 @@ impl<'a> Surface<'a> {
             }
             PushInstruction::ClipPath => self.bd.get_mut().pop_clip_path(),
             PushInstruction::BlendMode => self.bd.get_mut().restore_graphics_state(),
+            PushInstruction::Overprint => self.bd.get_mut().restore_graphics_state(),
             PushInstruction::Mask(mask) => {
                 let stream = self.bd.sub_builders.pop().unwrap().finish(self.sc);
                 self.bd.get_mut().draw_masked(self.sc, *mask, stream)
@@ -631,6 +648,7 @@ pub(crate) enum PushInstruction {
     Opacity(NormalizedF32),
     ClipPath,
     BlendMode,
+    Overprint,
     Mask(Box<Mask>),
     Isolated,
 }

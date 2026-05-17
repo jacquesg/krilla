@@ -23,3 +23,4 @@ sitro = { workspace = true, optional = true }
 difference = { workspace = true }
 tiny-skia-path = { workspace = true }
 once_cell = { workspace = true }
+flate2 = { workspace = true }

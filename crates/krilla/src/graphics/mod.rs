@@ -6,6 +6,7 @@ pub mod icc;
 #[cfg(feature = "raster-images")]
 pub mod image;
 pub mod mask;
+pub mod overprint;
 pub mod paint;
 pub(crate) mod separation;
 pub(crate) mod shading_function;

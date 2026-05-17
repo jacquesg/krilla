@@ -1,7 +1,7 @@
 use std::hash::Hash;
 use std::sync::Arc;
 
-use pdf_writer::types::BlendMode;
+use pdf_writer::types::{BlendMode, OverprintMode};
 use pdf_writer::{Chunk, Finish, Name, Ref};
 
 use crate::chunk_container::ChunkContainerFn;
@@ -25,6 +25,13 @@ struct Repr {
     blend_mode: Option<BlendMode>,
     /// An active mask.
     mask: Option<Ref>,
+    /// The stroking overprint flag (`OP`, ISO 32000-2 §8.6.7).
+    stroking_overprint: Option<bool>,
+    /// The non-stroking overprint flag (`op`, ISO 32000-2 §8.6.7).
+    non_stroking_overprint: Option<bool>,
+    /// The overprint mode (`OPM`, ISO 32000-2 §8.6.7). `0` = override all
+    /// colorants on overprint; `1` = ignore zero-valued components.
+    overprint_mode: Option<OverprintMode>,
 }
 
 /// A graphics state containing information about
@@ -75,12 +82,39 @@ impl ExtGState {
         self
     }
 
+    /// Create a new graphics state with a stroking overprint flag
+    /// (`OP`, ISO 32000-2 §8.6.7).
+    #[must_use]
+    pub(crate) fn stroking_overprint(mut self, overprint: bool) -> Self {
+        Arc::make_mut(&mut self.0).stroking_overprint = Some(overprint);
+        self
+    }
+
+    /// Create a new graphics state with a non-stroking overprint flag
+    /// (`op`, ISO 32000-2 §8.6.7).
+    #[must_use]
+    pub(crate) fn non_stroking_overprint(mut self, overprint: bool) -> Self {
+        Arc::make_mut(&mut self.0).non_stroking_overprint = Some(overprint);
+        self
+    }
+
+    /// Create a new graphics state with an overprint mode
+    /// (`OPM`, ISO 32000-2 §8.6.7).
+    #[must_use]
+    pub(crate) fn overprint_mode(mut self, mode: OverprintMode) -> Self {
+        Arc::make_mut(&mut self.0).overprint_mode = Some(mode);
+        self
+    }
+
     /// Check whether the graphics state is empty.
     pub(crate) fn empty(&self) -> bool {
         self.0.mask.is_none()
             && self.0.stroking_alpha.is_none()
             && self.0.non_stroking_alpha.is_none()
             && self.0.blend_mode.is_none()
+            && self.0.stroking_overprint.is_none()
+            && self.0.non_stroking_overprint.is_none()
+            && self.0.overprint_mode.is_none()
     }
 
     /// Integrate another graphics state into the current one. This is done by replacing
@@ -101,6 +135,18 @@ impl ExtGState {
 
         if let Some(mask) = other.0.mask {
             Arc::make_mut(&mut self.0).mask = Some(mask);
+        }
+
+        if let Some(stroking_overprint) = other.0.stroking_overprint {
+            Arc::make_mut(&mut self.0).stroking_overprint = Some(stroking_overprint);
+        }
+
+        if let Some(non_stroking_overprint) = other.0.non_stroking_overprint {
+            Arc::make_mut(&mut self.0).non_stroking_overprint = Some(non_stroking_overprint);
+        }
+
+        if let Some(overprint_mode) = other.0.overprint_mode {
+            Arc::make_mut(&mut self.0).overprint_mode = Some(overprint_mode);
         }
     }
 }
@@ -142,6 +188,23 @@ impl Cacheable for ExtGState {
             sc.register_validation_error(ValidationError::Transparency(sc.location));
 
             ext_st.pair(Name(b"SMask"), mask_ref);
+        }
+
+        // Overprint (ISO 32000-2 §8.6.7) — `OP` is the stroking overprint
+        // flag, `op` is the non-stroking overprint flag, `OPM` is the
+        // overprint mode (`0` overrides all colorants, `1` ignores
+        // zero-valued components — the latter is forbidden by PDF/A for
+        // ICCBased colour spaces when overprinting is enabled).
+        if let Some(stroking_overprint) = self.0.stroking_overprint {
+            ext_st.overprint(stroking_overprint);
+        }
+
+        if let Some(non_stroking_overprint) = self.0.non_stroking_overprint {
+            ext_st.overprint_fill(non_stroking_overprint);
+        }
+
+        if let Some(overprint_mode) = self.0.overprint_mode {
+            ext_st.overprint_mode(overprint_mode);
         }
 
         ext_st.finish();

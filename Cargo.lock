@@ -987,6 +987,7 @@ name = "krilla-tests"
 version = "0.0.0"
 dependencies = [
  "difference",
+ "flate2",
  "fontdb",
  "image 0.25.2",
  "krilla",
