@@ -1142,11 +1142,20 @@ impl ContentBuilder {
              content_builder: &mut ContentBuilder| {
                 if let Some((color, opacity)) = gradient_props.single_stop_color() {
                     // Write gradients with one stop as a solid color fill.
+                    // Apply the same projection policy as the
+                    // `InnerPaint::Color` arm below: a single-stop
+                    // gradient is semantically a solid paint and must
+                    // therefore travel through the same colour
+                    // conversion. Multi-stop gradients deliberately
+                    // skip projection because converting individual
+                    // stops would alter interpolation.
                     content_builder.set_fill_opacity(opacity);
-                    let cs = color.color_space(sc);
+                    let policy = sc.serialize_settings().colour_conversion;
+                    let projected = color.clone().project(policy);
+                    let cs = projected.color_space(sc);
                     let color_space_resource =
                         Self::cs_to_content_cs(content_builder, sc, chunk_container, cs);
-                    set_solid_fn(&mut content_builder.content, color_space_resource, color);
+                    set_solid_fn(&mut content_builder.content, color_space_resource, &projected);
                 } else {
                     let shading_mask = Mask::new_from_shading(
                         gradient_props.clone(),
@@ -1186,9 +1195,18 @@ impl ContentBuilder {
 
         match &paint.0 {
             InnerPaint::Color(c) => {
-                let cs = c.color_space(sc);
+                // Project the source colour through the configured
+                // [`ColourConversion`] policy before colour-space
+                // selection. `Auto` (the default) passes the value
+                // through unchanged, preserving existing behaviour.
+                // This is the only solid-paint dispatch point in the
+                // content builder; it covers fill, stroke, and the
+                // glyph paint paths (all routed through `set_solid_fn`).
+                let policy = sc.serialize_settings().colour_conversion;
+                let projected = c.clone().project(policy);
+                let cs = projected.color_space(sc);
                 let color_space_resource = Self::cs_to_content_cs(self, sc, chunk_container, cs);
-                set_solid_fn(&mut self.content, color_space_resource, c);
+                set_solid_fn(&mut self.content, color_space_resource, &projected);
             }
             InnerPaint::LinearGradient(lg) => {
                 let (gradient_props, transform) = lg.clone().gradient_properties(bounds);

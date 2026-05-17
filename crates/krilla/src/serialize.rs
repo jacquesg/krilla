@@ -16,7 +16,7 @@ use crate::configure::validate::ValidationStore;
 use crate::configure::{Configuration, PdfVersion, ValidationError, Validators};
 use crate::error::{KrillaError, KrillaResult, LimitError};
 use crate::geom::Size;
-use crate::graphics::color::{rgb, ColorSpace};
+use crate::graphics::color::{rgb, ColorSpace, ColourConversion};
 use crate::graphics::icc::{GenericICCProfile, ICCBasedColorSpace, ICCProfile};
 #[cfg(feature = "raster-images")]
 use crate::graphics::image::Image;
@@ -225,6 +225,26 @@ pub struct SerializeSettings {
     /// runs without an `x_offset` always use `Tj` regardless (this
     /// predates the setting and is unrelated to it).
     pub glyph_layout: GlyphLayout,
+    /// How regular colours should be projected before being written
+    /// to the content stream.
+    ///
+    /// [`ColourConversion::Auto`] (the default) preserves the
+    /// existing krilla behaviour: every colour is emitted in its
+    /// source space (RGB, CMYK, Luma, or Separation). The
+    /// `Force*` variants project regular colours into the requested
+    /// target space using ISO 32000-2 §8.6.4 (RGB <-> CMYK) and
+    /// Rec. 709 (RGB -> Y) at every fill, stroke, and glyph paint
+    /// dispatch in [`crate::content`].
+    ///
+    /// `ContentOnly` and `ForceSpot` are reserved for Phase 3 of
+    /// the moegoe `colour_conversion` work and are currently
+    /// pass-throughs at this layer; see [`ColourConversion`] for
+    /// the variant-by-variant contract.
+    ///
+    /// Single-stop gradients that route through the solid-fill path
+    /// at `content.rs` are also projected; multi-stop gradients are
+    /// **not** projected because doing so would alter interpolation.
+    pub colour_conversion: ColourConversion,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -343,6 +363,7 @@ impl Default for SerializeSettings {
             font_embedding: FontEmbedding::Subset,
             fallback_cmyk_profile: None,
             glyph_layout: GlyphLayout::Optical,
+            colour_conversion: ColourConversion::Auto,
         }
     }
 }

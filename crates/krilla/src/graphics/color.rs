@@ -124,6 +124,168 @@ impl Color {
             Color::Special(SpecialColor::Separation(c)) => c.space.fallback,
         }
     }
+
+    /// Project this colour through the supplied [`ColourConversion`]
+    /// policy.
+    ///
+    /// Returns a new `Color` in the target space (or `self` for the
+    /// pass-through variants). Maths is performed in normalised
+    /// `f32` `[0, 1]` and quantised back to `u8` on the way out.
+    /// See the [`ColourConversion`] variants for the precise
+    /// formulae.
+    pub(crate) fn project(self, policy: ColourConversion) -> Color {
+        match policy {
+            ColourConversion::Auto
+            | ColourConversion::None
+            | ColourConversion::ContentOnly
+            | ColourConversion::ForceSpot => self,
+            ColourConversion::ForceRgb => match self {
+                Color::Regular(RegularColor::Rgb(_)) => self,
+                Color::Regular(RegularColor::Cmyk(c)) => cmyk_to_rgb(c).into(),
+                Color::Regular(RegularColor::Luma(l)) => {
+                    rgb::Color::new(l.0, l.0, l.0).into()
+                }
+                Color::Special(SpecialColor::Separation(spot)) => {
+                    separation_to_regular(&spot)
+                        .into_color()
+                        .project(ColourConversion::ForceRgb)
+                }
+            },
+            ColourConversion::ForceCmyk => match self {
+                Color::Regular(RegularColor::Cmyk(_)) => self,
+                Color::Regular(RegularColor::Rgb(r)) => rgb_to_cmyk(r).into(),
+                Color::Regular(RegularColor::Luma(l)) => {
+                    // Pure-K projection: c = m = y = 0, k = 1 - L.
+                    let k = 255u8.saturating_sub(l.0);
+                    cmyk::Color::new(0, 0, 0, k).into()
+                }
+                Color::Special(SpecialColor::Separation(spot)) => {
+                    separation_to_regular(&spot)
+                        .into_color()
+                        .project(ColourConversion::ForceCmyk)
+                }
+            },
+            ColourConversion::ForceGrey => match self {
+                Color::Regular(RegularColor::Luma(_)) => self,
+                Color::Regular(RegularColor::Rgb(r)) => rgb_to_grey(r).into(),
+                Color::Regular(RegularColor::Cmyk(c)) => cmyk_to_grey(c).into(),
+                Color::Special(SpecialColor::Separation(spot)) => {
+                    separation_to_regular(&spot)
+                        .into_color()
+                        .project(ColourConversion::ForceGrey)
+                }
+            },
+        }
+    }
+}
+
+impl RegularColor {
+    /// Internal helper that lifts a [`RegularColor`] to a [`Color`]
+    /// for `project`'s recursive case.
+    #[inline]
+    fn into_color(self) -> Color {
+        Color::Regular(self)
+    }
+}
+
+// --- Projection helpers ---------------------------------------------------
+//
+// These free functions implement the channel-level maths for each
+// source -> target projection. They are kept `pub(crate)` so they
+// stay invisible to library consumers; the only public surface is
+// [`Color::project`].
+
+#[inline]
+fn u8_to_unit(channel: u8) -> f32 {
+    channel as f32 / 255.0
+}
+
+#[inline]
+fn unit_to_u8(channel: f32) -> u8 {
+    (channel.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// RGB -> CMYK per ISO 32000-2 §8.6.4.
+///
+/// `k = 1 - max(r, g, b)`, then `c = (1 - r - k) / (1 - k)` (and
+/// analogously for `m`/`y`). When `k == 1` (pure black) the
+/// divisor collapses, so `c`, `m`, `y` are forced to zero.
+pub(crate) fn rgb_to_cmyk(rgb: rgb::Color) -> cmyk::Color {
+    let r = u8_to_unit(rgb.0);
+    let g = u8_to_unit(rgb.1);
+    let b = u8_to_unit(rgb.2);
+    let max = r.max(g).max(b);
+    let k = 1.0 - max;
+    let (c, m, y) = if (1.0 - k).abs() < f32::EPSILON {
+        (0.0, 0.0, 0.0)
+    } else {
+        let denom = 1.0 - k;
+        (
+            (1.0 - r - k) / denom,
+            (1.0 - g - k) / denom,
+            (1.0 - b - k) / denom,
+        )
+    };
+    cmyk::Color::new(unit_to_u8(c), unit_to_u8(m), unit_to_u8(y), unit_to_u8(k))
+}
+
+/// RGB -> Luma using Rec. 709 luminance coefficients.
+///
+/// `y = 0.2126*r + 0.7152*g + 0.0722*b`.
+pub(crate) fn rgb_to_grey(rgb: rgb::Color) -> luma::Color {
+    let r = u8_to_unit(rgb.0);
+    let g = u8_to_unit(rgb.1);
+    let b = u8_to_unit(rgb.2);
+    let y = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    luma::Color::new(unit_to_u8(y))
+}
+
+/// CMYK -> RGB using the straight-line subtractive model.
+///
+/// `r = (1 - c) * (1 - k)`, etc.
+pub(crate) fn cmyk_to_rgb(cmyk: cmyk::Color) -> rgb::Color {
+    let c = u8_to_unit(cmyk.0);
+    let m = u8_to_unit(cmyk.1);
+    let y = u8_to_unit(cmyk.2);
+    let k = u8_to_unit(cmyk.3);
+    let r = (1.0 - c) * (1.0 - k);
+    let g = (1.0 - m) * (1.0 - k);
+    let b = (1.0 - y) * (1.0 - k);
+    rgb::Color::new(unit_to_u8(r), unit_to_u8(g), unit_to_u8(b))
+}
+
+/// CMYK -> Luma via the RGB intermediate.
+pub(crate) fn cmyk_to_grey(cmyk: cmyk::Color) -> luma::Color {
+    rgb_to_grey(cmyk_to_rgb(cmyk))
+}
+
+/// Resolve a Separation colour to its fallback [`RegularColor`]
+/// linearly scaled by the tint.
+///
+/// This matches krilla's existing tint-into-fallback behaviour
+/// (see [`separation::SeparationSpace`]'s doc-comment): a 50% tint
+/// of a red fallback yields a 50%-saturated red. The scaling is
+/// done channel-wise in the fallback's native space.
+pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
+    let tint = u8_to_unit(spot.tint);
+    match spot.space.fallback {
+        RegularColor::Rgb(c) => rgb::Color::new(
+            unit_to_u8(u8_to_unit(c.0) * tint),
+            unit_to_u8(u8_to_unit(c.1) * tint),
+            unit_to_u8(u8_to_unit(c.2) * tint),
+        )
+        .into(),
+        RegularColor::Cmyk(c) => cmyk::Color::new(
+            unit_to_u8(u8_to_unit(c.0) * tint),
+            unit_to_u8(u8_to_unit(c.1) * tint),
+            unit_to_u8(u8_to_unit(c.2) * tint),
+            unit_to_u8(u8_to_unit(c.3) * tint),
+        )
+        .into(),
+        RegularColor::Luma(c) => {
+            luma::Color::new(unit_to_u8(u8_to_unit(c.0) * tint)).into()
+        }
+    }
 }
 
 impl RegularColor {
@@ -479,6 +641,60 @@ pub mod separation {
     }
 }
 
+/// Colour-conversion policy applied to every fill, stroke, and glyph
+/// paint before content-stream emission.
+///
+/// The variant is read once per paint dispatch from
+/// [`SerializeSettings::colour_conversion`]; `Auto` (the default) and
+/// `None` pass colours through unchanged, preserving the existing
+/// krilla behaviour. The `Force*` variants project regular RGB / CMYK
+/// / Luma source colours into the requested target space using the
+/// straight-line conversions in ISO 32000-2 §8.6.4 and Rec. 709 for
+/// the RGB->Y transform.
+///
+/// `ContentOnly` is currently a pass-through at this layer; the
+/// "skip annotations / interactive content" routing it implies in
+/// PDFreactor's CSS-conversion policy is owned by Phase 3 and is
+/// **not** yet equivalent to PDFreactor's `ContentOnly` policy.
+/// Likewise, `ForceSpot` is reserved for the Phase-3 spot-registry
+/// routing and is currently a pass-through.
+///
+/// British spelling is intentional: the new public surface follows
+/// the moegoe naming convention. The existing `Color` type and the
+/// `color` module retain their American spelling to avoid breaking
+/// the rest of the public API.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ColourConversion {
+    /// No projection. Reserved for future policies that may depend on
+    /// the active validator or output intent. Currently identical to
+    /// [`ColourConversion::None`].
+    #[default]
+    Auto,
+    /// No projection. Source colours are emitted as-is.
+    None,
+    /// Pass-through at the content-stream layer. Phase 3 will route
+    /// the "skip annotations" decision here; today this variant does
+    /// not match PDFreactor's `ContentOnly` semantics.
+    ContentOnly,
+    /// Project the source colour to `RegularColor::Rgb`. CMYK source
+    /// colours are converted with `r = (1-c)*(1-k)` etc.; Luma maps
+    /// to `r = g = b = L`. Separation colours recurse on
+    /// `tint * fallback`.
+    ForceRgb,
+    /// Project the source colour to `RegularColor::Cmyk` per ISO
+    /// 32000-2 §8.6.4. RGB->CMYK: `k = 1 - max(r,g,b)`,
+    /// `c = (1-r-k)/(1-k)` (with `k == 1` forcing `c = m = y = 0`).
+    /// Luma maps to pure black: `c = m = y = 0; k = 1 - L`.
+    ForceCmyk,
+    /// Project the source colour to `RegularColor::Luma` using
+    /// Rec. 709: `y = 0.2126*r + 0.7152*g + 0.0722*b`. CMYK is
+    /// converted via the RGB intermediate.
+    ForceGrey,
+    /// Reserved for the Phase-3 spot-registry routing. Currently a
+    /// pass-through.
+    ForceSpot,
+}
+
 #[derive(Debug, Eq, PartialEq, Hash, Clone)]
 pub(crate) enum ColorSpace {
     Device(DeviceColorSpace),
@@ -548,5 +764,192 @@ pub(crate) enum SpecialColorSpace {
 impl From<SpecialColorSpace> for ColorSpace {
     fn from(value: SpecialColorSpace) -> Self {
         Self::Special(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- Pass-through variants ---------------------------------------
+
+    #[test]
+    fn auto_passes_through_rgb() {
+        let c: Color = rgb::Color::new(200, 100, 50).into();
+        assert_eq!(c.clone().project(ColourConversion::Auto), c);
+    }
+
+    #[test]
+    fn none_passes_through_cmyk() {
+        let c: Color = cmyk::Color::new(10, 20, 30, 40).into();
+        assert_eq!(c.clone().project(ColourConversion::None), c);
+    }
+
+    #[test]
+    fn content_only_passes_through_luma() {
+        let c: Color = luma::Color::new(128).into();
+        assert_eq!(c.clone().project(ColourConversion::ContentOnly), c);
+    }
+
+    #[test]
+    fn force_spot_passes_through_separation() {
+        let space = separation::SeparationSpace::new(
+            separation::SeparationColorant::Custom("PANTONE 185 C".into()),
+            rgb::Color::new(255, 0, 0).into(),
+        );
+        let c: Color = separation::Color::new(128, space).into();
+        assert_eq!(c.clone().project(ColourConversion::ForceSpot), c);
+    }
+
+    // --- ForceRgb ---------------------------------------------------
+
+    #[test]
+    fn force_rgb_keeps_rgb() {
+        let c: Color = rgb::Color::new(123, 45, 67).into();
+        assert_eq!(c.clone().project(ColourConversion::ForceRgb), c);
+    }
+
+    #[test]
+    fn force_rgb_from_luma() {
+        let c: Color = luma::Color::new(128).into();
+        let expected: Color = rgb::Color::new(128, 128, 128).into();
+        assert_eq!(c.project(ColourConversion::ForceRgb), expected);
+    }
+
+    #[test]
+    fn force_rgb_from_cmyk_pure_red() {
+        // CMYK red = (0, 255, 255, 0) -> RGB red.
+        let c: Color = cmyk::Color::new(0, 255, 255, 0).into();
+        let projected = c.project(ColourConversion::ForceRgb);
+        let Color::Regular(RegularColor::Rgb(rgb_out)) = projected else {
+            panic!("expected RGB projection, got {projected:?}");
+        };
+        assert_eq!(rgb_out.0, 255);
+        assert_eq!(rgb_out.1, 0);
+        assert_eq!(rgb_out.2, 0);
+    }
+
+    #[test]
+    fn force_rgb_from_cmyk_pure_black() {
+        let c: Color = cmyk::Color::new(0, 0, 0, 255).into();
+        let projected = c.project(ColourConversion::ForceRgb);
+        let Color::Regular(RegularColor::Rgb(rgb_out)) = projected else {
+            panic!("expected RGB projection, got {projected:?}");
+        };
+        assert_eq!(rgb_out, rgb::Color::new(0, 0, 0));
+    }
+
+    // --- ForceCmyk --------------------------------------------------
+
+    #[test]
+    fn force_cmyk_keeps_cmyk() {
+        let c: Color = cmyk::Color::new(50, 100, 150, 200).into();
+        assert_eq!(c.clone().project(ColourConversion::ForceCmyk), c);
+    }
+
+    #[test]
+    fn force_cmyk_from_rgb_pure_red() {
+        // RGB (255, 0, 0): max = 1.0, k = 0.0, c = 0, m = 1, y = 1.
+        let c: Color = rgb::Color::new(255, 0, 0).into();
+        let projected = c.project(ColourConversion::ForceCmyk);
+        let Color::Regular(RegularColor::Cmyk(out)) = projected else {
+            panic!("expected CMYK projection, got {projected:?}");
+        };
+        assert_eq!(out.0, 0);
+        assert_eq!(out.1, 255);
+        assert_eq!(out.2, 255);
+        assert_eq!(out.3, 0);
+    }
+
+    #[test]
+    fn force_cmyk_from_rgb_pure_black() {
+        // RGB (0, 0, 0): max = 0, k = 1; special-case c = m = y = 0.
+        let c: Color = rgb::Color::new(0, 0, 0).into();
+        let projected = c.project(ColourConversion::ForceCmyk);
+        let Color::Regular(RegularColor::Cmyk(out)) = projected else {
+            panic!("expected CMYK projection, got {projected:?}");
+        };
+        assert_eq!(out, cmyk::Color::new(0, 0, 0, 255));
+    }
+
+    #[test]
+    fn force_cmyk_from_luma_half() {
+        // L = 128/255 ~= 0.502, k = 1 - L ~= 0.498, c = m = y = 0.
+        let c: Color = luma::Color::new(128).into();
+        let projected = c.project(ColourConversion::ForceCmyk);
+        let Color::Regular(RegularColor::Cmyk(out)) = projected else {
+            panic!("expected CMYK projection, got {projected:?}");
+        };
+        assert_eq!(out.0, 0);
+        assert_eq!(out.1, 0);
+        assert_eq!(out.2, 0);
+        assert_eq!(out.3, 127); // 255 - 128 = 127.
+    }
+
+    // --- ForceGrey --------------------------------------------------
+
+    #[test]
+    fn force_grey_keeps_luma() {
+        let c: Color = luma::Color::new(64).into();
+        assert_eq!(c.clone().project(ColourConversion::ForceGrey), c);
+    }
+
+    #[test]
+    fn force_grey_from_rgb_white() {
+        let c: Color = rgb::Color::new(255, 255, 255).into();
+        let projected = c.project(ColourConversion::ForceGrey);
+        let Color::Regular(RegularColor::Luma(out)) = projected else {
+            panic!("expected Luma projection, got {projected:?}");
+        };
+        assert_eq!(out, luma::Color::new(255));
+    }
+
+    #[test]
+    fn force_grey_from_rgb_red_rec709() {
+        // Rec. 709 Y for pure red = 0.2126 -> 54.213, round to 54.
+        let c: Color = rgb::Color::new(255, 0, 0).into();
+        let projected = c.project(ColourConversion::ForceGrey);
+        let Color::Regular(RegularColor::Luma(out)) = projected else {
+            panic!("expected Luma projection, got {projected:?}");
+        };
+        assert_eq!(out.0, 54);
+    }
+
+    #[test]
+    fn force_grey_from_cmyk_pure_red() {
+        // CMYK red -> RGB (255, 0, 0) -> Y = 54.
+        let c: Color = cmyk::Color::new(0, 255, 255, 0).into();
+        let projected = c.project(ColourConversion::ForceGrey);
+        let Color::Regular(RegularColor::Luma(out)) = projected else {
+            panic!("expected Luma projection, got {projected:?}");
+        };
+        assert_eq!(out.0, 54);
+    }
+
+    // --- Separation recursion ---------------------------------------
+
+    #[test]
+    fn force_rgb_from_separation_recurses_on_fallback() {
+        // Half-tint of an RGB-red fallback -> RGB (128, 0, 0).
+        // 128/255 = 0.502; 0.502 * 255 = 128 (rounded).
+        let space = separation::SeparationSpace::new(
+            separation::SeparationColorant::Custom("PANTONE 185 C".into()),
+            rgb::Color::new(255, 0, 0).into(),
+        );
+        let c: Color = separation::Color::new(128, space).into();
+        let projected = c.project(ColourConversion::ForceRgb);
+        let Color::Regular(RegularColor::Rgb(out)) = projected else {
+            panic!("expected RGB projection, got {projected:?}");
+        };
+        assert_eq!(out.0, 128);
+        assert_eq!(out.1, 0);
+        assert_eq!(out.2, 0);
+    }
+
+    // --- Default ----------------------------------------------------
+
+    #[test]
+    fn colour_conversion_default_is_auto() {
+        assert_eq!(ColourConversion::default(), ColourConversion::Auto);
     }
 }
