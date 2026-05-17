@@ -2313,3 +2313,160 @@ fn validate_x6_rejects_external_output_profile() {
         }
     }
 }
+
+#[test]
+fn custom_output_intent_rejects_invalid_input() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, OutputIntentProfile,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::PdfA,
+            OutputIntentProfile::Rgb(profile.clone()),
+            "   ".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyIdentifier)
+    );
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::PdfA,
+            OutputIntentProfile::Rgb(profile.clone()),
+            "Custom".to_string(),
+            "  ".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyInfo)
+    );
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::Custom(String::new()),
+            OutputIntentProfile::Rgb(profile),
+            "Custom".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyCustomSubtype)
+    );
+}
+
+#[test]
+fn custom_output_intent_emits_catalogue_entry() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+    let intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::PdfA,
+        OutputIntentProfile::Rgb(profile),
+        "sRGB IEC61966-2.1".to_string(),
+        "sRGB v4 destination profile".to_string(),
+    )
+    .expect("intent fields are non-empty")
+    .with_output_condition("sRGB".to_string())
+    .with_registry_name("http://www.color.org".to_string());
+
+    let settings = SerializeSettings {
+        output_intents: vec![intent],
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/OutputIntents"),
+        "PDF should contain /OutputIntents catalogue entry"
+    );
+    assert!(
+        pdf.contains("/Type /OutputIntent"),
+        "PDF should contain /Type /OutputIntent dictionary entry"
+    );
+    assert!(
+        pdf.contains("/S /GTS_PDFA1"),
+        "PDF should contain /S /GTS_PDFA1 for PdfA subtype"
+    );
+    assert!(
+        pdf.contains("(sRGB IEC61966-2.1)"),
+        "PDF should contain the output condition identifier"
+    );
+    assert!(
+        pdf.contains("(sRGB v4 destination profile)"),
+        "PDF should contain the info string"
+    );
+    assert!(
+        pdf.contains("(sRGB)"),
+        "PDF should contain the optional output condition"
+    );
+    assert!(
+        pdf.contains("(http://www.color.org)"),
+        "PDF should contain the optional registry name"
+    );
+}
+
+#[test]
+fn custom_output_intent_custom_subtype_emits_verbatim_name() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+    let intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::Custom("ISO_PDFE1".to_string()),
+        OutputIntentProfile::Rgb(profile),
+        "Custom".to_string(),
+        "PDF/E custom intent".to_string(),
+    )
+    .expect("intent fields are non-empty");
+
+    let settings = SerializeSettings {
+        output_intents: vec![intent],
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/S /ISO_PDFE1"),
+        "PDF should contain /S /ISO_PDFE1 verbatim for Custom subtype"
+    );
+}

@@ -176,4 +176,7 @@ pub use document::*;
 pub use graphics::*;
 pub use interactive::*;
 pub use interchange::*;
-pub use serialize::{ExternalOutputProfile, ExternalOutputProfileError, SerializeSettings};
+pub use serialize::{
+    CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, ExternalOutputProfile,
+    ExternalOutputProfileError, OutputIntentProfile, SerializeSettings,
+};
