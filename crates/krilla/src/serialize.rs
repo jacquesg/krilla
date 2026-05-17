@@ -245,6 +245,26 @@ pub struct SerializeSettings {
     /// at `content.rs` are also projected; multi-stop gradients are
     /// **not** projected because doing so would alter interpolation.
     pub colour_conversion: ColourConversion,
+    /// How aggressively path geometry should be simplified before
+    /// being written to the PDF content stream.
+    ///
+    /// [`ShapeOptimisation::Auto`] is the default and preserves
+    /// krilla's existing behaviour: every path segment supplied to
+    /// the surface is written verbatim into the content stream.
+    /// [`ShapeOptimisation::None`] disables every form of path
+    /// simplification (it is currently equivalent to `Auto` because
+    /// krilla does not simplify paths, but the contract is that no
+    /// simplification will ever be applied under this mode).
+    /// [`ShapeOptimisation::Full`] permits krilla to apply the most
+    /// aggressive path simplification it can without changing the
+    /// rendered appearance of the page.
+    ///
+    /// Krilla does not currently perform any path simplification, so
+    /// this setting is a no-op at the content-stream level. It exists
+    /// so consumers (notably moegoe's `-bd-pdf-shape-optimisation`
+    /// cascade) can carry an authored value through to the serialiser
+    /// without losing it; a real simplification pass is future work.
+    pub shape_optimisation: ShapeOptimisation,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -302,6 +322,39 @@ pub enum GlyphLayout {
     /// by the caller are discarded; the content stream is smaller but
     /// kerning may degrade.
     Metric,
+}
+
+/// How aggressively path geometry should be simplified before being
+/// written to the PDF content stream.
+///
+/// See [`SerializeSettings::shape_optimisation`] for the full
+/// contract. Krilla does not currently apply any path simplification,
+/// so all three variants behave identically at the content-stream
+/// level; the enum exists so callers can plumb an authored value
+/// through to the serialiser without losing it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ShapeOptimisation {
+    /// Let krilla decide whether to simplify path geometry.
+    ///
+    /// This is the default. Krilla currently writes every path
+    /// segment verbatim into the content stream; that behaviour is
+    /// not guaranteed by this contract and may change once a
+    /// simplification pass is added.
+    #[default]
+    Auto,
+    /// Never simplify path geometry.
+    ///
+    /// Every supplied path segment is written verbatim into the
+    /// content stream. The contract is that no path simplification
+    /// will ever be applied under this mode, regardless of what
+    /// future heuristics `Auto` may grow.
+    None,
+    /// Apply the most aggressive path simplification krilla can
+    /// without changing the rendered appearance of the page.
+    ///
+    /// Reserved for a future simplification pass; equivalent to
+    /// `Auto` today.
+    Full,
 }
 
 /// How text should be emitted into the PDF content stream.
@@ -364,6 +417,7 @@ impl Default for SerializeSettings {
             fallback_cmyk_profile: None,
             glyph_layout: GlyphLayout::Optical,
             colour_conversion: ColourConversion::Auto,
+            shape_optimisation: ShapeOptimisation::Auto,
         }
     }
 }

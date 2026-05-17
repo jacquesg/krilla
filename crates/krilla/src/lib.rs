@@ -178,5 +178,5 @@ pub use interactive::*;
 pub use interchange::*;
 pub use serialize::{
     CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, FontEmbedding,
-    GlyphLayout, OutputIntentProfile, SerializeSettings, TextRendering,
+    GlyphLayout, OutputIntentProfile, SerializeSettings, ShapeOptimisation, TextRendering,
 };
