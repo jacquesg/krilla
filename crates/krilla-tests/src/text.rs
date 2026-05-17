@@ -568,6 +568,124 @@ fn text_rendering_setting_switches_glyph_to_vector_emission() {
     );
 }
 
+/// `Surface::push_text_rendering(Vector)` must scope vector-outline
+/// emission to the push range. Glyphs drawn outside the push pair
+/// must remain in `Tj`/`TJ` mode (the document-level default), and
+/// glyphs drawn inside the push pair must emit path operators
+/// (`m`/`l`/`c`/`h`/`f`).
+///
+/// This verifies the per-call scoping contract documented on
+/// [`Surface::push_text_rendering`].
+#[test]
+fn push_text_rendering_scopes_vector_emission_to_push_range() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        compress_content_streams: false,
+        // Default document is glyph-mode; only the per-call push
+        // promotes the middle range to vector.
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        font.clone(),
+        32.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    surface.push_text_rendering(TextRendering::Vector);
+    surface.draw_text(
+        Point::from_xy(50.0, 90.0),
+        font.clone(),
+        32.0,
+        "Vec",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    surface.draw_text(
+        Point::from_xy(50.0, 130.0),
+        font,
+        32.0,
+        "By",
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    fn contains_op(pdf: &[u8], op: &[u8]) -> bool {
+        pdf.windows(op.len()).any(|w| w == op)
+    }
+
+    // Glyph mode must still be active for the outer draws: at least one
+    // `BT` text-block opener must survive.
+    assert!(
+        contains_op(&pdf, b"
+BT
+") || contains_op(&pdf, b" BT
+"),
+        "outer (default-glyph-mode) draws must emit a `BT` text-block operator",
+    );
+    // The push range must have produced fill / moveto path operators
+    // for the outlined glyphs.
+    let has_moveto = contains_op(&pdf, b" m
+") || contains_op(&pdf, b"
+m
+");
+    let has_fill = contains_op(&pdf, b" f
+") || contains_op(&pdf, b"
+f
+");
+    assert!(
+        has_moveto && has_fill,
+        "push_text_rendering(Vector) range must emit path operators          (`m` and `f`); moveto={has_moveto} fill={has_fill}",
+    );
+}
+
+/// `Surface::push_text_rendering` must nest correctly with
+/// `push_text_rendering`/`pop` of other instruction kinds, and the
+/// outer document-level setting must take over again once every push
+/// has been popped.
+#[test]
+fn push_text_rendering_nests_with_other_push_instructions() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        compress_content_streams: false,
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.push_transform(&krilla::geom::Transform::from_translate(10.0, 10.0));
+    surface.push_text_rendering(TextRendering::Vector);
+    surface.draw_text(
+        Point::from_xy(0.0, 0.0),
+        Font::new(NOTO_SANS.clone(), 0).unwrap(),
+        24.0,
+        "X",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    surface.pop();
+    surface.finish();
+    page.finish();
+    // The matching pops in the inverse order must leave the surface
+    // in a balanced state — `document.finish()` panics if any push
+    // is unmatched.
+    let _pdf = document.finish().unwrap();
+}
+
 /// Render the same string under each [`FontEmbedding`] mode and verify
 /// the embedded font programme behaves as documented:
 ///
