@@ -179,5 +179,5 @@ pub use interchange::*;
 pub use serialize::{
     CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, ExternalOutputProfile,
     ExternalOutputProfileError, FontEmbedding, GlyphLayout, OutputIntentProfile,
-    SerializeSettings, TextRendering,
+    SerializeSettings, ShapeOptimisation, TextRendering,
 };
