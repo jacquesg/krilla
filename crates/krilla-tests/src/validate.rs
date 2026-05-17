@@ -2470,3 +2470,107 @@ fn custom_output_intent_custom_subtype_emits_verbatim_name() {
         "PDF should contain /S /ISO_PDFE1 verbatim for Custom subtype"
     );
 }
+
+#[test]
+fn fallback_cmyk_profile_emits_default_output_intent() {
+    use krilla::icc::ICCProfile;
+    use krilla::{Document, SerializeSettings};
+
+    let profile_bytes = std::fs::read(
+        crate::ASSETS_PATH.join("icc/krilla-generic-cmyk-v2.icc"),
+    )
+    .unwrap();
+    let profile = ICCProfile::<4>::new(&profile_bytes).unwrap();
+
+    let settings = SerializeSettings {
+        fallback_cmyk_profile: Some(profile),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/OutputIntents"),
+        "PDF should contain /OutputIntents catalogue entry"
+    );
+    assert!(
+        pdf.contains("/Type /OutputIntent"),
+        "PDF should contain /Type /OutputIntent dictionary entry"
+    );
+    assert!(
+        pdf.contains("/S /GTS_PDFX"),
+        "fallback intent should use /S /GTS_PDFX subtype"
+    );
+    assert!(
+        pdf.contains("/DestOutputProfile"),
+        "fallback intent should reference the supplied profile via /DestOutputProfile"
+    );
+    assert!(
+        pdf.contains("(CMYK)"),
+        "fallback intent should declare CMYK output condition"
+    );
+}
+
+#[test]
+fn fallback_cmyk_profile_yields_to_explicit_custom_output_intent() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let cmyk_bytes = std::fs::read(
+        crate::ASSETS_PATH.join("icc/krilla-generic-cmyk-v2.icc"),
+    )
+    .unwrap();
+    let cmyk_profile = ICCProfile::<4>::new(&cmyk_bytes).unwrap();
+    let rgb_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let rgb_profile = ICCProfile::<3>::new(&rgb_bytes).unwrap();
+    let explicit_intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::Custom("ISO_PDFE1".to_string()),
+        OutputIntentProfile::Rgb(rgb_profile),
+        "sRGB explicit".to_string(),
+        "Explicit caller intent".to_string(),
+    )
+    .expect("intent fields are non-empty");
+
+    let settings = SerializeSettings {
+        output_intents: vec![explicit_intent],
+        fallback_cmyk_profile: Some(cmyk_profile),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/S /ISO_PDFE1"),
+        "explicit caller intent should be emitted verbatim"
+    );
+    assert!(
+        !pdf.contains("/S /GTS_PDFX"),
+        "fallback CMYK intent must not fire when a caller intent is present"
+    );
+}
