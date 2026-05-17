@@ -156,6 +156,64 @@ pub struct SerializeSettings {
     /// [`Surface::draw_glyphs`]: crate::surface::Surface::draw_glyphs
     /// [`Surface::draw_text`]: crate::surface::Surface::draw_text
     pub text_rendering: TextRendering,
+    /// How embedded font programmes are written into the PDF.
+    ///
+    /// [`FontEmbedding::Subset`] (the default) keeps krilla's existing
+    /// behaviour: each CID font is reduced to the set of glyphs actually
+    /// referenced by the document and that subset is written as the
+    /// `/FontFile2` (or `/FontFile3`) stream on the font descriptor.
+    ///
+    /// [`FontEmbedding::Full`] skips the subsetter and embeds the
+    /// unmodified font programme. This is useful in workflows where the
+    /// PDF will be re-edited downstream (a subset would make later
+    /// glyph access fail) or for licensed fonts that explicitly permit
+    /// full embedding.
+    ///
+    /// [`FontEmbedding::None`] omits the font programme entirely. The
+    /// font descriptor is written without `/FontFile2` or `/FontFile3`,
+    /// so consumers must resolve the glyph data from a host-installed
+    /// font matching the descriptor name. This is permitted by
+    /// ISO 32000-2 §9.9 but produces a fragile PDF — PDF/A and PDF/UA
+    /// forbid it. It is the caller's responsibility to ensure the
+    /// active validator (if any) tolerates the choice.
+    ///
+    /// Note that this setting only affects CID font emission. Type3
+    /// bitmap fonts (used for colour-emoji glyphs) never carry an
+    /// embedded `/FontFile*` programme to begin with, so this setting
+    /// is a no-op for them.
+    pub font_embedding: FontEmbedding,
+}
+
+/// How embedded font programmes are written into the PDF.
+///
+/// See [`SerializeSettings::font_embedding`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum FontEmbedding {
+    /// Embed only the glyphs the document references.
+    ///
+    /// Each CID font is run through the subsetter and only the
+    /// referenced glyphs are written as the `/FontFile2` (or
+    /// `/FontFile3`) stream. This is the default and what every PDF/A
+    /// and PDF/UA validator expects.
+    #[default]
+    Subset,
+    /// Embed the full font programme without subsetting.
+    ///
+    /// The original font data (as supplied to [`Font::new`]) is written
+    /// verbatim as the `/FontFile2` (or `/FontFile3`) stream. Useful
+    /// for downstream editing workflows and for licensed fonts whose
+    /// licence requires full embedding.
+    ///
+    /// [`Font::new`]: crate::text::Font::new
+    Full,
+    /// Do not embed the font programme.
+    ///
+    /// The font descriptor is written without a `/FontFile2` or
+    /// `/FontFile3` entry; consumers must resolve the glyph data from
+    /// a host-installed font matching the descriptor name. This is
+    /// fragile and incompatible with PDF/A and PDF/UA — callers must
+    /// audit their validator configuration.
+    None,
 }
 
 /// How text should be emitted into the PDF content stream.
@@ -590,6 +648,7 @@ impl Default for SerializeSettings {
             external_output_profile: None,
             output_intents: Vec::new(),
             text_rendering: TextRendering::Glyphs,
+            font_embedding: FontEmbedding::Subset,
         }
     }
 }

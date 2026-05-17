@@ -916,6 +916,7 @@ pub fn settings_1() -> SerializeSettings {
         external_output_profile: None,
         output_intents: Vec::new(),
         text_rendering: krilla::TextRendering::Glyphs,
+        font_embedding: krilla::FontEmbedding::Subset,
     }
 }
 
