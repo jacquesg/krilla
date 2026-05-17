@@ -31,7 +31,7 @@ use crate::interchange::tagging::ContentTag;
 use crate::num::NormalizedF32;
 use crate::resource;
 use crate::resource::{Resource, ResourceDictionaryBuilder};
-use crate::serialize::{MaybeDeviceColorSpace, SerializeContext};
+use crate::serialize::{GlyphLayout, MaybeDeviceColorSpace, SerializeContext};
 use crate::stream::Stream;
 use crate::text::group::{use_text_spanner, GlyphGroup, GlyphGrouper, GlyphSpan, GlyphSpanner};
 use crate::text::type3::ColoredGlyph;
@@ -559,6 +559,17 @@ impl ContentBuilder {
             }
         }
 
+        // `GlyphLayout::Metric` (PDFreactor `glyph-layout: metric`) emits
+        // the whole run as a single `Tj` string and lets the consumer
+        // advance using the font's intrinsic widths. The per-glyph
+        // numeric adjustments that `TJ` would carry are discarded, so
+        // any kerning supplied by the shaper is lost; the trade-off is
+        // a substantially smaller content stream.
+        if matches!(sc.serialize_settings().glyph_layout, GlyphLayout::Metric) {
+            self.encode_glyphs_metric(cur_x, pdf_font, size, context_color, glyphs);
+            return;
+        }
+
         self.encode_glyphs_with_individual_positioning(
             cur_x,
             pdf_font,
@@ -646,6 +657,43 @@ impl ContentBuilder {
 
         items.finish();
         positioned.finish();
+    }
+
+    /// Advance-width-only glyph emission for
+    /// [`GlyphLayout::Metric`].
+    ///
+    /// Writes the entire run as a single `Tj` string. The consumer
+    /// advances using the font's intrinsic widths declared in the
+    /// `/Widths` (or CID `/W`) array; any caller-supplied advance
+    /// discrepancy or `x_offset` adjustment is discarded. This is the
+    /// PDFreactor `glyph-layout: metric` shape: smaller content
+    /// stream, no per-glyph numeric adjustments, kerning degraded to
+    /// whatever the font's own advance widths produce.
+    fn encode_glyphs_metric(
+        &mut self,
+        cur_x: &mut f32,
+        pdf_font: &dyn PdfFont,
+        size: f32,
+        context_color: rgb::Color,
+        glyphs: &[impl Glyph],
+    ) {
+        self.scratch.clear();
+        let encoded = &mut self.scratch;
+
+        for glyph in glyphs {
+            let pdf_glyph = pdf_font
+                .get_gid(ColoredGlyph::new(glyph.glyph_id(), context_color))
+                .unwrap();
+            pdf_glyph.encode_into(encoded);
+            // cur_x is the layout cursor; it must keep tracking the
+            // caller-supplied advances so that downstream paint stages
+            // (and any subsequent glyph runs) see a consistent x.
+            *cur_x += glyph.x_advance(size);
+        }
+
+        if !encoded.is_empty() {
+            self.content.show(Str(encoded));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -771,3 +771,94 @@ fn font_embedding_setting_controls_fontfile_emission() {
              embedding (none={none_len} bytes, subset={subset_len} bytes)",
     );
 }
+
+/// `SerializeSettings::glyph_layout` must select between
+/// `TJ`-array per-glyph individual positioning (`Optical`, the
+/// default) and a single `Tj`-string advance-width-only emission
+/// (`Metric`).
+///
+/// Verification rests on three text-showing operators in the PDF
+/// content stream: the `TJ` (positioned-show) operator, the `Tj`
+/// (show) operator, and the `[`/`]` array delimiters that frame
+/// the `TJ` payload. `Optical` mode must emit at least one `TJ`
+/// occurrence for the multi-glyph "Hi" run; `Metric` mode must
+/// emit only `Tj` strings and no `TJ` operator. As a consequence
+/// the `Metric` content stream is strictly smaller than the
+/// `Optical` one.
+///
+/// We disable `compress_content_streams` so the operator bytes
+/// are visible in the raw PDF buffer, then byte-scan because
+/// krilla's serialiser interleaves auxiliary streams (CMap,
+/// `/ToUnicode`, font programmes) with the page content stream.
+/// Those auxiliary streams do not embed text-showing operators,
+/// so a global scan is equivalent to a content-stream scan and
+/// avoids the need to walk the PDF object graph.
+#[test]
+fn glyph_layout_metric_emits_smaller_text_stream_than_optical() {
+    use krilla::{GlyphLayout, SerializeSettings};
+
+    fn render(layout: GlyphLayout) -> Vec<u8> {
+        let settings = SerializeSettings {
+            compress_content_streams: false,
+            glyph_layout: layout,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn count_op(pdf: &[u8], op: &[u8]) -> usize {
+        pdf.windows(op.len()).filter(|w| *w == op).count()
+    }
+
+    let optical_pdf = render(GlyphLayout::Optical);
+    let metric_pdf = render(GlyphLayout::Metric);
+
+    // Optical: positioned-show (`TJ`) is the canonical emission
+    // path for runs of two or more glyphs.
+    let optical_tj_array = count_op(&optical_pdf, b" TJ\n") + count_op(&optical_pdf, b"\nTJ\n");
+    assert!(
+        optical_tj_array >= 1,
+        "Optical mode must emit at least one `TJ` array for the \
+             multi-glyph run (found {optical_tj_array})",
+    );
+
+    // Metric: no `TJ` array anywhere. The whole run collapses to
+    // one or more `Tj` strings.
+    let metric_tj_array = count_op(&metric_pdf, b" TJ\n") + count_op(&metric_pdf, b"\nTJ\n");
+    assert_eq!(
+        metric_tj_array, 0,
+        "Metric mode must NOT emit a `TJ` positioned-show array \
+             (found {metric_tj_array})",
+    );
+    let metric_tj_string = count_op(&metric_pdf, b" Tj\n") + count_op(&metric_pdf, b"\nTj\n");
+    assert!(
+        metric_tj_string >= 1,
+        "Metric mode must emit at least one `Tj` show string \
+             (found {metric_tj_string})",
+    );
+
+    // Content-stream size: collapsing the `[ ... ] TJ` array
+    // into a single `Tj` string drops per-glyph numeric
+    // adjustments, so the Metric PDF must be strictly smaller.
+    let optical_len = optical_pdf.len();
+    let metric_len = metric_pdf.len();
+    assert!(
+        metric_len < optical_len,
+        "Metric mode must produce a smaller PDF than Optical \
+             mode (metric={metric_len} bytes, optical={optical_len} \
+             bytes)",
+    );
+}
