@@ -128,6 +128,34 @@ pub struct SerializeSettings {
     /// krilla does not enforce cross-intent agreement — that is the
     /// caller's responsibility.
     pub output_intents: Vec<CustomOutputIntent>,
+    /// Fallback CMYK destination profile, emitted as a default
+    /// `/OutputIntents` entry when the document declares no other intent.
+    ///
+    /// This is the colour-managed fallback for documents that contain CMYK
+    /// content but neither activate a validator (PDF/A, PDF/X) that
+    /// generates its own output intent, nor supply caller-driven entries
+    /// via [`output_intents`]. When set under those conditions, krilla
+    /// emits a single `/Type /OutputIntent` dictionary with
+    /// `/S /GTS_PDFX` referencing the supplied ICC profile, so colour-
+    /// managed consumers can transform device CMYK content to the
+    /// destination space.
+    ///
+    /// When any of the following is true, this setting is ignored:
+    ///
+    /// - The active validator (via [`configuration`]) already produces
+    ///   an output intent (PDF/A or PDF/X variants).
+    /// - [`output_intents`] is non-empty.
+    ///
+    /// The default is `None`, preserving existing behaviour.
+    ///
+    /// This is distinct from [`cmyk_profile`], which is consulted only by
+    /// `no_device_cs` mode and the PDF/X embedded-output-intent variants.
+    /// Setting [`cmyk_profile`] does not emit an output intent on its own.
+    ///
+    /// [`output_intents`]: SerializeSettings::output_intents
+    /// [`cmyk_profile`]: SerializeSettings::cmyk_profile
+    /// [`configuration`]: SerializeSettings::configuration
+    pub fallback_cmyk_profile: Option<ICCProfile<4>>,
     /// How text drawn through [`Surface::draw_glyphs`] and
     /// [`Surface::draw_text`] should be emitted into the content stream.
     ///
@@ -265,6 +293,7 @@ impl Default for SerializeSettings {
             output_intents: Vec::new(),
             text_rendering: TextRendering::Glyphs,
             font_embedding: FontEmbedding::Subset,
+            fallback_cmyk_profile: None,
         }
     }
 }
@@ -1049,8 +1078,20 @@ impl SerializeContext {
         let validators = self.serialize_settings.validators();
         let validator_subtype = validators.output_intent();
         let custom_intents = self.serialize_settings.output_intents.clone();
+        // Fallback CMYK profile fires only when no other intent source is
+        // present. It is the colour-management default for documents that
+        // contain CMYK content but neither pick a validator-driven intent
+        // nor supply explicit caller intents.
+        let fallback_cmyk = if validator_subtype.is_none()
+            && custom_intents.is_empty()
+            && self.serialize_settings.fallback_cmyk_profile.is_some()
+        {
+            self.serialize_settings.fallback_cmyk_profile.clone()
+        } else {
+            None
+        };
 
-        if validator_subtype.is_none() && custom_intents.is_empty() {
+        if validator_subtype.is_none() && custom_intents.is_empty() && fallback_cmyk.is_none() {
             return;
         }
 
@@ -1097,6 +1138,30 @@ impl SerializeContext {
             }
             oi.finish();
             oi_refs.push(oi_ref);
+        }
+
+        // Fallback CMYK output intent: when no validator-generated and no
+        // caller-supplied intents exist, emit a single default intent
+        // referencing the fallback profile so colour-managed consumers can
+        // resolve device CMYK content.
+        if let Some(profile) = fallback_cmyk {
+            let oi_ref = self.new_ref();
+            let major = profile.metadata().major;
+            let minor = profile.metadata().minor;
+            let profile_ref = self.register_cacheable(chunk_container, profile);
+            let mut oi = chunk.indirect(oi_ref).start::<OutputIntent>();
+            oi.dest_output_profile(profile_ref)
+                .subtype(pdf_writer::types::OutputIntentSubtype::PDFX)
+                .output_condition_identifier(TextStr("Custom"))
+                .output_condition(TextStr("CMYK"))
+                .registry_name(TextStr(""))
+                .info(TextStr(format!("CMYK v{}.{}", major, minor).as_str()));
+            oi.finish();
+            oi_refs.push(oi_ref);
+        }
+
+        if oi_refs.is_empty() {
+            return;
         }
 
         let mut array = chunk.indirect(root_ref).array();
