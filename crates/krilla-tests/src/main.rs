@@ -899,6 +899,7 @@ pub fn settings_1() -> SerializeSettings {
         fallback_cmyk_profile: None,
         text_rendering: krilla::TextRendering::Glyphs,
         font_embedding: krilla::FontEmbedding::Subset,
+        glyph_layout: krilla::GlyphLayout::Optical,
     }
 }
 
