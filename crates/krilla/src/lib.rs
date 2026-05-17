@@ -177,6 +177,6 @@ pub use graphics::*;
 pub use interactive::*;
 pub use interchange::*;
 pub use serialize::{
-    CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype,
-    OutputIntentProfile, SerializeSettings,
+    CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, OutputIntentProfile,
+    SerializeSettings, TextRendering,
 };

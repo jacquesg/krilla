@@ -128,6 +128,50 @@ pub struct SerializeSettings {
     /// krilla does not enforce cross-intent agreement — that is the
     /// caller's responsibility.
     pub output_intents: Vec<CustomOutputIntent>,
+    /// How text drawn through [`Surface::draw_glyphs`] and
+    /// [`Surface::draw_text`] should be emitted into the content stream.
+    ///
+    /// [`TextRendering::Glyphs`] (the default) preserves searchable,
+    /// selectable, copy-pasteable text by writing `Tj`-family text-showing
+    /// operators. [`TextRendering::Vector`] emits the same glyphs as
+    /// filled vector outlines (`m`/`l`/`c`/`h`/`f`), which is required by
+    /// some print workflows (e.g. PDF/X embedders that cannot rely on the
+    /// consumer to rasterise the embedded fonts) at the cost of text
+    /// extraction.
+    ///
+    /// Per-call `outlined: true` arguments to [`Surface::draw_glyphs`]
+    /// still force outline emission even when this setting is
+    /// [`TextRendering::Glyphs`]; the setting is therefore a one-way
+    /// global override that promotes all text to vector mode but never
+    /// downgrades a caller's per-call request.
+    ///
+    /// [`Surface::draw_glyphs`]: crate::surface::Surface::draw_glyphs
+    /// [`Surface::draw_text`]: crate::surface::Surface::draw_text
+    pub text_rendering: TextRendering,
+}
+
+/// How text should be emitted into the PDF content stream.
+///
+/// Selects between glyph-based text-showing operators
+/// ([`TextRendering::Glyphs`]) and vector-outline emission
+/// ([`TextRendering::Vector`]). See
+/// [`SerializeSettings::text_rendering`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum TextRendering {
+    /// Emit text as PDF text-showing operators (`Tj`, `TJ`, etc.).
+    ///
+    /// Glyphs are referenced by CID into embedded fonts, preserving
+    /// searchable, copy-pasteable text. This is the default.
+    #[default]
+    Glyphs,
+    /// Emit text as filled vector paths (`m`, `l`, `c`, `h`, `f`).
+    ///
+    /// Glyph outlines are extracted from the font (via the OpenType
+    /// `glyf`/`CFF`/`CFF2` tables) and stroked into the content stream
+    /// as path operators. Text is no longer selectable or searchable
+    /// after this transformation, but the output is independent of the
+    /// consumer's ability to render the embedded fonts.
+    Vector,
 }
 
 pub type RenderSvgGlyphFn = fn(&[u8], rgb::Color, GlyphId, (f32, f32), &mut Surface) -> Option<()>;
@@ -161,6 +205,7 @@ impl Default for SerializeSettings {
             enable_tagging: true,
             render_svg_glyph_fn: |_, _, _, _, _| None,
             output_intents: Vec::new(),
+            text_rendering: TextRendering::Glyphs,
         }
     }
 }
