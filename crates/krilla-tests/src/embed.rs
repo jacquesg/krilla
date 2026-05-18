@@ -6,7 +6,7 @@ use krilla::tagging::TagTree;
 use krilla_macros::snapshot;
 
 use crate::{metadata_1, settings_10, Document};
-use crate::{settings_13, settings_23, ASSETS_PATH};
+use crate::{settings_13, settings_23, settings_27, ASSETS_PATH};
 
 pub(crate) fn file_1() -> EmbeddedFile {
     let data = std::fs::read(ASSETS_PATH.join("emojis.txt")).unwrap();
@@ -202,4 +202,127 @@ fn embedded_file_pdf_a3b_missing_date() {
             ValidationError::EmbeddedFile(EmbedError::MissingDate, None),
         ]))
     )
+}
+
+/// Build a PDF/A-3 document (PDF 1.7) embedding a single file with the
+/// supplied `association_kind`, returning the serialised bytes.
+fn embed_with_kind_pdf_a3(kind: AssociationKind) -> Vec<u8> {
+    let mut d = Document::new_with(settings_10());
+    d.set_tag_tree(TagTree::new());
+    d.set_metadata(metadata_1());
+    let mut f1 = file_1();
+    f1.association_kind = kind;
+    d.embed_file(f1);
+    d.finish().expect("PDF/A-3 document should finish cleanly")
+}
+
+/// Build a PDF/A-4F document (PDF 2.0) embedding a single file with the
+/// supplied `association_kind`, returning the serialised bytes.
+fn embed_with_kind_pdf_a4f(kind: AssociationKind) -> Vec<u8> {
+    let mut d = Document::new_with(settings_27());
+    d.set_tag_tree(TagTree::new());
+    d.set_metadata(metadata_1());
+    let mut f1 = file_1();
+    f1.association_kind = kind;
+    d.embed_file(f1);
+    d.finish().expect("PDF/A-4F document should finish cleanly")
+}
+
+/// Locate the `/AFRelationship /<Keyword>` entry written into the PDF
+/// and return the matched keyword as a `String`, or `None` if absent.
+fn af_relationship_keyword(pdf: &[u8]) -> Option<String> {
+    let text = String::from_utf8_lossy(pdf);
+    let needle = "/AFRelationship /";
+    let start = text.find(needle)?;
+    let after = &text[start + needle.len()..];
+    let end = after
+        .find(|c: char| c.is_whitespace() || c == '>' || c == ']' || c == '/')
+        .unwrap_or(after.len());
+    Some(after[..end].to_string())
+}
+
+#[test]
+fn association_kind_encrypted_payload_pdf_2_0_emits_keyword() {
+    let pdf = embed_with_kind_pdf_a4f(AssociationKind::EncryptedPayload);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("EncryptedPayload"),
+        "PDF 2.0 target must serialise EncryptedPayload verbatim"
+    );
+}
+
+#[test]
+fn association_kind_form_data_pdf_2_0_emits_keyword() {
+    let pdf = embed_with_kind_pdf_a4f(AssociationKind::FormData);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("FormData"),
+        "PDF 2.0 target must serialise FormData verbatim"
+    );
+}
+
+#[test]
+fn association_kind_schema_pdf_2_0_emits_keyword() {
+    let pdf = embed_with_kind_pdf_a4f(AssociationKind::Schema);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("Schema"),
+        "PDF 2.0 target must serialise Schema verbatim"
+    );
+}
+
+#[test]
+fn association_kind_encrypted_payload_pdf_1_7_downgrades_to_unspecified() {
+    let pdf = embed_with_kind_pdf_a3(AssociationKind::EncryptedPayload);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("Unspecified"),
+        "PDF 1.7 target must downgrade EncryptedPayload to Unspecified"
+    );
+}
+
+#[test]
+fn association_kind_form_data_pdf_1_7_downgrades_to_unspecified() {
+    let pdf = embed_with_kind_pdf_a3(AssociationKind::FormData);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("Unspecified"),
+        "PDF 1.7 target must downgrade FormData to Unspecified"
+    );
+}
+
+#[test]
+fn association_kind_schema_pdf_1_7_downgrades_to_unspecified() {
+    let pdf = embed_with_kind_pdf_a3(AssociationKind::Schema);
+    assert_eq!(
+        af_relationship_keyword(&pdf).as_deref(),
+        Some("Unspecified"),
+        "PDF 1.7 target must downgrade Schema to Unspecified"
+    );
+}
+
+#[test]
+fn association_kind_pre_2_0_keywords_round_trip_unchanged() {
+    // Sanity: the four pre-2.0 keywords serialise as themselves under
+    // both PDF 1.7 and PDF 2.0 targets.
+    for kind in [
+        AssociationKind::Source,
+        AssociationKind::Data,
+        AssociationKind::Alternative,
+        AssociationKind::Supplement,
+    ] {
+        let pdf_17 = embed_with_kind_pdf_a3(kind);
+        let pdf_20 = embed_with_kind_pdf_a4f(kind);
+        let expected = format!("{kind:?}");
+        assert_eq!(
+            af_relationship_keyword(&pdf_17).as_deref(),
+            Some(expected.as_str()),
+            "{kind:?} should serialise verbatim under PDF 1.7"
+        );
+        assert_eq!(
+            af_relationship_keyword(&pdf_20).as_deref(),
+            Some(expected.as_str()),
+            "{kind:?} should serialise verbatim under PDF 2.0"
+        );
+    }
 }
