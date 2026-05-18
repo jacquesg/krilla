@@ -120,7 +120,8 @@ impl Cacheable for EmbeddedFile {
         ef.finish();
 
         if sc.serialize_settings().supports_associated_files() {
-            file_spec.association_kind(self.association_kind.to_pdf());
+            let version = sc.serialize_settings().pdf_version();
+            file_spec.association_kind(self.association_kind.to_pdf(version));
         }
 
         if let Some(description) = self.description {
@@ -138,6 +139,13 @@ impl Cacheable for EmbeddedFile {
 }
 
 /// How an embedded file relates to the PDF document it is embedded in.
+///
+/// The first four variants and `Unspecified` are defined by PDF/A-3
+/// (ISO 19005-3) and have been available since PDF 1.7. The
+/// `EncryptedPayload`, `FormData`, and `Schema` variants were added by
+/// PDF 2.0 (ISO 32000-2 §14.13 Table 357); when one of these is used
+/// in a pre-2.0 file it is downgraded to `Unspecified` at serialisation
+/// time, since older readers will not recognise the keyword.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum AssociationKind {
     /// The PDF document was created from this source file.
@@ -148,18 +156,44 @@ pub enum AssociationKind {
     Alternative,
     /// Additional resources for this document.
     Supplement,
+    /// An encrypted payload accompanying this document (PDF 2.0+).
+    EncryptedPayload,
+    /// Data submitted as part of a form (PDF 2.0+).
+    FormData,
+    /// A schema describing the structure of an associated file, for
+    /// example an XML schema for a form data submission (PDF 2.0+).
+    Schema,
     /// There is no clear relationship or it is not known.
     Unspecified,
 }
 
 impl AssociationKind {
-    fn to_pdf(self) -> pdf_writer::types::AssociationKind {
+    /// Map this association kind to the underlying `pdf-writer` keyword,
+    /// respecting the target PDF version.
+    ///
+    /// The PDF 2.0 keywords (`EncryptedPayload`, `FormData`, `Schema`)
+    /// have no equivalent in PDF 1.x; when the target version is older
+    /// than 2.0 they are downgraded to `Unspecified` so the produced
+    /// file remains valid for older readers.
+    fn to_pdf(self, version: PdfVersion) -> pdf_writer::types::AssociationKind {
+        use pdf_writer::types::AssociationKind as PdfKind;
+
         match self {
-            AssociationKind::Source => pdf_writer::types::AssociationKind::Source,
-            AssociationKind::Data => pdf_writer::types::AssociationKind::Data,
-            AssociationKind::Alternative => pdf_writer::types::AssociationKind::Alternative,
-            AssociationKind::Supplement => pdf_writer::types::AssociationKind::Supplement,
-            AssociationKind::Unspecified => pdf_writer::types::AssociationKind::Unspecified,
+            AssociationKind::Source => PdfKind::Source,
+            AssociationKind::Data => PdfKind::Data,
+            AssociationKind::Alternative => PdfKind::Alternative,
+            AssociationKind::Supplement => PdfKind::Supplement,
+            AssociationKind::Unspecified => PdfKind::Unspecified,
+            AssociationKind::EncryptedPayload
+            | AssociationKind::FormData
+            | AssociationKind::Schema
+                if version < PdfVersion::Pdf20 =>
+            {
+                PdfKind::Unspecified
+            }
+            AssociationKind::EncryptedPayload => PdfKind::EncryptedPayload,
+            AssociationKind::FormData => PdfKind::FormData,
+            AssociationKind::Schema => PdfKind::Schema,
         }
     }
 }
