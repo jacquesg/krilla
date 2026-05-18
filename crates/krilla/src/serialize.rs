@@ -432,6 +432,25 @@ pub enum TextRendering {
     /// after this transformation, but the output is independent of the
     /// consumer's ability to render the embedded fonts.
     Vector,
+    /// Emit text using PDF text rendering mode 3 (Invisible).
+    ///
+    /// Glyphs are shaped, positioned, and CID-mapped exactly as in
+    /// [`TextRendering::Glyphs`] mode so consumers can still extract
+    /// the text via copy/paste, search, screen readers, and
+    /// `/ActualText` overrides. The text-rendering-mode operator
+    /// `3 Tr` is emitted before the showing operator so the glyphs
+    /// produce no marks on the page. No fill or stroke colour is
+    /// set in the content stream — the glyphs are never painted.
+    ///
+    /// This is distinct from drawing with a fully transparent fill
+    /// (`rgba(_, _, _, 0)`): a transparent fill still issues a paint
+    /// operation (which may interact with overprint, blend modes,
+    /// and tagged-PDF structure), whereas mode 3 instructs the
+    /// consumer not to paint the glyph at all.
+    ///
+    /// Per ISO 32000-2 §9.3.6 Table 105 (text rendering modes) and
+    /// §14.9.4 (`/ActualText`).
+    Invisible,
 }
 
 pub type RenderSvgGlyphFn = fn(&[u8], rgb::Color, GlyphId, (f32, f32), &mut Surface) -> Option<()>;
