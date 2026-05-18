@@ -275,9 +275,16 @@ impl<'a> Surface<'a> {
     /// can promote text-as-glyphs emission to vector emission, but never
     /// downgrades an explicit per-call `outlined: true` request.
     ///
+    /// When the active mode is [`TextRendering::Invisible`], the
+    /// `outlined` argument and any active fill/stroke state are
+    /// ignored. Glyphs are emitted with text rendering mode 3 (`Tr 3`)
+    /// — they remain in the content stream for accessibility and text
+    /// extraction but produce no marks on the page.
+    ///
     /// [`SerializeSettings::text_rendering`]:
     ///     crate::SerializeSettings::text_rendering
     /// [`TextRendering::Vector`]: crate::TextRendering::Vector
+    /// [`TextRendering::Invisible`]: crate::TextRendering::Invisible
     pub fn draw_glyphs(
         &mut self,
         start: Point,
@@ -297,6 +304,26 @@ impl<'a> Surface<'a> {
             .last()
             .copied()
             .unwrap_or(self.sc.serialize_settings().text_rendering);
+        // Invisible mode takes precedence over the per-call
+        // `outlined` argument: the caller has explicitly asked for
+        // an accessibility-only ActualText overlay, so vector
+        // outlining (which produces a painted shape) would defeat
+        // the purpose.
+        if matches!(
+            active_text_rendering,
+            crate::serialize::TextRendering::Invisible,
+        ) {
+            self.bd.get_mut().draw_invisible_glyphs(
+                start,
+                self.sc,
+                context_color,
+                glyphs,
+                font,
+                text,
+                font_size,
+            );
+            return;
+        }
         let outlined = outlined
             || matches!(
                 active_text_rendering,

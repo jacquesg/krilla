@@ -512,6 +512,64 @@ impl ContentBuilder {
         self.graphics_states.restore_state();
     }
 
+    /// Emit a glyph run with PDF text rendering mode 3 (Invisible).
+    ///
+    /// Glyphs are shaped, positioned, and CID-mapped exactly as in
+    /// the fill/stroke path so consumers can still extract the text
+    /// via copy/paste, search, screen readers, and `/ActualText`
+    /// overrides. No fill or stroke colour is set in the content
+    /// stream and no paint operator is emitted — `3 Tr` instructs
+    /// the consumer to produce no marks on the page.
+    ///
+    /// Per ISO 32000-2 §9.3.6 Table 105.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_invisible_glyphs(
+        &mut self,
+        start: Point,
+        sc: &mut SerializeContext,
+        context_color: rgb::Color,
+        glyphs: &[impl Glyph],
+        font: Font,
+        text: &str,
+        font_size: f32,
+    ) {
+        if glyphs.is_empty() {
+            return;
+        }
+
+        let (x, y) = (start.x, start.y);
+        self.graphics_states.save_state();
+
+        // Glyph-bbox expansion still matters for invisible text — the
+        // glyphs participate in the page bbox so tagged-PDF readers
+        // and `pdfium` text-extraction code see a sensible bounding
+        // box. Invisible text is by definition uncoloured, so a
+        // unit-rect bbox would understate the extent; compute the
+        // real glyph bbox and feed it in.
+        let bbox_important = self.bbox_important;
+        if bbox_important {
+            let bbox = get_glyphs_bbox(glyphs, x, y, font_size, font.clone());
+            self.expand_bbox(bbox);
+        }
+
+        self.fill_stroke_glyph_run(
+            x,
+            y,
+            sc,
+            TextRenderingMode::Invisible,
+            // No fill/stroke setup — invisible glyphs produce no
+            // marks, so the colour state is irrelevant.
+            |_, _| {},
+            glyphs,
+            font,
+            context_color,
+            text,
+            font_size,
+        );
+
+        self.graphics_states.restore_state();
+    }
+
     /// Encode a successive sequence of glyphs that share the same properties and
     /// can be encoded with one text showing operator.
     #[allow(clippy::too_many_arguments)]
@@ -860,7 +918,13 @@ impl ContentBuilder {
             .get_from_identifier(glyph_group.font_identifier.clone())
             .unwrap();
 
-        if fill_render_mode == TextRenderingMode::Fill || pdf_font.force_fill() {
+        if fill_render_mode == TextRenderingMode::Invisible {
+            // Mode 3 (Invisible) is honoured even for fonts that
+            // would normally force fill — the caller asked for an
+            // accessibility-only overlay with no marks on the page.
+            self.content
+                .set_text_rendering_mode(TextRenderingMode::Invisible);
+        } else if fill_render_mode == TextRenderingMode::Fill || pdf_font.force_fill() {
             self.content
                 .set_text_rendering_mode(TextRenderingMode::Fill);
         } else if fill_render_mode == TextRenderingMode::FillStroke {
