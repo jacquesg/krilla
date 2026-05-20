@@ -177,6 +177,16 @@ impl ChunkContainer {
             encrypt_ref,
             sc.serialize_settings().encryption.as_ref(),
         ) {
+            // ISO 19005 (PDF/A) and ISO 15930 (PDF/X) both ban
+            // `/Encrypt`. Surface that mismatch through the standard
+            // validation-error channel — the file is still encrypted
+            // (it would otherwise silently lose its security setting),
+            // but the caller now receives a hard error at finish time
+            // explaining why their archival/print configuration is
+            // inconsistent with the encryption request. PDF/UA is
+            // silent on encryption, so combinations with that
+            // validator pass through unflagged.
+            sc.register_validation_error(ValidationError::ContainsEncryption);
             pdf.encrypt(ref_, enc.to_pdf_writer());
         }
 

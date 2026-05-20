@@ -171,6 +171,18 @@ pub enum ValidationError {
     /// other than PDF/X-4p or PDF/X-6p, or none was provided when one of
     /// those validators is active.
     ExternalOutputProfileRequiresX4P,
+    /// The document was configured to be encrypted (via
+    /// [`SerializeSettings::encryption`](crate::SerializeSettings::encryption))
+    /// while an archival or print validator that forbids the
+    /// `/Encrypt` dictionary is also active.
+    ///
+    /// PDF/A (ISO 19005, every profile) and PDF/X (ISO 15930,
+    /// every profile) both reject encrypted files because a
+    /// conforming long-term-preservation or print-exchange document
+    /// must be readable without a password by anyone (PDF/A
+    /// preservation tooling; PDF/X RIPs). The two settings are
+    /// therefore mutually exclusive: pick one.
+    ContainsEncryption,
 }
 
 /// Features that may require a later PDF version than the current one.
@@ -839,6 +851,11 @@ impl Archival {
                 ValidationError::MixedGradientColorSpaces(_)
                 | ValidationError::ExternalOutputProfileRequiresX4P,
             ) => true,
+            // ISO 19005 (every PDF/A revision) forbids the `/Encrypt`
+            // dictionary — a conformant archival document must be
+            // openable without a password by future preservation
+            // tooling.
+            (_, ValidationError::ContainsEncryption) => true,
         }
     }
 
@@ -1452,6 +1469,10 @@ impl Accessibility {
                 ValidationError::MixedGradientColorSpaces(_)
                 | ValidationError::ExternalOutputProfileRequiresX4P,
             ) => true,
+            // ISO 14289 (PDF/UA-1, PDF/UA-2) and WTPDF are silent on
+            // encryption — accessibility conformance is orthogonal to
+            // the security handler — so allow.
+            (_, ValidationError::ContainsEncryption) => false,
         }
     }
 
@@ -1679,6 +1700,10 @@ impl Pdfx {
             // PDF/X-4p and PDF/X-6p require the external output profile to
             // be supplied; the others must NOT have one set.
             (_, ValidationError::ExternalOutputProfileRequiresX4P) => true,
+            // ISO 15930 (every PDF/X revision) forbids the `/Encrypt`
+            // dictionary — print-exchange RIPs cannot be assumed to
+            // know a password.
+            (_, ValidationError::ContainsEncryption) => true,
         }
     }
 
