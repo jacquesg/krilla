@@ -1461,7 +1461,7 @@ checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
 [[package]]
 name = "pdf-writer"
 version = "0.14.0"
-source = "git+https://github.com/bloudraadpdf/pdf-writer?rev=16fa5306655a4449cd04f18c3af8c5b66c83812c#16fa5306655a4449cd04f18c3af8c5b66c83812c"
+source = "git+https://github.com/bloudraadpdf/pdf-writer?rev=88d2212a7f21daa346c505d0a0c832c5083c0a97#88d2212a7f21daa346c505d0a0c832c5083c0a97"
 dependencies = [
  "aes",
  "bitflags 2.11.1",

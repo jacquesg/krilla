@@ -34,7 +34,7 @@ krilla-macros = { path = "crates/krilla-macros" }
 oxipng = "10.1.0"
 parley = "0.8.0"
 paste = "1.0.15"
-pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "16fa5306655a4449cd04f18c3af8c5b66c83812c", features = ["encryption"] }
+pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "88d2212a7f21daa346c505d0a0c832c5083c0a97", features = ["encryption"] }
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.86"
 quote = "1.0.37"
@@ -61,5 +61,5 @@ zune-jpeg = "0.5.5"
 # bloudraadpdf fork. Required for types to unify between krilla and
 # its indirect dependencies.
 [patch."https://github.com/typst/pdf-writer"]
-pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "16fa5306655a4449cd04f18c3af8c5b66c83812c" }
+pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "88d2212a7f21daa346c505d0a0c832c5083c0a97" }
  
