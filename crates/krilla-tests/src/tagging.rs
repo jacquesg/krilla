@@ -14,7 +14,8 @@ use krilla::tagging::{
     SpanTag, TagGroup, TagTree,
 };
 use krilla::tagging::{
-    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, WritingMode,
+    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace,
+    WritingMode,
 };
 use krilla::text::{Font, TextDirection};
 use krilla::{Document, SerializeSettings};
@@ -851,6 +852,75 @@ fn role_map_user_override_replaces_builtin_in_place() {
     assert!(
         !contains(&pdf, b"/Strong /Span"),
         "built-in Strong -> Span survived user override"
+    );
+}
+
+#[test]
+fn namespace_override_changes_pdf_20_bytes() {
+    // Same document, same tag — only difference is the per-tag
+    // namespace override. The two produced PDFs must differ
+    // somewhere: the struct element for Tag::P binds to the SSN by
+    // default, and to the krilla namespace under the override.
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let overridden_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_ne!(
+        default_doc, overridden_doc,
+        "namespace override on Tag::P produced identical bytes — override did not take effect"
+    );
+    // Both files declare the krilla namespace URL at the document
+    // level; the override doesn't change that. What changes is
+    // which dict the struct element's /NS pair points at.
+    let url = b"https://github.com/LaurenzV/krilla";
+    assert!(
+        contains(&default_doc, url),
+        "krilla namespace URL missing from default PDF 2.0 output"
+    );
+    assert!(
+        contains(&overridden_doc, url),
+        "krilla namespace URL missing from overridden PDF 2.0 output"
+    );
+}
+
+#[test]
+fn namespace_override_ignored_on_pdf_17() {
+    // Under PDF 1.7 the namespace model does not exist; the
+    // override must be silently dropped so the produced bytes
+    // match the no-override baseline byte-for-byte.
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let overridden_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_eq!(
+        default_doc, overridden_doc,
+        "namespace override leaked into PDF 1.7 output — should be silently ignored below PDF 2.0"
     );
 }
 
