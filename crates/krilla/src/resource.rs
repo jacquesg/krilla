@@ -180,6 +180,11 @@ pub(crate) struct ResourceDictionaryBuilder {
     pub(crate) x_objects: ResourceMapper<XObject>,
     pub(crate) shadings: ResourceMapper<Shading>,
     pub(crate) fonts: ResourceMapper<Font>,
+    /// `/Properties` entries (name → indirect ref) used by `/OC`
+    /// marked-content sequences. The Vec preserves insertion order so
+    /// the emitted dict is deterministic across runs; the name is
+    /// looked up via [`ResourceDictionaryBuilder::register_layer`].
+    pub(crate) layers: Vec<(String, Ref)>,
 }
 
 impl ResourceDictionaryBuilder {
@@ -191,6 +196,7 @@ impl ResourceDictionaryBuilder {
             x_objects: ResourceMapper::new(),
             shadings: ResourceMapper::new(),
             fonts: ResourceMapper::new(),
+            layers: Vec::new(),
         }
     }
 
@@ -201,6 +207,18 @@ impl ResourceDictionaryBuilder {
         T::get_mapper(self).remap_with_name(obj.get_ref())
     }
 
+    /// Register a `/Properties` entry for an optional content group's
+    /// indirect ref under `name`. No-op if an entry with the same
+    /// name already exists (the second call must therefore agree on
+    /// the ref — krilla enforces this implicitly because
+    /// `Document::add_layer` allocates a stable build-time ref per
+    /// handle).
+    pub(crate) fn register_layer(&mut self, name: &str, layer_ref: Ref) {
+        if !self.layers.iter().any(|(n, _)| n == name) {
+            self.layers.push((name.to_string(), layer_ref));
+        }
+    }
+
     pub(crate) fn finish(self) -> ResourceDictionary {
         ResourceDictionary {
             color_spaces: self.color_spaces.into_resource_list(),
@@ -209,6 +227,7 @@ impl ResourceDictionaryBuilder {
             x_objects: self.x_objects.into_resource_list(),
             shadings: self.shadings.into_resource_list(),
             fonts: self.fonts.into_resource_list(),
+            layers: self.layers,
         }
     }
 }
@@ -221,6 +240,9 @@ pub(crate) struct ResourceDictionary {
     pub(crate) x_objects: ResourceList<XObject>,
     pub(crate) shadings: ResourceList<Shading>,
     pub(crate) fonts: ResourceList<Font>,
+    /// `/Properties` entries — see
+    /// [`ResourceDictionaryBuilder::layers`].
+    pub(crate) layers: Vec<(String, Ref)>,
 }
 
 impl Default for ResourceDictionary {
@@ -232,6 +254,7 @@ impl Default for ResourceDictionary {
             x_objects: ResourceList::empty(),
             shadings: ResourceList::empty(),
             fonts: ResourceList::empty(),
+            layers: Vec::new(),
         }
     }
 }
@@ -253,7 +276,8 @@ impl ResourceDictionary {
             || self.patterns.len() > 0
             || self.x_objects.len() > 0
             || self.shadings.len() > 0
-            || self.fonts.len() > 0;
+            || self.fonts.len() > 0
+            || !self.layers.is_empty();
 
         if !write_proc_sets && !has_resource_entries {
             // `Resources` dictionary is mandatory (or rather, it's mandatory if
@@ -282,6 +306,19 @@ impl ResourceDictionary {
         write_resource_type::<XObject>(&mut resources, &self.x_objects);
         write_resource_type::<Shading>(&mut resources, &self.shadings);
         write_resource_type::<Font>(&mut resources, &self.fonts);
+
+        // /Properties holds the BDC named-property list — each entry
+        // maps a content-stream-local short name (e.g. `/L0`) to the
+        // indirect ref of the OCG dict it stands for. ISO 32000-2
+        // §14.6.2 specifically forbids indirect refs from appearing
+        // INSIDE a content stream's BDC property dict, so OCG
+        // bindings have to be routed through this named lookup.
+        if !self.layers.is_empty() {
+            let mut props = resources.insert(Name(b"Properties")).dict();
+            for (name, layer_ref) in &self.layers {
+                props.pair(Name(name.as_bytes()), *layer_ref);
+            }
+        }
         parent.set_resources(resources_ref);
     }
 }

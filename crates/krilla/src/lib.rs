@@ -163,6 +163,7 @@ pub mod configure;
 pub mod document;
 pub mod encryption;
 pub mod error;
+pub mod optional_content;
 pub mod geom;
 pub mod num;
 pub mod page;

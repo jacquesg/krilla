@@ -1105,6 +1105,39 @@ impl SerializeContext {
         self.cur_ref.bump()
     }
 
+    /// Register an optional content group, allocating its indirect
+    /// `/OCG` ref eagerly. Returns the opaque handle the caller will
+    /// use with [`crate::surface::Surface::push_layer`].
+    pub(crate) fn add_layer(
+        &mut self,
+        layer: crate::optional_content::Layer,
+    ) -> crate::optional_content::LayerHandle {
+        let ref_ = self.new_ref();
+        let handle = crate::optional_content::LayerHandle(
+            self.global_objects.layers.len() as u32,
+        );
+        self.global_objects.layers.push(LayerRecord { layer, ref_ });
+        handle
+    }
+
+    /// Resolve a [`LayerHandle`](crate::optional_content::LayerHandle)
+    /// back to the indirect ref of its `/OCG` dictionary.
+    ///
+    /// # Panics
+    /// Panics if the handle does not correspond to a layer registered
+    /// on this document (which can only happen if the handle was
+    /// fabricated by hand or originated on a different `Document`).
+    pub(crate) fn layer_ref(
+        &self,
+        handle: crate::optional_content::LayerHandle,
+    ) -> Ref {
+        self.global_objects
+            .layers
+            .get(handle.0 as usize)
+            .map(|r| r.ref_)
+            .expect("LayerHandle out of bounds — was it created on a different Document?")
+    }
+
     /// Indirect ref of the document-level Type1 Helvetica font dict
     /// used for AcroForm widget appearance streams (ISO 32000-2 §12.7.4).
     ///
@@ -2067,9 +2100,24 @@ pub(crate) struct GlobalObjects {
     pub(crate) embedded_files: MaybeTaken<BTreeMap<String, Ref>>,
     /// A list of custom headings numbers used in the document.
     pub(crate) custom_heading_roles: BTreeSet<NonZeroU16>,
+    /// Optional content groups (layers) registered via
+    /// [`crate::Document::add_layer`]. Each entry carries the
+    /// caller-supplied [`crate::optional_content::Layer`] descriptor
+    /// plus the indirect [`Ref`] krilla pre-allocated for the
+    /// underlying `/OCG` object. Taken at finalise time when the
+    /// catalogue's `/OCProperties` dict is written.
+    pub(crate) layers: MaybeTaken<Vec<LayerRecord>>,
     /// The context tracking all of the pdfs and their pages that have been inserted.
     #[cfg(feature = "pdf")]
     pub(crate) pdf_ctx: MaybeTaken<PdfSerializerContext>,
+}
+
+/// A registered optional content group together with the indirect ref
+/// of the `/OCG` dictionary that will represent it in the final PDF.
+#[derive(Debug, Clone)]
+pub(crate) struct LayerRecord {
+    pub(crate) layer: crate::optional_content::Layer,
+    pub(crate) ref_: Ref,
 }
 
 impl GlobalObjects {
@@ -2083,6 +2131,7 @@ impl GlobalObjects {
         assert!(self.outline.is_taken());
         assert!(self.tag_tree.is_taken());
         assert!(self.embedded_files.is_taken());
+        assert!(self.layers.is_taken());
         #[cfg(feature = "pdf")]
         assert!(self.pdf_ctx.is_taken());
     }
