@@ -34,7 +34,7 @@ krilla-macros = { path = "crates/krilla-macros" }
 oxipng = "10.1.0"
 parley = "0.8.0"
 paste = "1.0.15"
-pdf-writer = { git = "https://github.com/typst/pdf-writer", rev = "bc50acaea3c6022ef095a52bb75a273ef656813b" }
+pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "16fa5306655a4449cd04f18c3af8c5b66c83812c", features = ["encryption"] }
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.86"
 quote = "1.0.37"
@@ -55,4 +55,11 @@ xmp-writer = "0.3.3"
 yoke = { version = "0.8.0", features = ["derive"] }
 png = "0.18.1"
 zune-jpeg = "0.5.5"
+
+# Force every crate in the dependency tree (including hayro-write,
+# which transitively depends on the typst rev) to use the
+# bloudraadpdf fork. Required for types to unify between krilla and
+# its indirect dependencies.
+[patch."https://github.com/typst/pdf-writer"]
+pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "16fa5306655a4449cd04f18c3af8c5b66c83812c" }
  
