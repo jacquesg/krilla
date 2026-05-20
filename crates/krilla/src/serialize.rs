@@ -1761,18 +1761,38 @@ impl SerializeContext {
             let mut sub_chunks = vec![];
 
             if self.serialize_settings.pdf_version() < PdfVersion::Pdf20 {
-                let mut role_map = tree.role_map();
-                // Custom structure elements.
-                role_map.insert(Name(b"Datetime"), StructRole::Span);
-                role_map.insert(Name(b"Terms"), StructRole::Part);
-
-                // PDF 2.0 exclusive structure elements.
-                role_map.insert(Name(b"Title"), StructRole::P);
-                role_map.insert(Name(b"Strong"), StructRole::Span);
-                role_map.insert(Name(b"Em"), StructRole::Span);
+                // Built-in /RoleMap entries, in the historical
+                // emission order (snapshot tests pin the dict's byte
+                // layout). User-supplied entries below override
+                // values in place when the key already exists, and
+                // are appended otherwise — so the on-disk dict never
+                // carries duplicate keys (PDF dict behaviour for
+                // duplicates is implementation-defined).
+                let mut entries: Vec<(Vec<u8>, StructRole)> = vec![
+                    // Custom structure elements.
+                    (b"Datetime".to_vec(), StructRole::Span),
+                    (b"Terms".to_vec(), StructRole::Part),
+                    // PDF 2.0 exclusive structure elements.
+                    (b"Title".to_vec(), StructRole::P),
+                    (b"Strong".to_vec(), StructRole::Span),
+                    (b"Em".to_vec(), StructRole::Span),
+                ];
                 for level in self.global_objects.custom_heading_roles.iter() {
                     let role2 = StructRole2::Heading(*level);
-                    role_map.insert(role2.to_name(&mut [0; 6]), StructRole::P);
+                    let mut buf = [0; 6];
+                    let name = role2.to_name(&mut buf);
+                    entries.push((name.0.to_vec(), StructRole::P));
+                }
+                for (name, role) in root.role_map.iter() {
+                    match entries.iter_mut().find(|(k, _)| k == name) {
+                        Some(slot) => slot.1 = *role,
+                        None => entries.push((name.clone(), *role)),
+                    }
+                }
+
+                let mut role_map = tree.role_map();
+                for (name, role) in &entries {
+                    role_map.insert(Name(name.as_slice()), *role);
                 }
             } else {
                 let mut namespaces = tree.namespaces();

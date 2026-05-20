@@ -131,7 +131,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 
-use pdf_writer::types::{RoleMapOpts, StructRole, StructRole2};
+use pdf_writer::types::{RoleMapOpts, StructRole2};
 use pdf_writer::writers::{PropertyList, StructElement};
 use pdf_writer::{Chunk, Finish, Name, Ref, Str, TextStr};
 use smallvec::SmallVec;
@@ -145,6 +145,14 @@ use crate::page::page_root_transform;
 use crate::serialize::SerializeContext;
 
 pub use tag::*;
+
+/// A standard PDF structure type (re-exported from `pdf-writer`).
+///
+/// Used as the target of [`TagTree::with_role_map`] when teaching
+/// the consumer how to interpret a custom structure element name.
+/// Maps directly to the names defined in ISO 32000-1 §14.8.4 and
+/// ISO 32000-2 §14.8.4.3.
+pub use pdf_writer::types::StructRole;
 
 pub mod fmt;
 mod tag;
@@ -1111,6 +1119,10 @@ pub struct TagTree {
     pub children: Vec<Node>,
     /// Language attribute for the auto-generated Document root structure element.
     pub lang: Option<String>,
+    /// Caller-supplied `/RoleMap` entries — custom structure element
+    /// names mapped to their standard PDF role. Populated via
+    /// [`TagTree::with_role_map`] / [`TagTree::add_role_mapping`].
+    pub(crate) role_map: BTreeMap<Vec<u8>, StructRole>,
 }
 
 impl From<Vec<Node>> for TagTree {
@@ -1118,6 +1130,7 @@ impl From<Vec<Node>> for TagTree {
         Self {
             children,
             lang: None,
+            role_map: BTreeMap::new(),
         }
     }
 }
@@ -1128,6 +1141,7 @@ impl TagTree {
         Self {
             children: vec![],
             lang: None,
+            role_map: BTreeMap::new(),
         }
     }
 
@@ -1139,6 +1153,37 @@ impl TagTree {
     pub fn with_lang(mut self, lang: Option<String>) -> Self {
         self.lang = lang;
         self
+    }
+
+    /// Replace the caller-supplied `/RoleMap` entries with `entries`.
+    ///
+    /// Each entry pairs a custom structure element name (the
+    /// `Name` written into the PDF) with the standard
+    /// [`StructRole`] a consumer that does not know about the
+    /// custom name should fall back to.
+    ///
+    /// User-supplied entries are merged into the built-in role map
+    /// at serialisation time and **win on key collision** — e.g.
+    /// supplying `("Strong", StructRole::H1)` overrides the
+    /// built-in `Strong → Span` mapping.
+    ///
+    /// Only takes effect for PDF versions below 2.0. In PDF 2.0+
+    /// krilla emits namespaces instead of a `/RoleMap` dict
+    /// (ISO 32000-2 §14.8.6); per-element namespace overrides are
+    /// the corresponding extension point for that path.
+    pub fn with_role_map<I, K>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, StructRole)>,
+        K: Into<Vec<u8>>,
+    {
+        self.role_map = entries.into_iter().map(|(k, r)| (k.into(), r)).collect();
+        self
+    }
+
+    /// Add or override a single caller-supplied `/RoleMap` entry.
+    /// See [`TagTree::with_role_map`] for the merge semantics.
+    pub fn add_role_mapping(&mut self, name: impl Into<Vec<u8>>, role: StructRole) {
+        self.role_map.insert(name.into(), role);
     }
 
     /// Append a new child to the tag tree.
