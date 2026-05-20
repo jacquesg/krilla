@@ -418,8 +418,8 @@ pub enum Validator {
     /// - Footnotes and end notes should use the `Note` tag.
     ///
     /// Navigation:
-    /// - The document should contain an outline reflecting the reading
-    ///   order of the document.
+    /// - The document must contain an outline, and it should reflect
+    ///   the reading order of the document.
     /// - Page labels should be semantically appropriate.
     ///
     /// Annotations:
@@ -444,9 +444,10 @@ pub enum Validator {
     ///
     /// WTPDF is a profile of ISO 32000-2 (PDF 2.0) requiring the document to
     /// be well-tagged using the PDF 2.0 standard structure namespace
-    /// (`http://iso.org/pdf2/ssn`). It is the structural foundation of
-    /// [`UA2`](Self::UA2); UA-2 normatively references WTPDF and layers the
-    /// accessibility-specific requirements on top.
+    /// (`https://www.iso.org/pdf2/ssn`, as emitted by the pdf-writer crate).
+    /// It is the structural foundation of [`UA2`](Self::UA2); UA-2
+    /// normatively references WTPDF and layers the accessibility-specific
+    /// requirements on top.
     ///
     /// Use this variant when every consumer must receive a tagged
     /// reading-order PDF 2.0 document, but the stricter accessibility
@@ -845,31 +846,34 @@ impl Validator {
                 ValidationError::MissingCMYKProfile => false,
                 ValidationError::MissingExternalOutputProfile => false,
                 ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
-                ValidationError::InconsistentSeparationFallback(_) => true,
-                // WTPDF §6.4 / UA-2 §7.1.2: every glyph drawn must map to a
+                // Neither WTPDF nor UA-2 speaks to spot-colour fallback
+                // consistency, so match UA-1's lenient stance rather than
+                // PDF/A's stricter one.
+                ValidationError::InconsistentSeparationFallback(_) => false,
+                // Both profiles require every glyph drawn to map to a
                 // sensible code point.
                 ValidationError::ContainsNotDefGlyph(_, _, _) => true,
                 ValidationError::NoCodepointMapping(_, _, _)
                 | ValidationError::InvalidCodepointMapping(_, _, _, _) => {
                     self.requires_codepoint_mappings()
                 }
-                // UA-2 §7.1.3 permits PUA glyphs provided an `ActualText`
-                // attribute is supplied; krilla cannot verify the latter, so
-                // we mirror the UA-1 lenient stance rather than reject.
+                // UA-2 permits PUA glyphs provided an `ActualText` attribute
+                // is supplied; krilla cannot verify the latter, so we mirror
+                // the UA-1 lenient stance rather than reject.
                 ValidationError::UnicodePrivateArea(_, _, _, _) => false,
                 ValidationError::RestrictedLicense(_) => true,
-                // UA-2 §7.2.4 requires the document language; WTPDF only
+                // UA-2 requires the document language; WTPDF only
                 // recommends it.
                 ValidationError::NoDocumentLanguage => *self == Validator::UA2,
-                // UA-2 §7.2.5 requires the document title; WTPDF does not.
+                // UA-2 requires the document title; WTPDF does not.
                 ValidationError::NoDocumentTitle => *self == Validator::UA2,
-                // UA-2 §7.18 requires alt text for figures and formulas;
-                // WTPDF does not.
+                // UA-2 requires alt text for figures and formulas; WTPDF
+                // does not.
                 ValidationError::MissingAltText(_) => *self == Validator::UA2,
                 ValidationError::MissingHeadingTitle => *self == Validator::UA2,
-                // UA-2 §7.16 mandates an outline for any document where
-                // navigation requires one; krilla treats the requirement as
-                // absolute, matching UA-1.
+                // UA-2 mandates an outline for any document where navigation
+                // requires one; krilla treats the requirement as absolute,
+                // matching UA-1.
                 ValidationError::MissingDocumentOutline => *self == Validator::UA2,
                 ValidationError::MissingAnnotationAltText(_) => *self == Validator::UA2,
                 // PDF 2.0 supports live transparency; no restriction.
@@ -878,8 +882,8 @@ impl Validator {
                 ValidationError::EmbeddedFile(er, _) => match er {
                     EmbedError::Existence => false,
                     EmbedError::MissingDate => false,
-                    // UA-2 §7.20 requires a description on every embedded
-                    // file; WTPDF does not.
+                    // UA-2 requires a `/Desc` entry on every file
+                    // attachment; WTPDF does not.
                     EmbedError::MissingDescription => *self == Validator::UA2,
                     EmbedError::MissingMimeType => false,
                 },
@@ -1390,8 +1394,8 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => true,
-            // UA-2 §7.2.5 mandates the DisplayDocTitle viewer preference.
-            // WTPDF does not.
+            // UA-2 mandates the DisplayDocTitle viewer preference; WTPDF
+            // does not.
             Validator::UA2 => true,
             Validator::WTPDF => false,
             Validator::X1A

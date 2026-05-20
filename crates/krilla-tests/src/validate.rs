@@ -1140,6 +1140,77 @@ fn validate_pdf_ua2_empty_annotation_alt() {
 }
 
 #[test]
+fn validate_pdf_ua2_embedded_file_missing_description() {
+    // UA-2 (unlike WTPDF) requires every file attachment to carry a
+    // `/Desc` entry. Strip the description on a sample file and verify
+    // the validator raises `EmbedError::MissingDescription` while no
+    // other unrelated error fires.
+    let mut document = Document::new_with(settings_41());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.end_tagged();
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    let mut f1 = file_1();
+    f1.description = None;
+    document.embed_file(f1);
+
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .title("a nice title".to_string()),
+    );
+    let outline = Outline::new();
+    document.set_outline(outline);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors
+                .iter()
+                .any(|e| matches!(
+                    e,
+                    ValidationError::EmbeddedFile(EmbedError::MissingDescription, _)
+                )));
+        }
+        other => panic!("expected MissingDescription error, got {other:?}"),
+    }
+}
+
+#[test]
+fn validate_wtpdf_embedded_file_without_description() {
+    // WTPDF, in contrast to PDF/UA-2, places no requirement on
+    // `/Desc`. The same setup that fails under UA-2 must succeed under
+    // WTPDF.
+    let mut document = Document::new_with(settings_40());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.end_tagged();
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    let mut f1 = file_1();
+    f1.description = None;
+    document.embed_file(f1);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
 fn validate_pdf_ua2_missing_tagging() {
     let mut document = Document::new_with(settings_41());
     document.set_metadata(
