@@ -581,6 +581,7 @@ fn push_text_rendering_scopes_vector_emission_to_push_range() {
     use krilla::{SerializeSettings, TextRendering};
 
     let settings = SerializeSettings {
+        pretty: true,
         compress_content_streams: false,
         // Default document is glyph-mode; only the per-call push
         // promotes the middle range to vector.
@@ -659,6 +660,7 @@ fn push_text_rendering_nests_with_other_push_instructions() {
     use krilla::{SerializeSettings, TextRendering};
 
     let settings = SerializeSettings {
+        pretty: true,
         compress_content_streams: false,
         text_rendering: TextRendering::Glyphs,
         ..Default::default()
