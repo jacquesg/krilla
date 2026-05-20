@@ -197,6 +197,17 @@ impl Annotation {
         root_ref: Ref,
         page_height: f32,
     ) -> KrillaResult<()> {
+        // PDF/X-1a (ISO 15930-4) forbids every annotation type krilla
+        // supports. Surface the violation so the error path catches it
+        // before the annotation dict reaches the file.
+        if sc
+            .serialize_settings()
+            .validators()
+            .forbids_annotations()
+        {
+            sc.register_validation_error(ValidationError::ContainsAnnotation(self.location));
+        }
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)

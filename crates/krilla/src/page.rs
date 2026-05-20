@@ -522,6 +522,22 @@ impl InternalPage {
         chunk_container: &mut ChunkContainer,
         root_ref: Ref,
     ) -> KrillaResult<()> {
+        // PDF/X (ISO 15930-* §6) requires every page to carry either a
+        // TrimBox or an ArtBox. Surface the omission before emitting the
+        // page dict so the error path catches it.
+        if sc
+            .serialize_settings()
+            .validators()
+            .requires_trim_or_art_box()
+            && self.page_settings.trim_box().is_none()
+            && self.page_settings.art_box().is_none()
+        {
+            sc.register_validation_error(ValidationError::MissingTrimOrArtBox(
+                self.page_index,
+                None,
+            ));
+        }
+
         let mut annotation_refs = vec![];
         let mut radio_groups = self.radio_groups;
 

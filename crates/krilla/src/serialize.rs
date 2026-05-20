@@ -128,6 +128,16 @@ pub struct SerializeSettings {
     /// krilla does not enforce cross-intent agreement — that is the
     /// caller's responsibility.
     pub output_intents: Vec<CustomOutputIntent>,
+    /// Externally-referenced ICC output profile, required by PDF/X-4p and
+    /// PDF/X-6p (the `p` suffix variants of the PDF/X family). Forbidden
+    /// for every other validator combination.
+    ///
+    /// When set under PDF/X-4p / PDF/X-6p, the profile is referenced
+    /// from the catalogue's `/OutputIntents` entry via `/DestOutputProfileRef`
+    /// and `/CheckSum` rather than embedded inline. The PDF/X validator
+    /// raises [`ValidationError::ExternalOutputProfileRequiresX4P`] when
+    /// this field's presence does not match the active validator.
+    pub external_output_profile: Option<ExternalOutputProfile>,
     /// Fallback CMYK destination profile, emitted as a default
     /// `/OutputIntents` entry when the document declares no other intent.
     ///
@@ -484,6 +494,7 @@ impl Default for SerializeSettings {
             enable_tagging: true,
             render_svg_glyph_fn: |_, _, _, _, _| None,
             output_intents: Vec::new(),
+            external_output_profile: None,
             text_rendering: TextRendering::Glyphs,
             font_embedding: FontEmbedding::Subset,
             fallback_cmyk_profile: None,
@@ -499,6 +510,156 @@ impl Default for SerializeSettings {
 fn trim_required(s: String) -> Option<String> {
     let trimmed = s.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn trim_url_list(urls: Vec<String>) -> Option<Vec<String>> {
+    let trimmed: Vec<String> = urls
+        .into_iter()
+        .filter_map(trim_required)
+        .collect();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+/// An externally-referenced ICC output profile for PDF/X-4p and PDF/X-6p.
+///
+/// Both variants emit `/DestOutputProfileRef` and `/CheckSum` entries on the
+/// output-intent dictionary instead of embedding the profile inline. The
+/// profile is identified by URL (mandatory, one or more) and a
+/// hash (used by consumers to detect substitution).
+#[derive(Clone, Debug)]
+pub struct ExternalOutputProfile {
+    subtype: pdf_writer::types::OutputIntentSubtype<'static>,
+    urls: Vec<String>,
+    checksum: Vec<u8>,
+    output_condition_identifier: String,
+    info: String,
+}
+
+/// Reason construction of an [`ExternalOutputProfile`] failed.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ExternalOutputProfileError {
+    /// No URL was supplied (or every supplied URL was empty/whitespace).
+    EmptyUrlList,
+    /// The output condition identifier was empty.
+    EmptyIdentifier,
+    /// The information string was empty.
+    EmptyInfo,
+    /// The supplied checksum was empty.
+    EmptyChecksum,
+}
+
+impl core::fmt::Display for ExternalOutputProfileError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let reason = match self {
+            Self::EmptyUrlList => "at least one non-empty profile URL must be supplied",
+            Self::EmptyIdentifier => "the output condition identifier must be non-empty",
+            Self::EmptyInfo => "the informational string must be non-empty",
+            Self::EmptyChecksum => "the profile checksum must be non-empty",
+        };
+        f.write_str(reason)
+    }
+}
+
+impl std::error::Error for ExternalOutputProfileError {}
+
+impl ExternalOutputProfile {
+    /// Construct an externally-referenced RGB profile (PDF/X subtype
+    /// `GTS_PDFX`). PDF/X-4p / PDF/X-6p workflows use this when the
+    /// destination profile is delivered out of band.
+    pub fn rgb(
+        urls: Vec<String>,
+        checksum: Vec<u8>,
+        output_condition_identifier: String,
+        info: String,
+    ) -> Result<Self, ExternalOutputProfileError> {
+        Self::new(
+            pdf_writer::types::OutputIntentSubtype::PDFX,
+            urls,
+            checksum,
+            output_condition_identifier,
+            info,
+        )
+    }
+
+    /// Construct an externally-referenced luma (greyscale) profile.
+    pub fn luma(
+        urls: Vec<String>,
+        checksum: Vec<u8>,
+        output_condition_identifier: String,
+        info: String,
+    ) -> Result<Self, ExternalOutputProfileError> {
+        Self::new(
+            pdf_writer::types::OutputIntentSubtype::PDFX,
+            urls,
+            checksum,
+            output_condition_identifier,
+            info,
+        )
+    }
+
+    /// Construct an externally-referenced CMYK profile.
+    pub fn cmyk(
+        urls: Vec<String>,
+        checksum: Vec<u8>,
+        output_condition_identifier: String,
+        info: String,
+    ) -> Result<Self, ExternalOutputProfileError> {
+        Self::new(
+            pdf_writer::types::OutputIntentSubtype::PDFX,
+            urls,
+            checksum,
+            output_condition_identifier,
+            info,
+        )
+    }
+
+    fn new(
+        subtype: pdf_writer::types::OutputIntentSubtype<'static>,
+        urls: Vec<String>,
+        checksum: Vec<u8>,
+        output_condition_identifier: String,
+        info: String,
+    ) -> Result<Self, ExternalOutputProfileError> {
+        let urls = trim_url_list(urls).ok_or(ExternalOutputProfileError::EmptyUrlList)?;
+        let output_condition_identifier = trim_required(output_condition_identifier)
+            .ok_or(ExternalOutputProfileError::EmptyIdentifier)?;
+        let info = trim_required(info).ok_or(ExternalOutputProfileError::EmptyInfo)?;
+        if checksum.is_empty() {
+            return Err(ExternalOutputProfileError::EmptyChecksum);
+        }
+        Ok(Self {
+            subtype,
+            urls,
+            checksum,
+            output_condition_identifier,
+            info,
+        })
+    }
+
+    /// The `/S` (subtype) of the output intent.
+    pub fn subtype(&self) -> pdf_writer::types::OutputIntentSubtype<'static> {
+        self.subtype
+    }
+
+    /// The list of URL references that point to the external profile.
+    pub fn urls(&self) -> &[String] {
+        &self.urls
+    }
+
+    /// The MD5 (or other) checksum used by consumers to detect substitution.
+    pub fn checksum(&self) -> &[u8] {
+        &self.checksum
+    }
+
+    /// `/OutputConditionIdentifier` value.
+    pub fn output_condition_identifier(&self) -> &str {
+        &self.output_condition_identifier
+    }
+
+    /// `/Info` value.
+    pub fn info(&self) -> &str {
+        &self.info
+    }
 }
 
 fn normalise_optional_string(s: String) -> Option<String> {
@@ -1273,15 +1434,18 @@ impl SerializeContext {
 /// All methods are supposed to only be called once in `SerializeContext::finish`!
 impl SerializeContext {
     fn serialize_destination_profiles(&mut self, chunk_container: &mut ChunkContainer) {
+        use pdf_writer::types::OutputIntentSubtype;
         let validators = self.serialize_settings.validators();
-        let validator_subtype = validators.output_intent();
+        let validator_subtypes = validators.output_intents();
         let custom_intents = self.serialize_settings.output_intents.clone();
+        let external_profile = self.serialize_settings.external_output_profile.clone();
         // Fallback CMYK profile fires only when no other intent source is
         // present. It is the colour-management default for documents that
         // contain CMYK content but neither pick a validator-driven intent
         // nor supply explicit caller intents.
-        let fallback_cmyk = if validator_subtype.is_none()
+        let fallback_cmyk = if validator_subtypes.is_empty()
             && custom_intents.is_empty()
+            && external_profile.is_none()
             && self.serialize_settings.fallback_cmyk_profile.is_some()
         {
             self.serialize_settings.fallback_cmyk_profile.clone()
@@ -1289,7 +1453,11 @@ impl SerializeContext {
             None
         };
 
-        if validator_subtype.is_none() && custom_intents.is_empty() && fallback_cmyk.is_none() {
+        if validator_subtypes.is_empty()
+            && custom_intents.is_empty()
+            && external_profile.is_none()
+            && fallback_cmyk.is_none()
+        {
             return;
         }
 
@@ -1297,13 +1465,54 @@ impl SerializeContext {
         let mut chunk = self.new_chunk();
         let mut oi_refs: Vec<Ref> = Vec::new();
 
-        if let Some(subtype) = validator_subtype {
+        // CMYK profile cached once so combined PDF/A + PDF/X validators can
+        // share the same `/DestOutputProfile` reference across intents.
+        let cmyk_profile_ref: std::cell::OnceCell<Ref> = std::cell::OnceCell::new();
+
+        for subtype in &validator_subtypes {
             let oi_ref = self.new_ref();
+            // PDF/X validators reference the user-supplied CMYK profile if
+            // the PDF/X variant embeds inline; X-4p / X-6p (the `p` suffix)
+            // use the external profile path written below instead and skip
+            // this branch.
+            let is_pdfx = matches!(subtype, OutputIntentSubtype::PDFX);
+            if is_pdfx && external_profile.is_some() {
+                // X-4p / X-6p: profile reference is delivered out-of-band.
+                continue;
+            }
+            if is_pdfx {
+                // Inline-embedded PDF/X path: use the supplied CMYK profile.
+                let Some(cmyk) = self.serialize_settings.cmyk_profile.clone() else {
+                    self.register_validation_error(ValidationError::MissingCMYKProfile);
+                    continue;
+                };
+                let profile_ref = *cmyk_profile_ref.get_or_init(|| {
+                    self.register_cacheable(chunk_container, GenericICCProfile::Cmyk(cmyk.clone()))
+                });
+                let mut oi = chunk.indirect(oi_ref).start::<OutputIntent>();
+                oi.dest_output_profile(profile_ref)
+                    .subtype(*subtype)
+                    .output_condition_identifier(TextStr("Custom"))
+                    .output_condition(TextStr("CMYK"))
+                    .registry_name(TextStr(""))
+                    .info(TextStr(
+                        format!(
+                            "CMYK v{}.{}",
+                            cmyk.metadata().major,
+                            cmyk.metadata().minor
+                        )
+                        .as_str(),
+                    ));
+                oi.finish();
+                oi_refs.push(oi_ref);
+                continue;
+            }
+            // PDF/A: use krilla's bundled sRGB profile.
             let icc_profile = self.serialize_settings.pdf_version().rgb_icc();
             let profile_ref = self.register_cacheable(chunk_container, icc_profile.clone());
             let mut oi = chunk.indirect(oi_ref).start::<OutputIntent>();
             oi.dest_output_profile(profile_ref)
-                .subtype(subtype)
+                .subtype(*subtype)
                 .output_condition_identifier(TextStr("Custom"))
                 .output_condition(TextStr("sRGB"))
                 .registry_name(TextStr(""))
@@ -1315,6 +1524,44 @@ impl SerializeContext {
                     )
                     .as_str(),
                 ));
+            oi.finish();
+            oi_refs.push(oi_ref);
+        }
+
+        // External output profile (PDF/X-4p / PDF/X-6p): emit a separate
+        // output intent that references the profile by URL/checksum rather
+        // than embedding it inline. Written as a raw dict so we can attach
+        // `/DestOutputProfileRef`, which `pdf_writer::OutputIntent` does
+        // not expose directly.
+        if let Some(profile) = external_profile {
+            use pdf_writer::types::OutputIntentSubtype;
+            let oi_ref = self.new_ref();
+            let mut oi = chunk.indirect(oi_ref).dict();
+            oi.pair(Name(b"Type"), Name(b"OutputIntent"));
+            let subtype_name: &[u8] = match profile.subtype() {
+                OutputIntentSubtype::PDFX => b"GTS_PDFX",
+                OutputIntentSubtype::PDFA => b"GTS_PDFA1",
+                OutputIntentSubtype::PDFE => b"ISO_PDFE1",
+                OutputIntentSubtype::Custom(n) => n.0,
+            };
+            oi.pair(Name(b"S"), Name(subtype_name));
+            oi.pair(
+                Name(b"OutputConditionIdentifier"),
+                TextStr(profile.output_condition_identifier()),
+            );
+            oi.pair(Name(b"Info"), TextStr(profile.info()));
+            // `/DestOutputProfileRef << /URLs [...] /CheckSum <hex> >>`
+            // per ISO 32000-2 §14.11.5.
+            let mut ref_dict = oi.insert(Name(b"DestOutputProfileRef")).dict();
+            {
+                let mut urls = ref_dict.insert(Name(b"URLs")).array();
+                for u in profile.urls() {
+                    urls.item(TextStr(u));
+                }
+                urls.finish();
+            }
+            ref_dict.pair(Name(b"CheckSum"), Str(profile.checksum()));
+            ref_dict.finish();
             oi.finish();
             oi_refs.push(oi_ref);
         }
@@ -1595,6 +1842,19 @@ impl SerializeContext {
     fn check_validator_limits(&mut self) {
         if self.cur_ref > Ref::new(8388607) {
             self.register_validation_error(ValidationError::TooManyIndirectObjects)
+        }
+
+        // PDF/X-4p / PDF/X-6p mandate that the caller supplies an
+        // external output-intent profile reference; raise the configuration
+        // error eagerly so it lands in the same validation pass as the
+        // rest. Conversely, supplying a profile when no PDF/X profile that
+        // accepts it is active is also a configuration mismatch.
+        let validators = self.serialize_settings.validators();
+        let has_profile = self.serialize_settings.external_output_profile.is_some();
+        if validators.requires_external_output_profile() != has_profile {
+            self.register_validation_error(
+                ValidationError::ExternalOutputProfileRequiresX4P,
+            );
         }
 
         if self.limits.str_len() > STR_LEN {

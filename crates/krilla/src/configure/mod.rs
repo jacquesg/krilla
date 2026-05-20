@@ -3,7 +3,7 @@
 pub mod validate;
 mod version;
 
-pub use validate::{Accessibility, Archival, ValidationError, Validator, Validators};
+pub use validate::{Accessibility, Archival, Pdfx, ValidationError, Validator, Validators};
 pub use version::PdfVersion;
 
 use crate::configure::validate::ValidatorsBuilder;
@@ -61,6 +61,12 @@ impl ConfigurationBuilder {
     /// Set the PDF/UA accessibility validator, overwriting the current one if already set.
     pub fn with_accessibility_validator(mut self, ua: Accessibility) -> Self {
         self.validators = self.validators.with_accessibility_validator(ua);
+        self
+    }
+
+    /// Set the PDF/X validator, overwriting the current one if already set.
+    pub fn with_pdfx_validator(mut self, pdfx: Pdfx) -> Self {
+        self.validators = self.validators.with_pdfx_validator(pdfx);
         self
     }
 
@@ -232,6 +238,65 @@ mod tests {
         assert!(matches!(
             ConfigurationBuilder::new()
                 .with_accessibility_validator(Accessibility::WTPDF)
+                .with_version(PdfVersion::Pdf17)
+                .finish(),
+            Err(ConfigurationError::VersionDoesNotMatchValidatorsRange(
+                PdfVersion::Pdf17,
+                _
+            ))
+        ));
+    }
+
+    #[test]
+    fn pdfx_1a_locks_pdf_1_4() {
+        use crate::configure::Pdfx;
+        let config = ConfigurationBuilder::new()
+            .with_pdfx_validator(Pdfx::X1A)
+            .finish()
+            .unwrap();
+        assert_eq!(config.version(), PdfVersion::Pdf14);
+        assert_eq!(config.validators().pdfx(), Some(Pdfx::X1A));
+    }
+
+    #[test]
+    fn pdfx_4_picks_pdf_1_6() {
+        use crate::configure::Pdfx;
+        let config = ConfigurationBuilder::new()
+            .with_pdfx_validator(Pdfx::X4)
+            .finish()
+            .unwrap();
+        assert_eq!(config.version(), PdfVersion::Pdf16);
+    }
+
+    #[test]
+    fn pdfx_6_requires_pdf_2_0() {
+        use crate::configure::Pdfx;
+        let config = ConfigurationBuilder::new()
+            .with_pdfx_validator(Pdfx::X6)
+            .finish()
+            .unwrap();
+        assert_eq!(config.version(), PdfVersion::Pdf20);
+    }
+
+    #[test]
+    fn pdfx_combined_with_pdfa3b() {
+        use crate::configure::Pdfx;
+        // PDF/A-3b (max Pdf17) + PDF/X-4 (min Pdf16) → intersection [Pdf16, Pdf17].
+        let config = ConfigurationBuilder::new()
+            .with_archival_validator(Archival::A3_B)
+            .with_pdfx_validator(Pdfx::X4)
+            .finish()
+            .unwrap();
+        assert_eq!(config.validators().archival(), Some(Archival::A3_B));
+        assert_eq!(config.validators().pdfx(), Some(Pdfx::X4));
+    }
+
+    #[test]
+    fn pdfx_1a_rejects_pdf_1_7() {
+        use crate::configure::Pdfx;
+        assert!(matches!(
+            ConfigurationBuilder::new()
+                .with_pdfx_validator(Pdfx::X1A)
                 .with_version(PdfVersion::Pdf17)
                 .finish(),
             Err(ConfigurationError::VersionDoesNotMatchValidatorsRange(

@@ -7,6 +7,7 @@
 //! [`Document::set_metadata`]: crate::document::Document::set_metadata
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
+use std::ops::DerefMut;
 use xmp_writer::{LangId, Timezone, XmpWriter};
 
 use crate::configure::{Configuration, PdfVersion, ValidationError};
@@ -303,7 +304,14 @@ impl Metadata {
             return;
         }
 
-        if self.has_document_info() {
+        // PDF/X (ISO 15930-*) mandates `/GTS_PDFXVersion` and `/Trapped` in
+        // the Info dictionary even on PDF 2.0 (ISO 15930-9 still requires
+        // them despite the general PDF 2.0 Info-dict deprecation). Force
+        // the dict to be written under any PDF/X validator.
+        let requires_pdfx_info = config.validators().requires_pdfx_identification()
+            || config.validators().requires_trapping_metadata();
+
+        if self.has_document_info() || requires_pdfx_info {
             let ref_ = ref_.bump();
             let mut document_info = LazyCell::new(|| pdf.document_info(ref_));
 
@@ -340,6 +348,23 @@ impl Metadata {
             if let Some(date_time) = self.creation_date {
                 document_info.modified_date(pdf_date(date_time));
                 document_info.creation_date(pdf_date(date_time));
+            }
+
+            // PDF/X identification: `/GTS_PDFXVersion (PDF/X-...)` per
+            // ISO 32000-2 Annex K.2.
+            if let Some(version) = config.validators().gts_pdfx_version_string() {
+                document_info
+                    .deref_mut()
+                    .pair(Name(b"GTS_PDFXVersion"), TextStr(version));
+            }
+
+            // `/Trapped` mandated by every PDF/X revision. krilla does not
+            // model trap state today, so emit `/False` as the conservative
+            // default — PDF/X forbids `/Unknown`.
+            if config.validators().requires_trapping_metadata() {
+                document_info
+                    .deref_mut()
+                    .pair(Name(b"Trapped"), Name(b"False"));
             }
         }
     }

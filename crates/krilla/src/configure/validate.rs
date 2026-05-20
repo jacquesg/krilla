@@ -142,6 +142,35 @@ pub enum ValidationError {
     EmbeddedPDF(Option<Location>),
     /// A feature only available in a later PDF version was required.
     RequiresNewerPdfVersion(VersionedFeature, Option<Location>),
+    /// The PDF contains an RGB color, which is forbidden by PDF/X-1a.
+    ///
+    /// Occurs if an RGB color was used in fills, strokes, gradients, images,
+    /// or separation fallback colors when exporting to PDF/X-1a. Grayscale
+    /// colors are permitted.
+    ContainsRgb(Option<Location>),
+    /// A gradient's stops are not all in the same color space.
+    ///
+    /// Occurs if the [`Stop`](crate::paint::Stop)s supplied to a
+    /// [`LinearGradient`](crate::paint::LinearGradient),
+    /// [`RadialGradient`](crate::paint::RadialGradient), or
+    /// [`SweepGradient`](crate::paint::SweepGradient) resolve to different
+    /// color spaces. krilla normalises the stops to the first stop's color
+    /// space when this happens.
+    MixedGradientColorSpaces(Option<Location>),
+    /// A page is missing both a TrimBox and an ArtBox, which is required by
+    /// PDF/X.
+    ///
+    /// The first field is the zero-based index of the offending page.
+    MissingTrimOrArtBox(usize, Option<Location>),
+    /// The PDF contains annotations which are forbidden by PDF/X-1a.
+    ///
+    /// PDF/X-1a only allows TrapNet and PrinterMark annotations, neither of
+    /// which is supported by krilla.
+    ContainsAnnotation(Option<Location>),
+    /// An external output profile reference was provided for a validator
+    /// other than PDF/X-4p or PDF/X-6p, or none was provided when one of
+    /// those validators is active.
+    ExternalOutputProfileRequiresX4P,
 }
 
 /// Features that may require a later PDF version than the current one.
@@ -171,6 +200,7 @@ impl VersionedFeature {
 pub struct Validators {
     a: Option<Archival>,
     ua: Option<Accessibility>,
+    pdfx: Option<Pdfx>,
 }
 
 impl Validators {
@@ -179,19 +209,22 @@ impl Validators {
     pub fn prohibits(self, error: &ValidationError) -> Option<Self> {
         let a = self.a.filter(|v| v.prohibits(error));
         let ua = self.ua.filter(|v| v.prohibits(error));
+        let pdfx = self.pdfx.filter(|v| v.prohibits(error));
 
-        let any = a.is_some() || ua.is_some();
-        any.then_some(Self { a, ua })
+        let any = a.is_some() || ua.is_some() || pdfx.is_some();
+        any.then_some(Self { a, ua, pdfx })
     }
 
     /// Returns `true` if no validators are set.
     pub fn is_empty(self) -> bool {
-        self.a.is_none() && self.ua.is_none()
+        self.a.is_none() && self.ua.is_none() && self.pdfx.is_none()
     }
 
     /// Returns the number of set validators.
     pub fn len(self) -> usize {
-        (if self.a.is_some() { 1 } else { 0 }) + (if self.ua.is_some() { 1 } else { 0 })
+        (if self.a.is_some() { 1 } else { 0 })
+            + (if self.ua.is_some() { 1 } else { 0 })
+            + (if self.pdfx.is_some() { 1 } else { 0 })
     }
 
     /// Returns the PDF/A validator, if set.
@@ -202,6 +235,11 @@ impl Validators {
     /// Returns the PDF/UA accessibility validator, if set.
     pub fn accessibility(self) -> Option<Accessibility> {
         self.ua
+    }
+
+    /// Returns the PDF/X validator, if set.
+    pub fn pdfx(self) -> Option<Pdfx> {
+        self.pdfx
     }
 
     /// Whether the font must supply valid Unicode code points for each of the
@@ -282,8 +320,65 @@ impl Validators {
         self.a.is_some_and(Archival::specifies_associated_files)
     }
 
+    /// Returns the dominant single output-intent subtype, if any. Retained
+    /// for back-compatibility with single-intent callers; new code should
+    /// prefer [`Self::output_intents`].
+    #[allow(dead_code)]
     pub(crate) fn output_intent(self) -> Option<OutputIntentSubtype<'static>> {
-        self.a.map(Archival::output_intent)
+        self.pdfx
+            .map(Pdfx::output_intent)
+            .or_else(|| self.a.map(Archival::output_intent))
+    }
+
+    /// Every output-intent subtype that the active validators require, in
+    /// emission order. For a combined PDF/A + PDF/X document this returns
+    /// both `PDFA` and `PDFX`.
+    pub(crate) fn output_intents(self) -> Vec<OutputIntentSubtype<'static>> {
+        let mut intents = Vec::with_capacity(2);
+        if let Some(a) = self.a {
+            intents.push(a.output_intent());
+        }
+        if let Some(pdfx) = self.pdfx {
+            intents.push(pdfx.output_intent());
+        }
+        intents
+    }
+
+    /// Whether this set of validators requires CMYK-only colour (PDF/X-1a).
+    pub(crate) fn requires_cmyk_only(self) -> bool {
+        self.pdfx.is_some_and(Pdfx::requires_cmyk_only)
+    }
+
+    /// Whether this set of validators forbids annotations entirely (PDF/X-1a).
+    pub(crate) fn forbids_annotations(self) -> bool {
+        self.pdfx.is_some_and(Pdfx::forbids_annotations)
+    }
+
+    /// Whether every page needs either a TrimBox or an ArtBox (any PDF/X).
+    pub(crate) fn requires_trim_or_art_box(self) -> bool {
+        self.pdfx.is_some()
+    }
+
+    /// Whether the PDF/X `/GTS_PDFXVersion` entry must be emitted.
+    pub(crate) fn requires_pdfx_identification(self) -> bool {
+        self.pdfx.is_some()
+    }
+
+    /// Whether a `Trapped` value must be present in the document info
+    /// dictionary (PDF/X mandates it).
+    pub(crate) fn requires_trapping_metadata(self) -> bool {
+        self.pdfx.is_some()
+    }
+
+    /// Whether the caller must supply an `external_output_profile` for the
+    /// active PDF/X profile (X-4p / X-6p).
+    pub(crate) fn requires_external_output_profile(self) -> bool {
+        self.pdfx.is_some_and(Pdfx::requires_external_output_profile)
+    }
+
+    /// `GTS_PDFXVersion` string for the active PDF/X profile, if any.
+    pub(crate) fn gts_pdfx_version_string(self) -> Option<&'static str> {
+        self.pdfx.and_then(Pdfx::gts_pdfx_version_string)
     }
 
     pub(crate) fn write_xmp(self, xmp: &mut XmpWriter) {
@@ -304,6 +399,10 @@ impl Validators {
         if let Some(ua) = self.ua {
             ua.write_xmp(xmp);
         }
+
+        if let Some(pdfx) = self.pdfx {
+            pdfx.write_xmp(xmp);
+        }
     }
 
     /// Returns the maximum PDF version allowed by all active validators.
@@ -311,6 +410,7 @@ impl Validators {
         self.a
             .map_or(PdfVersion::MAX, |v| v.max())
             .min(self.ua.map_or(PdfVersion::MAX, |v| v.max()))
+            .min(self.pdfx.map_or(PdfVersion::MAX, |v| v.max()))
     }
 
     /// Returns the minimum PDF version required by all active validators, if any.
@@ -318,17 +418,22 @@ impl Validators {
         self.a
             .and_then(|v| v.min())
             .max(self.ua.and_then(|v| v.min()))
+            .max(self.pdfx.and_then(|v| v.min()))
     }
 }
 
 impl IntoIterator for Validators {
     type Item = Validator;
-    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<Validator>, 2>>;
+    type IntoIter = std::iter::Flatten<std::array::IntoIter<Option<Validator>, 3>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        [self.a.map(Validator::A), self.ua.map(Validator::Ua)]
-            .into_iter()
-            .flatten()
+        [
+            self.a.map(Validator::A),
+            self.ua.map(Validator::Ua),
+            self.pdfx.map(Validator::Pdfx),
+        ]
+        .into_iter()
+        .flatten()
     }
 }
 
@@ -342,6 +447,7 @@ impl ValidatorsBuilder {
         match validator {
             Validator::A(a) => self.with_archival_validator(a),
             Validator::Ua(ua) => self.with_accessibility_validator(ua),
+            Validator::Pdfx(pdfx) => self.with_pdfx_validator(pdfx),
         }
     }
 
@@ -354,6 +460,12 @@ impl ValidatorsBuilder {
     /// Set the PDF/UA accessibility validator, overwriting the current one if already set.
     pub fn with_accessibility_validator(mut self, accessibility: Accessibility) -> Self {
         self.0.ua = Some(accessibility);
+        self
+    }
+
+    /// Set the PDF/X validator, overwriting the current one if already set.
+    pub fn with_pdfx_validator(mut self, pdfx: Pdfx) -> Self {
+        self.0.pdfx = Some(pdfx);
         self
     }
 
@@ -376,6 +488,8 @@ pub enum Validator {
     A(Archival),
     /// A PDF/UA accessibility validator.
     Ua(Accessibility),
+    /// A PDF/X prepress validator.
+    Pdfx(Pdfx),
 }
 
 impl Validator {
@@ -383,6 +497,7 @@ impl Validator {
         match self {
             Self::A(a) => a.requires_codepoint_mappings(),
             Self::Ua(ua) => ua.requires_codepoint_mappings(),
+            Self::Pdfx(pdfx) => pdfx.requires_codepoint_mappings(),
         }
     }
 
@@ -390,6 +505,7 @@ impl Validator {
         match self {
             Self::A(a) => a.requires_tagging(),
             Self::Ua(ua) => ua.requires_tagging(),
+            Self::Pdfx(pdfx) => pdfx.requires_tagging(),
         }
     }
 
@@ -397,6 +513,7 @@ impl Validator {
         match self {
             Self::A(a) => a.requires_xmp_metadata(),
             Self::Ua(ua) => ua.requires_xmp_metadata(),
+            Self::Pdfx(pdfx) => pdfx.requires_xmp_metadata(),
         }
     }
 
@@ -405,6 +522,7 @@ impl Validator {
         match self {
             Self::A(a) => a.min(),
             Self::Ua(ua) => ua.min(),
+            Self::Pdfx(pdfx) => pdfx.min(),
         }
     }
 
@@ -413,6 +531,7 @@ impl Validator {
         match self {
             Self::A(a) => a.max(),
             Self::Ua(ua) => ua.max(),
+            Self::Pdfx(pdfx) => pdfx.max(),
         }
     }
 
@@ -421,6 +540,7 @@ impl Validator {
         match self {
             Self::A(a) => a.as_str(),
             Self::Ua(ua) => ua.as_str(),
+            Self::Pdfx(pdfx) => pdfx.as_str(),
         }
     }
 }
@@ -434,6 +554,12 @@ impl From<Archival> for Validator {
 impl From<Accessibility> for Validator {
     fn from(ua: Accessibility) -> Self {
         Self::Ua(ua)
+    }
+}
+
+impl From<Pdfx> for Validator {
+    fn from(pdfx: Pdfx) -> Self {
+        Self::Pdfx(pdfx)
     }
 }
 
@@ -698,6 +824,21 @@ impl Archival {
                 Self::A4 | Self::A4F | Self::A4E,
                 ValidationError::EmbeddedFile(EmbedError::MissingDescription, _),
             ) => self == Self::A4,
+
+            // PDF/X-specific errors: PDF/A is silent on them, so allow.
+            (
+                _,
+                ValidationError::ContainsRgb(_)
+                | ValidationError::MissingTrimOrArtBox(_, _)
+                | ValidationError::ContainsAnnotation(_),
+            ) => false,
+            // Krilla-internal soundness and PDF/X-specific configuration
+            // checks: surface under every PDF/A profile.
+            (
+                _,
+                ValidationError::MixedGradientColorSpaces(_)
+                | ValidationError::ExternalOutputProfileRequiresX4P,
+            ) => true,
         }
     }
 
@@ -1297,6 +1438,20 @@ impl Accessibility {
                 | ValidationError::MissingAnnotationAltText(_)
                 | ValidationError::EmbeddedFile(EmbedError::MissingDescription, _),
             ) => self == Self::UA2,
+            // PDF/X-specific errors: PDF/UA accessibility is silent on them.
+            (
+                _,
+                ValidationError::ContainsRgb(_)
+                | ValidationError::MissingTrimOrArtBox(_, _)
+                | ValidationError::ContainsAnnotation(_),
+            ) => false,
+            // Krilla-internal soundness + PDF/X configuration checks:
+            // surface under PDF/UA accessibility too.
+            (
+                _,
+                ValidationError::MixedGradientColorSpaces(_)
+                | ValidationError::ExternalOutputProfileRequiresX4P,
+            ) => true,
         }
     }
 
@@ -1377,6 +1532,233 @@ impl Accessibility {
             Self::UA1 => PdfVersion::Pdf17,
             // PDF/UA-2 and WTPDF are PDF 2.0 only.
             Self::UA2 | Self::WTPDF => PdfVersion::Pdf20,
+        }
+    }
+}
+
+/// A PDF/X prepress conformance standard.
+///
+/// PDF/X validators address prepress-specific concerns: predictable colour
+/// rendering, embedded output intents (ICC profiles), trim/art boxes, and
+/// trapping metadata. They are composable with [`Archival`] via
+/// [`ValidatorsBuilder::with_pdfx_validator`] — for example, a document
+/// conforming to both PDF/A-1b and PDF/X-1a is configured by setting both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(non_camel_case_types)]
+pub enum Pdfx {
+    /// The validator for the PDF/X-1a:2003 standard (ISO 15930-4).
+    ///
+    /// **Requirements**:
+    /// - A CMYK ICC profile must be provided via the `cmyk_profile` setting.
+    /// - Only CMYK, grayscale, and Separation colors may be used (no RGB).
+    /// - No transparency is allowed.
+    /// - No annotations are allowed (krilla only supports Link annotations,
+    ///   which are not permitted by PDF/X-1a).
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A document title must be set via metadata.
+    /// - A creation date must be set via metadata.
+    X1A,
+    /// The validator for the PDF/X-3:2003 standard (ISO 15930-6).
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    /// - No transparency is allowed.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A document title must be set via metadata.
+    /// - A creation date must be set via metadata.
+    X3,
+    /// The validator for the PDF/X-4 standard (ISO 15930-7).
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    X4,
+    /// The validator for the PDF/X-4p standard (ISO 15930-7).
+    ///
+    /// Like PDF/X-4, but the output intent ICC profile is referenced
+    /// externally instead of being embedded.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/X-4.
+    /// - The `external_output_profile` setting must be provided.
+    X4P,
+    /// The validator for the PDF/X-6 standard (ISO 15930-9).
+    ///
+    /// Based on PDF 2.0.
+    ///
+    /// **Requirements**:
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    /// - A printer/output ICC profile must be provided via the `cmyk_profile`
+    ///   setting for the embedded PDF/X output intent.
+    X6,
+    /// The validator for the PDF/X-6p standard (ISO 15930-9).
+    ///
+    /// Like PDF/X-6, but the output intent ICC profile is referenced
+    /// externally instead of being embedded.
+    ///
+    /// Based on PDF 2.0.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/X-6.
+    /// - The `external_output_profile` setting must be provided.
+    X6P,
+}
+
+impl Pdfx {
+    fn prohibits(self, error: &ValidationError) -> bool {
+        match (self, error) {
+            // Universally forbidden across the PDF/X family.
+            (
+                _,
+                ValidationError::TooManyIndirectObjects
+                | ValidationError::TooHighQNestingLevel
+                | ValidationError::ContainsNotDefGlyph(_, _, _)
+                | ValidationError::InconsistentSeparationFallback(_)
+                | ValidationError::RestrictedLicense(_)
+                | ValidationError::MissingDocumentDate
+                | ValidationError::MissingCMYKProfile
+                | ValidationError::MixedGradientColorSpaces(_)
+                | ValidationError::EmbeddedPDF(_)
+                | ValidationError::MissingTrimOrArtBox(_, _),
+            ) => true,
+            // Universally allowed across the PDF/X family.
+            (
+                _,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _)
+                | ValidationError::UnicodePrivateArea(_, _, _, _)
+                | ValidationError::NoDocumentLanguage
+                | ValidationError::MissingAltText(_)
+                | ValidationError::MissingHeadingTitle
+                | ValidationError::MissingDocumentOutline
+                | ValidationError::MissingAnnotationAltText(_)
+                | ValidationError::ImageInterpolation(_)
+                | ValidationError::EmbeddedFile(_, _)
+                | ValidationError::MissingTagging
+                | ValidationError::RequiresNewerPdfVersion(_, _),
+            ) => false,
+            // PDF/X-1a and PDF/X-3 (PDF 1.4 base) enforce the PDF 1.4 limits.
+            (
+                Self::X1A | Self::X3,
+                ValidationError::TooLongString
+                | ValidationError::TooLongName
+                | ValidationError::TooLongArray
+                | ValidationError::TooLongDictionary
+                | ValidationError::TooLargeFloat
+                | ValidationError::ContainsPostScript(_),
+            ) => true,
+            // PDF/X-4 onward (PDF 1.6+) lifts the PDF 1.4 caps and permits
+            // PostScript-calculator functions.
+            (
+                Self::X4 | Self::X4P | Self::X6 | Self::X6P,
+                ValidationError::TooLongString
+                | ValidationError::TooLongName
+                | ValidationError::TooLongArray
+                | ValidationError::TooLongDictionary
+                | ValidationError::TooLargeFloat
+                | ValidationError::ContainsPostScript(_),
+            ) => false,
+            // PDF/X-1a forbids RGB and annotations entirely. The others allow
+            // them.
+            (
+                _,
+                ValidationError::ContainsRgb(_) | ValidationError::ContainsAnnotation(_),
+            ) => self == Self::X1A,
+            // Transparency is forbidden up to PDF/X-3, allowed from PDF/X-4
+            // onward.
+            (_, ValidationError::Transparency(_)) => {
+                matches!(self, Self::X1A | Self::X3)
+            }
+            // Mandatory document title for PDF/X-1a/X-3 only; PDF/X-4+
+            // dropped the requirement.
+            (_, ValidationError::NoDocumentTitle) => matches!(self, Self::X1A | Self::X3),
+            // PDF/X-4p and PDF/X-6p require the external output profile to
+            // be supplied; the others must NOT have one set.
+            (_, ValidationError::ExternalOutputProfileRequiresX4P) => true,
+        }
+    }
+
+    fn requires_codepoint_mappings(self) -> bool {
+        false
+    }
+
+    const fn requires_tagging(self) -> bool {
+        false
+    }
+
+    fn requires_xmp_metadata(self) -> bool {
+        true
+    }
+
+    fn output_intent(self) -> OutputIntentSubtype<'static> {
+        OutputIntentSubtype::PDFX
+    }
+
+    /// Whether this PDF/X profile requires the caller to supply an
+    /// `external_output_profile`.
+    pub(crate) fn requires_external_output_profile(self) -> bool {
+        matches!(self, Self::X4P | Self::X6P)
+    }
+
+    /// Whether this PDF/X profile forbids RGB content (X-1a only).
+    pub(crate) fn requires_cmyk_only(self) -> bool {
+        matches!(self, Self::X1A)
+    }
+
+    /// Whether this PDF/X profile forbids annotations entirely (X-1a only).
+    pub(crate) fn forbids_annotations(self) -> bool {
+        matches!(self, Self::X1A)
+    }
+
+    fn write_xmp(self, xmp: &mut XmpWriter) {
+        if let Some(version) = self.gts_pdfx_version_string() {
+            xmp.pdfx_version(version);
+        }
+    }
+
+    /// The `GTS_PDFXVersion` identification string for this validator.
+    pub fn gts_pdfx_version_string(self) -> Option<&'static str> {
+        Some(match self {
+            Self::X1A => "PDF/X-1a:2003",
+            Self::X3 => "PDF/X-3:2003",
+            Self::X4 => "PDF/X-4",
+            Self::X4P => "PDF/X-4p",
+            Self::X6 => "PDF/X-6",
+            Self::X6P => "PDF/X-6p",
+        })
+    }
+
+    /// Returns a human-readable string representation of the standard.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::X1A => "PDF/X-1a",
+            Self::X3 => "PDF/X-3",
+            Self::X4 => "PDF/X-4",
+            Self::X4P => "PDF/X-4p",
+            Self::X6 => "PDF/X-6",
+            Self::X6P => "PDF/X-6p",
+        }
+    }
+
+    /// Minimum PDF version required to use this standard, if any.
+    pub const fn min(self) -> Option<PdfVersion> {
+        match self {
+            Self::X1A | Self::X3 => Some(PdfVersion::Pdf14),
+            Self::X4 | Self::X4P => Some(PdfVersion::Pdf16),
+            Self::X6 | Self::X6P => Some(PdfVersion::Pdf20),
+        }
+    }
+
+    /// Maximum PDF version this standard can be used with.
+    pub const fn max(self) -> PdfVersion {
+        match self {
+            Self::X1A | Self::X3 => PdfVersion::Pdf14,
+            Self::X4 | Self::X4P => PdfVersion::Pdf16,
+            Self::X6 | Self::X6P => PdfVersion::Pdf20,
         }
     }
 }

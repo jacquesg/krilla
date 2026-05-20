@@ -1686,3 +1686,176 @@ fn fallback_cmyk_profile_yields_to_explicit_custom_output_intent() {
         "fallback CMYK intent must not fire when a caller intent is present"
     );
 }
+
+#[test]
+fn validate_pdf_x4_emits_gts_pdfx_version_and_trapped() {
+    use krilla::configure::{ConfigurationBuilder, Pdfx};
+    use krilla::icc::ICCProfile;
+    use krilla::page::PageSettings;
+    use krilla::{Document, SerializeSettings};
+
+    let cmyk_bytes = std::fs::read(crate::ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap();
+    let cmyk = ICCProfile::<4>::new(&cmyk_bytes).unwrap();
+    let config = ConfigurationBuilder::new()
+        .with_pdfx_validator(Pdfx::X4)
+        .finish()
+        .unwrap();
+
+    let settings = SerializeSettings {
+        configuration: config,
+        cmyk_profile: Some(cmyk),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .title("X-4 test".to_string())
+            .creation_date(DateTime::new(2026)),
+    );
+    let page_settings = PageSettings::default().with_trim_box(Some(
+        krilla::geom::Rect::from_xywh(0.0, 0.0, 100.0, 100.0).unwrap(),
+    ));
+    let mut page = document.start_page_with(page_settings);
+    page.surface().finish();
+    page.finish();
+    let bytes = document.finish().expect("PDF/X-4 finishes cleanly");
+    let pdf = String::from_utf8_lossy(&bytes);
+
+    assert!(
+        pdf.contains("/GTS_PDFXVersion (PDF/X-4)"),
+        "/GTS_PDFXVersion (PDF/X-4) must be present in the Info dict"
+    );
+    assert!(
+        pdf.contains("/Trapped /False"),
+        "/Trapped /False must be present in the Info dict"
+    );
+    assert!(
+        pdf.contains("/S /GTS_PDFX"),
+        "/S /GTS_PDFX output-intent subtype must be present"
+    );
+}
+
+#[test]
+fn validate_pdf_x4_missing_trim_box_raises_error() {
+    use krilla::configure::{ConfigurationBuilder, Pdfx};
+    use krilla::icc::ICCProfile;
+    use krilla::{Document, SerializeSettings};
+
+    let cmyk_bytes = std::fs::read(crate::ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap();
+    let cmyk = ICCProfile::<4>::new(&cmyk_bytes).unwrap();
+    let config = ConfigurationBuilder::new()
+        .with_pdfx_validator(Pdfx::X4)
+        .finish()
+        .unwrap();
+
+    let settings = SerializeSettings {
+        configuration: config,
+        cmyk_profile: Some(cmyk),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .title("X-4 missing-trim".to_string())
+            .creation_date(DateTime::new(2026)),
+    );
+    // No trim or art box.
+    let mut page = document.start_page();
+    page.surface().finish();
+    page.finish();
+
+    let errs = validation_errors(document.finish());
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::MissingTrimOrArtBox(0, _))),
+        "expected MissingTrimOrArtBox; got {errs:?}"
+    );
+}
+
+#[test]
+fn validate_pdf_x1a_with_rgb_raises_contains_rgb() {
+    use krilla::configure::{ConfigurationBuilder, Pdfx};
+    use krilla::icc::ICCProfile;
+    use krilla::page::PageSettings;
+    use krilla::{Document, SerializeSettings};
+
+    let cmyk_bytes = std::fs::read(crate::ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap();
+    let cmyk = ICCProfile::<4>::new(&cmyk_bytes).unwrap();
+    let config = ConfigurationBuilder::new()
+        .with_pdfx_validator(Pdfx::X1A)
+        .finish()
+        .unwrap();
+
+    let settings = SerializeSettings {
+        configuration: config,
+        cmyk_profile: Some(cmyk),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .title("X-1a RGB".to_string())
+            .creation_date(DateTime::new(2026)),
+    );
+    let page_settings = PageSettings::default().with_trim_box(Some(
+        krilla::geom::Rect::from_xywh(0.0, 0.0, 100.0, 100.0).unwrap(),
+    ));
+    let mut page = document.start_page_with(page_settings);
+    let mut surface = page.surface();
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.finish();
+    page.finish();
+
+    let errs = validation_errors(document.finish());
+    assert!(
+        errs.iter().any(|e| matches!(e, ValidationError::ContainsRgb(_))),
+        "expected ContainsRgb under PDF/X-1a; got {errs:?}"
+    );
+}
+
+#[test]
+fn validate_pdf_x4p_requires_external_profile() {
+    use krilla::configure::{ConfigurationBuilder, Pdfx};
+    use krilla::icc::ICCProfile;
+    use krilla::page::PageSettings;
+    use krilla::{Document, SerializeSettings};
+
+    let cmyk_bytes = std::fs::read(crate::ASSETS_PATH.join("icc/eciCMYK_v2.icc")).unwrap();
+    let cmyk = ICCProfile::<4>::new(&cmyk_bytes).unwrap();
+    let config = ConfigurationBuilder::new()
+        .with_pdfx_validator(Pdfx::X4P)
+        .finish()
+        .unwrap();
+
+    // No external_output_profile supplied → expect the configuration error.
+    let settings = SerializeSettings {
+        configuration: config,
+        cmyk_profile: Some(cmyk),
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .title("X-4p missing profile".to_string())
+            .creation_date(DateTime::new(2026)),
+    );
+    let page_settings = PageSettings::default().with_trim_box(Some(
+        krilla::geom::Rect::from_xywh(0.0, 0.0, 100.0, 100.0).unwrap(),
+    ));
+    let mut page = document.start_page_with(page_settings);
+    page.surface().finish();
+    page.finish();
+
+    let errs = validation_errors(document.finish());
+    assert!(
+        errs.iter()
+            .any(|e| matches!(e, ValidationError::ExternalOutputProfileRequiresX4P)),
+        "expected ExternalOutputProfileRequiresX4P; got {errs:?}"
+    );
+}
+

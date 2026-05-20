@@ -331,8 +331,12 @@ impl RegularColor {
         let preserve_black = sc.serialize_settings().preserve_black;
         match self {
             Self::Rgb(r) => {
-                // PDF/X-specific `ContainsRgb` validation deferred until
-                // the PDF/X family lands; `preserve_black` still applies.
+                // PDF/X-1a (ISO 15930-4) forbids RGB content; surface the
+                // violation so the validator catches it. Emission still
+                // proceeds — the error path stops the file at finish().
+                if sc.serialize_settings().validators().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
                 if preserve_black && r.0 == 0 && r.1 == 0 && r.2 == 0 {
                     return DeviceColorSpace::Rgb.into();
                 }
