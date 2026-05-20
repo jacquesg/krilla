@@ -149,5 +149,34 @@ mod tests {
         assert_eq!(Validator::X6P.recommended_version(), PdfVersion::Pdf20);
         assert_eq!(Validator::A1B_X1A.recommended_version(), PdfVersion::Pdf14);
         assert_eq!(Validator::A2B_X4.recommended_version(), PdfVersion::Pdf16);
+        assert_eq!(Validator::UA1.recommended_version(), PdfVersion::Pdf17);
+        assert_eq!(Validator::UA2.recommended_version(), PdfVersion::Pdf20);
+        assert_eq!(Validator::WTPDF.recommended_version(), PdfVersion::Pdf20);
+    }
+
+    #[test]
+    fn valid_ua2_pdf20() {
+        assert!(Configuration::new_with(Validator::UA2, PdfVersion::Pdf20).is_some());
+    }
+
+    #[test]
+    fn invalid_ua2_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::UA2, PdfVersion::Pdf17),
+            None
+        );
+    }
+
+    #[test]
+    fn valid_wtpdf_pdf20() {
+        assert!(Configuration::new_with(Validator::WTPDF, PdfVersion::Pdf20).is_some());
+    }
+
+    #[test]
+    fn invalid_wtpdf_pdf17() {
+        assert_eq!(
+            Configuration::new_with(Validator::WTPDF, PdfVersion::Pdf17),
+            None
+        );
     }
 }

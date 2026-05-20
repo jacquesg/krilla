@@ -195,11 +195,13 @@ pub enum ValidationError {
 ///
 /// - PDF/A part-and-conformance variants use `{Part}_{Conformance}` form
 ///   (e.g. `A1_B`, `A2_U`, `A3_A`).
-/// - PDF/A-4 subforms (`A4`, `A4F`, `A4E`), PDF/UA (`UA1`), and PDF/X variants
-///   (`X1A`, `X4P`, `X6P`, …) use the ISO short-form without an internal
-///   separator, matching their specification names.
+/// - PDF/A-4 subforms (`A4`, `A4F`, `A4E`), PDF/UA (`UA1`, `UA2`), and PDF/X
+///   variants (`X1A`, `X4P`, `X6P`, …) use the ISO short-form without an
+///   internal separator, matching their specification names.
 /// - Combined PDF/A + PDF/X validators join the two short forms with an
 ///   underscore, e.g. `A1B_X1A` = "PDF/A-1b + PDF/X-1a".
+/// - The PDF Association Well-Tagged PDF profile uses the upper-case acronym
+///   (`WTPDF`).
 ///
 /// All identifiers are uppercase to match PDF-library conventions. The
 /// `#[allow(non_camel_case_types)]` attribute is required by the `A1_A`-style
@@ -353,6 +355,140 @@ pub enum Validator {
     ///
     /// [`TagKind`]: crate::interchange::tagging::TagKind
     UA1,
+    /// The validator for the PDF/UA-2 standard (ISO 14289-2:2024).
+    ///
+    /// PDF/UA-2 builds on ISO 32000-2 (PDF 2.0) and normatively references
+    /// the PDF Association's Well-Tagged PDF (WTPDF) profile. Every WTPDF
+    /// requirement applies, plus the universal-accessibility additions
+    /// documented below. Use [`WTPDF`](Self::WTPDF) instead when you need a
+    /// well-tagged PDF 2.0 document without the stricter accessibility
+    /// metadata requirements.
+    ///
+    /// **Requirements**:
+    ///
+    /// All requirements of [`WTPDF`](Self::WTPDF), plus:
+    ///
+    /// General:
+    /// - Information should not be conveyed by contrast, colour, format,
+    ///   or layout alone.
+    /// - All "best practice" notes in [`TagKind`] need to be complied with.
+    ///
+    /// Text:
+    /// - You should make use of the `Alt`, `ActualText`, `Lang` and
+    ///   `Expansion` attributes whenever possible.
+    /// - You should not provide an empty string as `Lang`.
+    /// - Stretchable characters (such as brackets, which often consist of
+    ///   several glyphs) should be marked accordingly with `ActualText`.
+    ///
+    /// Graphics:
+    /// - Graphics should be tagged as figures (unless they are an artifact).
+    /// - Graphics need to be followed by a caption.
+    /// - Graphics that possess semantic value only in combination with other
+    ///   graphics should be tagged with a single Figure tag for each figure.
+    /// - If a more accessible representation exists, it should be used over
+    ///   graphics.
+    ///
+    /// Headings:
+    /// - Headings should be tagged as such.
+    /// - For not strongly structured documents, H1 should be the first
+    ///   heading.
+    ///
+    /// Tables:
+    /// - Tables should include headers and be tagged accordingly.
+    /// - Tables should only be used to represent content within a logical
+    ///   row/column relationship.
+    ///
+    /// Lists:
+    /// - List items should be tagged with Li tags, if necessary also with
+    ///   Lbl and LBody tags.
+    /// - Lists should only be used when the content is intended to be read
+    ///   as a list.
+    ///
+    /// Mathematical expressions:
+    /// - All mathematical expressions should be enclosed with a `Formula`
+    ///   tag. Use an `AF` associated MathML file where the expression is
+    ///   non-trivial.
+    ///
+    /// Headers and footers:
+    /// - Headers and footers should be marked as corresponding artifacts.
+    ///
+    /// Notes and references:
+    /// - Footnotes, endnotes, note labels and references should be tagged
+    ///   accordingly and use tagged annotations.
+    /// - Footnotes and end notes should use the `Note` tag.
+    ///
+    /// Navigation:
+    /// - The document should contain an outline reflecting the reading
+    ///   order of the document.
+    /// - Page labels should be semantically appropriate.
+    ///
+    /// Annotations:
+    /// - Annotations should be present in the tag tree in the correct
+    ///   reading order.
+    /// - Every annotation needs an alternate description (`Contents`).
+    /// - Embedded files need a `Description`.
+    ///
+    /// Fonts:
+    /// - You should only use fonts that are legally embeddable in a file
+    ///   for unlimited, universal rendering.
+    ///
+    /// Metadata (enforced by krilla):
+    /// - A document title must be set via [`Metadata`].
+    /// - A document language must be set via [`Metadata`].
+    ///
+    /// [`TagKind`]: crate::interchange::tagging::TagKind
+    /// [`Metadata`]: crate::metadata::Metadata
+    UA2,
+    /// The validator for the Well-Tagged PDF (WTPDF) 1.0 profile, published
+    /// by the PDF Association in 2024.
+    ///
+    /// WTPDF is a profile of ISO 32000-2 (PDF 2.0) requiring the document to
+    /// be well-tagged using the PDF 2.0 standard structure namespace
+    /// (`http://iso.org/pdf2/ssn`). It is the structural foundation of
+    /// [`UA2`](Self::UA2); UA-2 normatively references WTPDF and layers the
+    /// accessibility-specific requirements on top.
+    ///
+    /// Use this variant when every consumer must receive a tagged
+    /// reading-order PDF 2.0 document, but the stricter accessibility
+    /// requirements of PDF/UA-2 (alternative text on every figure, mandatory
+    /// title and language, display-doc-title viewer preference, document
+    /// outline, …) are not desired.
+    ///
+    /// **Requirements**:
+    ///
+    /// General:
+    /// - All real content should be tagged accordingly using a
+    ///   [`TagGroup`] and
+    ///   [`Surface::start_tagged`].
+    /// - All artifacts should be marked accordingly with
+    ///   [`ContentTag::Artifact`].
+    /// - The tag tree should reflect the logical reading order of the
+    ///   document.
+    ///
+    /// Text:
+    /// - Word boundaries need to be explicitly specified with a space. The
+    ///   same applies to words at the end of a line that are not followed
+    ///   by punctuation.
+    /// - Hyphenation should be represented as a soft hyphen character
+    ///   (U+00AD) instead of a hard hyphen (U+002D).
+    ///
+    /// Tagging:
+    /// - Custom structure types must be mapped via the role map to a
+    ///   standard structure type. krilla emits the mapping automatically
+    ///   when the standard types are not sufficient.
+    /// - To the fullest extent possible, the logical structure of the
+    ///   document should be encoded in the tag tree using appropriate
+    ///   grouping tags.
+    /// - Language identifiers used must be valid according to RFC 3066.
+    ///
+    /// Fonts:
+    /// - You should only use fonts that are legally embeddable in a file
+    ///   for unlimited, universal rendering.
+    ///
+    /// [`TagGroup`]: crate::interchange::tagging::TagGroup
+    /// [`Surface::start_tagged`]: crate::surface::Surface::start_tagged
+    /// [`ContentTag::Artifact`]: crate::interchange::tagging::ContentTag::Artifact
+    WTPDF,
     /// The validator for the PDF/A-4 standard.
     ///
     /// **Requirements**:
@@ -689,6 +825,74 @@ impl Validator {
                 ValidationError::MissingTrimOrArtBox(_, _) => false,
                 ValidationError::ContainsAnnotation(_) => false,
             },
+            // WTPDF is the structural base; UA-2 layers the accessibility-
+            // metadata requirements (alt text, title, language, outline,
+            // annotation Contents, embedded-file Description) on top, gated
+            // via `*self == Validator::UA2`. Anything that is identical
+            // between the two profiles stays in the shared body.
+            Validator::WTPDF | Validator::UA2 => match validation_error {
+                // PDF 2.0 lifts the PDF 1.4-era object-graph limits, so the
+                // krilla-tracked maxima do not apply.
+                ValidationError::TooLongString => false,
+                ValidationError::TooLargeFloat => false,
+                ValidationError::TooLongName => false,
+                ValidationError::TooLongArray => false,
+                ValidationError::TooLongDictionary => false,
+                ValidationError::TooManyIndirectObjects => false,
+                ValidationError::TooHighQNestingLevel => false,
+                ValidationError::ContainsPostScript(_) => false,
+                // No output intent is required by either profile.
+                ValidationError::MissingCMYKProfile => false,
+                ValidationError::MissingExternalOutputProfile => false,
+                ValidationError::ExternalOutputProfileUnsupportedByValidator => true,
+                ValidationError::InconsistentSeparationFallback(_) => true,
+                // WTPDF §6.4 / UA-2 §7.1.2: every glyph drawn must map to a
+                // sensible code point.
+                ValidationError::ContainsNotDefGlyph(_, _, _) => true,
+                ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _) => {
+                    self.requires_codepoint_mappings()
+                }
+                // UA-2 §7.1.3 permits PUA glyphs provided an `ActualText`
+                // attribute is supplied; krilla cannot verify the latter, so
+                // we mirror the UA-1 lenient stance rather than reject.
+                ValidationError::UnicodePrivateArea(_, _, _, _) => false,
+                ValidationError::RestrictedLicense(_) => true,
+                // UA-2 §7.2.4 requires the document language; WTPDF only
+                // recommends it.
+                ValidationError::NoDocumentLanguage => *self == Validator::UA2,
+                // UA-2 §7.2.5 requires the document title; WTPDF does not.
+                ValidationError::NoDocumentTitle => *self == Validator::UA2,
+                // UA-2 §7.18 requires alt text for figures and formulas;
+                // WTPDF does not.
+                ValidationError::MissingAltText(_) => *self == Validator::UA2,
+                ValidationError::MissingHeadingTitle => *self == Validator::UA2,
+                // UA-2 §7.16 mandates an outline for any document where
+                // navigation requires one; krilla treats the requirement as
+                // absolute, matching UA-1.
+                ValidationError::MissingDocumentOutline => *self == Validator::UA2,
+                ValidationError::MissingAnnotationAltText(_) => *self == Validator::UA2,
+                // PDF 2.0 supports live transparency; no restriction.
+                ValidationError::Transparency(_) => false,
+                ValidationError::ImageInterpolation(_) => false,
+                ValidationError::EmbeddedFile(er, _) => match er {
+                    EmbedError::Existence => false,
+                    EmbedError::MissingDate => false,
+                    // UA-2 §7.20 requires a description on every embedded
+                    // file; WTPDF does not.
+                    EmbedError::MissingDescription => *self == Validator::UA2,
+                    EmbedError::MissingMimeType => false,
+                },
+                // Both profiles require a tag tree.
+                ValidationError::MissingTagging => true,
+                ValidationError::MissingDocumentDate => false,
+                // krilla cannot inspect an embedded PDF for conformance.
+                ValidationError::EmbeddedPDF(_) => true,
+                ValidationError::ContainsRgb(_) => false,
+                ValidationError::MixedGradientColorSpaces(_) => true,
+                ValidationError::MissingTrimOrArtBox(_, _) => false,
+                ValidationError::ContainsAnnotation(_) => false,
+            },
             Validator::X1A => match validation_error {
                 ValidationError::TooLongString => true,
                 ValidationError::TooLongName => true,
@@ -975,6 +1179,7 @@ impl Validator {
             // It can be any 2.x version, but we're not there yet.
             Validator::A4 | Validator::A4F | Validator::A4E => pdf_version == PdfVersion::Pdf20,
             Validator::UA1 => pdf_version <= PdfVersion::Pdf17,
+            Validator::UA2 | Validator::WTPDF => pdf_version == PdfVersion::Pdf20,
             Validator::X1A | Validator::X3 | Validator::A1B_X1A => pdf_version <= PdfVersion::Pdf14,
             Validator::X4 | Validator::X4P | Validator::A2B_X4 | Validator::A3B_X4 => {
                 pdf_version == PdfVersion::Pdf16
@@ -992,6 +1197,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => PdfVersion::Pdf17,
             Validator::A4 | Validator::A4F | Validator::A4E => PdfVersion::Pdf20,
             Validator::UA1 => PdfVersion::Pdf17,
+            Validator::UA2 | Validator::WTPDF => PdfVersion::Pdf20,
             Validator::X1A | Validator::X3 | Validator::A1B_X1A => PdfVersion::Pdf14,
             Validator::X4 | Validator::X4P | Validator::A2B_X4 | Validator::A3B_X4 => {
                 PdfVersion::Pdf16
@@ -1115,6 +1321,16 @@ impl Validator {
             Validator::UA1 => {
                 xmp.pdfua_part(1);
             }
+            // PDF/UA-2 (ISO 14289-2:2024) identifies itself through
+            // `pdfuaid:part = 2` and `pdfuaid:rev = 2024`.
+            Validator::UA2 => {
+                xmp.pdfua_part(2);
+                xmp.pdfua_rev(2024);
+            }
+            // WTPDF 1.0 does not define a dedicated XMP identification
+            // property; conformance is recognised through the well-tagged
+            // PDF 2.0 structure (Namespaces, RoleMapNS, MarkInfo).
+            Validator::WTPDF => {}
             Validator::X1A => {
                 xmp.pdfx_version("PDF/X-1a:2003");
             }
@@ -1152,6 +1368,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => *self != Validator::A3_B,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => true,
+            Validator::UA2 | Validator::WTPDF => true,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1173,6 +1390,10 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => true,
+            // UA-2 §7.2.5 mandates the DisplayDocTitle viewer preference.
+            // WTPDF does not.
+            Validator::UA2 => true,
+            Validator::WTPDF => false,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1193,6 +1414,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            Validator::UA2 | Validator::WTPDF => false,
             Validator::X1A | Validator::A1B_X1A => false,
             Validator::X3
             | Validator::X4
@@ -1206,7 +1428,7 @@ impl Validator {
 
     pub(crate) fn requires_annotation_flags(&self) -> bool {
         match self {
-            Validator::None | Validator::UA1 => false,
+            Validator::None | Validator::UA1 | Validator::UA2 | Validator::WTPDF => false,
             Validator::A1_A | Validator::A1_B => true,
             Validator::A2_A | Validator::A2_B | Validator::A2_U => true,
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
@@ -1229,6 +1451,7 @@ impl Validator {
             Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => true,
+            Validator::UA2 | Validator::WTPDF => true,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1249,6 +1472,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => true,
+            Validator::UA2 | Validator::WTPDF => true,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1269,6 +1493,10 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            // ISO 14289-2 / WTPDF 1.0 do not mandate the binary marker;
+            // ISO 32000-2 only recommends it. Honour the caller's
+            // `ascii_compatible` setting like UA-1.
+            Validator::UA2 | Validator::WTPDF => false,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1289,6 +1517,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
             Validator::UA1 => false,
+            Validator::UA2 | Validator::WTPDF => false,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1308,6 +1537,7 @@ impl Validator {
             Validator::A3_A | Validator::A3_B | Validator::A3_U => false,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::UA1 => false,
+            Validator::UA2 | Validator::WTPDF => false,
             Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1323,7 +1553,7 @@ impl Validator {
     /// Return the output intent subtypes required by this validator.
     pub(crate) fn output_intents(&self) -> Vec<OutputIntentSubtype<'_>> {
         match self {
-            Validator::None | Validator::UA1 => vec![],
+            Validator::None | Validator::UA1 | Validator::UA2 | Validator::WTPDF => vec![],
             Validator::A1_A | Validator::A1_B => vec![OutputIntentSubtype::PDFA],
             Validator::A2_A | Validator::A2_B | Validator::A2_U => {
                 vec![OutputIntentSubtype::PDFA]
@@ -1357,6 +1587,12 @@ impl Validator {
             | Validator::A3_B
             | Validator::A3_U
             | Validator::UA1 => true,
+            // ISO 32000-2 deprecates the Info dictionary but still permits
+            // CreationDate / ModDate entries; UA-2 and WTPDF inherit that
+            // stance. Krilla's PDF 2.0 path already restricts the Info dict
+            // to those two fields, so we keep it on rather than suppressing
+            // it entirely.
+            Validator::UA2 | Validator::WTPDF => true,
             Validator::A4 | Validator::A4F | Validator::A4E => false,
             Validator::X1A
             | Validator::X3
@@ -1384,6 +1620,8 @@ impl Validator {
             | Validator::A4
             | Validator::A4E
             | Validator::UA1
+            | Validator::UA2
+            | Validator::WTPDF
             | Validator::X1A
             | Validator::X3
             | Validator::X4
@@ -1407,6 +1645,9 @@ impl Validator {
             Validator::None => false,
             Validator::A3_A | Validator::A3_B | Validator::A3_U => true,
             Validator::A4 | Validator::A4F | Validator::A4E => true,
+            // PDF 2.0 supports associated files; both PDF/UA-2 and WTPDF
+            // permit them.
+            Validator::UA2 | Validator::WTPDF => true,
             Validator::A1_A
             | Validator::A1_B
             | Validator::A2_A
@@ -1442,6 +1683,8 @@ impl Validator {
             Validator::A4F => "PDF/A-4f",
             Validator::A4E => "PDF/A-4e",
             Validator::UA1 => "PDF/UA-1",
+            Validator::UA2 => "PDF/UA-2",
+            Validator::WTPDF => "WTPDF 1.0",
             Validator::X1A => "PDF/X-1a",
             Validator::X3 => "PDF/X-3",
             Validator::X4 => "PDF/X-4",
@@ -1552,7 +1795,9 @@ impl Validator {
             | Validator::A4
             | Validator::A4F
             | Validator::A4E
-            | Validator::UA1 => None,
+            | Validator::UA1
+            | Validator::UA2
+            | Validator::WTPDF => None,
             Validator::X1A | Validator::A1B_X1A => Some("PDF/X-1a:2003"),
             Validator::X3 => Some("PDF/X-3:2003"),
             Validator::X4 | Validator::A2B_X4 | Validator::A3B_X4 => Some("PDF/X-4"),

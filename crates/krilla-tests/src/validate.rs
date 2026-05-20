@@ -20,8 +20,9 @@ use crate::{
     blue_fill, cmyk_fill, dummy_text_with_spans, green_fill, load_jpg_image, load_png_image, loc,
     metadata_1, pdfx_external_output_profile, rect_to_path, red_fill, settings_13, settings_15,
     settings_19, settings_20, settings_23, settings_24, settings_31, settings_32, settings_33,
-    settings_34, settings_35, settings_36, settings_37, settings_38, settings_39, settings_7,
-    settings_8, settings_9, stops_with_2_solid_1, youtube_link, NOTO_SANS,
+    settings_34, settings_35, settings_36, settings_37, settings_38, settings_39, settings_40,
+    settings_41, settings_7, settings_8, settings_9, stops_with_2_solid_1, youtube_link,
+    NOTO_SANS,
 };
 use crate::{Document, SerializeSettings};
 
@@ -924,6 +925,337 @@ fn validate_pdf_ua1_only_annotation(document: &mut Document) {
 
     let outline = Outline::new();
     document.set_outline(outline);
+}
+
+// ---- PDF/UA-2 tests ----
+
+#[snapshot(document, settings_41)]
+fn validate_pdf_ua2_full_example(document: &mut Document) {
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+
+    let annotation = page.add_tagged_annotation(Annotation::new_link(
+        LinkAnnotation::new(
+            Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+            Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+        ),
+        Some("A link to youtube".to_string()),
+    ));
+
+    let mut link_group = TagGroup::new(Tag::Link);
+    link_group.push(annotation);
+
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    tag_tree.push(link_group);
+    document.set_tag_tree(tag_tree);
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .title("a nice title".to_string());
+    document.set_metadata(metadata);
+
+    let outline = Outline::new();
+    document.set_outline(outline);
+}
+
+#[snapshot(document, settings_41)]
+fn validate_pdf_ua2_only_annotation(document: &mut Document) {
+    let mut page = document.start_page();
+
+    let annotation = page.add_tagged_annotation(Annotation::new_link(
+        LinkAnnotation::new(
+            Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+            Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+        ),
+        Some("A link to youtube".to_string()),
+    ));
+
+    let mut link_group = TagGroup::new(Tag::Link);
+    link_group.push(annotation);
+
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(link_group);
+    document.set_tag_tree(tag_tree);
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .title("a nice title".to_string());
+    document.set_metadata(metadata);
+
+    let outline = Outline::new();
+    document.set_outline(outline);
+}
+
+#[test]
+fn validate_pdf_ua2_missing_requirements() {
+    let mut document = Document::new_with(settings_41());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+
+    let annot_loc = loc(1);
+    let annot = page.add_tagged_annotation(
+        Annotation::new_link(
+            LinkAnnotation::new(
+                Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+                Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+            ),
+            None,
+        )
+        .with_location(Some(annot_loc)),
+    );
+
+    page.finish();
+
+    let formula_loc = loc(2);
+    let mut tag_group = TagGroup::new(Tag::Formula(None).with_location(Some(formula_loc)));
+    tag_group.push(id1);
+    tag_group.push(annot);
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(tag_group);
+    document.set_tag_tree(tag_tree);
+
+    assert_eq!(
+        document.finish(),
+        Err(KrillaError::Validation(vec![
+            ValidationError::MissingDocumentOutline,
+            ValidationError::MissingAnnotationAltText(Some(annot_loc)),
+            ValidationError::MissingAltText(Some(formula_loc)),
+            ValidationError::NoDocumentTitle,
+            ValidationError::NoDocumentLanguage,
+        ]))
+    )
+}
+
+#[test]
+fn validate_pdf_ua2_empty_alt() {
+    let mut document = Document::new_with(settings_41());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let formula_loc = loc(1);
+    let mut tag_group =
+        TagGroup::new(Tag::Formula(Some(String::new())).with_location(Some(formula_loc)));
+    tag_group.push(id1);
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(tag_group);
+    document.set_tag_tree(tag_tree);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingAltText(Some(formula_loc))));
+        }
+        _ => panic!("Expected validation error"),
+    }
+}
+
+#[test]
+fn validate_pdf_ua2_empty_annotation_alt() {
+    let mut document = Document::new_with(settings_41());
+    let mut page = document.start_page();
+
+    let annot_loc = loc(1);
+    let annot = page.add_tagged_annotation(
+        Annotation::new_link(
+            LinkAnnotation::new(
+                Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+                Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+            ),
+            Some(String::new()),
+        )
+        .with_location(Some(annot_loc)),
+    );
+
+    page.finish();
+
+    let div_loc = loc(2);
+    let mut tag_group = TagGroup::new(Tag::Div.with_location(Some(div_loc)));
+    tag_group.push(annot);
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(tag_group);
+    document.set_tag_tree(tag_tree);
+
+    match document.finish() {
+        Err(KrillaError::Validation(errors)) => {
+            assert!(errors.contains(&ValidationError::MissingAnnotationAltText(Some(annot_loc))));
+        }
+        _ => panic!("Expected validation error"),
+    }
+}
+
+#[test]
+fn validate_pdf_ua2_missing_tagging() {
+    let mut document = Document::new_with(settings_41());
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .title("a nice title".to_string()),
+    );
+    let outline = Outline::new();
+    document.set_outline(outline);
+
+    assert_eq!(
+        document.finish(),
+        Err(KrillaError::Validation(vec![
+            ValidationError::MissingTagging,
+        ]))
+    )
+}
+
+// ---- WTPDF 1.0 tests ----
+
+#[snapshot(document, settings_40)]
+fn validate_wtpdf_full_example(document: &mut Document) {
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+}
+
+#[test]
+fn validate_wtpdf_missing_tagging() {
+    let mut document = Document::new_with(settings_40());
+
+    assert_eq!(
+        document.finish(),
+        Err(KrillaError::Validation(vec![
+            ValidationError::MissingTagging,
+        ]))
+    )
+}
+
+#[test]
+fn validate_wtpdf_allows_minimal_metadata() {
+    // WTPDF, unlike UA-2, does not mandate a document title, language,
+    // alt text on figures, an outline, or DisplayDocTitle. A minimally
+    // tagged document with no metadata at all must therefore succeed.
+    let mut document = Document::new_with(settings_40());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_wtpdf_requires_codepoint_mappings() {
+    let mut document = Document::new_with(settings_40());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font.clone(),
+        20.0,
+        "你",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    assert_eq!(
+        document.finish(),
+        Err(KrillaError::Validation(vec![
+            ValidationError::ContainsNotDefGlyph(font, None, "你".to_string()),
+        ]))
+    )
 }
 
 #[test]

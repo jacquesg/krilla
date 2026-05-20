@@ -1194,6 +1194,22 @@ pub fn settings_39() -> SerializeSettings {
     }
 }
 
+// WTPDF 1.0 validator (PDF 2.0 well-tagged profile).
+pub fn settings_40() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::WTPDF),
+        ..settings_1()
+    }
+}
+
+// PDF/UA-2 validator (ISO 14289-2:2024).
+pub fn settings_41() -> SerializeSettings {
+    SerializeSettings {
+        configuration: Configuration::new_with_validator(Validator::UA2),
+        ..settings_1()
+    }
+}
+
 pub fn pdfx_external_output_profile() -> ExternalOutputProfile {
     ExternalOutputProfile::rgb(
         ICCProfile::new(
