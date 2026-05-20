@@ -710,6 +710,7 @@ fn text_rendering_invisible_emits_tr3_and_glyph_show() {
     use krilla::{SerializeSettings, TextRendering};
 
     let settings = SerializeSettings {
+        pretty: true,
         compress_content_streams: false,
         text_rendering: TextRendering::Invisible,
         ..Default::default()
@@ -774,6 +775,7 @@ fn text_rendering_invisible_skips_fill_and_stroke_colour() {
 
     fn render(setting: TextRendering) -> Vec<u8> {
         let settings = SerializeSettings {
+            pretty: true,
             compress_content_streams: false,
             text_rendering: setting,
             ..Default::default()
@@ -839,6 +841,7 @@ fn push_text_rendering_invisible_scopes_to_push_range() {
     use krilla::{SerializeSettings, TextRendering};
 
     let settings = SerializeSettings {
+        pretty: true,
         compress_content_streams: false,
         // Default to glyph mode so the surrounding draws are visible.
         text_rendering: TextRendering::Glyphs,

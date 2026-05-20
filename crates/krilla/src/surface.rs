@@ -323,6 +323,7 @@ impl<'a> Surface<'a> {
             self.bd.get_mut().draw_invisible_glyphs(
                 start,
                 self.sc,
+                self.chunk_container,
                 context_color,
                 glyphs,
                 font,

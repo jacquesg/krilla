@@ -563,6 +563,7 @@ impl ContentBuilder {
         &mut self,
         start: Point,
         sc: &mut SerializeContext,
+        chunk_container: &mut ChunkContainer,
         context_color: rgb::Color,
         glyphs: &[impl Glyph],
         font: Font,
@@ -592,10 +593,11 @@ impl ContentBuilder {
             x,
             y,
             sc,
+            chunk_container,
             TextRenderingMode::Invisible,
             // No fill/stroke setup — invisible glyphs produce no
             // marks, so the colour state is irrelevant.
-            |_, _| {},
+            |_, _, _| {},
             glyphs,
             font,
             context_color,
