@@ -700,7 +700,7 @@ pub mod separation {
 /// paint before content-stream emission.
 ///
 /// The variant is read once per paint dispatch from
-/// [`SerializeSettings::colour_conversion`]; `Auto` (the default) and
+/// [`crate::SerializeSettings::colour_conversion`]; `Auto` (the default) and
 /// `None` pass colours through unchanged, preserving the existing
 /// krilla behaviour. The `Force*` variants project regular RGB / CMYK
 /// / Luma source colours into the requested target space using the

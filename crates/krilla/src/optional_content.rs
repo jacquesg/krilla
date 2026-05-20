@@ -82,7 +82,12 @@ impl Layer {
 /// §8.11.2.1. Distinguishes layers a viewer should honour when
 /// rendering (`View`) from layers that exist only for design-time
 /// tooling (`Design`).
+///
+/// Marked `#[non_exhaustive]` because the spec leaves room for
+/// future producer-defined intents; downstream code should always
+/// include a default arm when matching.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum LayerIntent {
     /// The layer represents a user-visible variant of the document.
     /// Default if unset.

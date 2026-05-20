@@ -334,7 +334,7 @@ pub struct SerializeSettings {
     /// indirect object is written, so every string and stream the
     /// document subsequently emits is encrypted under the document's
     /// file key. The `/Encrypt` dict, the trailer `/ID` strings, and
-    /// (when [`Encryption::with_encrypt_metadata`] is `false`) the
+    /// (when [`crate::encryption::Encryption::with_encrypt_metadata`] is `false`) the
     /// metadata stream remain plaintext per the spec.
     ///
     /// Compatibility note: the AESV3 cipher suite was introduced by
@@ -1113,9 +1113,17 @@ impl SerializeContext {
         layer: crate::optional_content::Layer,
     ) -> crate::optional_content::LayerHandle {
         let ref_ = self.new_ref();
-        let handle = crate::optional_content::LayerHandle(
-            self.global_objects.layers.len() as u32,
+        // LayerHandle wraps a u32; refuse rather than silently
+        // truncate if a pathological caller manages to register
+        // more than 4G layers. The realistic upper bound is in the
+        // low thousands.
+        let index = self.global_objects.layers.len();
+        assert!(
+            index < u32::MAX as usize,
+            "exceeded the {} layer registration limit",
+            u32::MAX,
         );
+        let handle = crate::optional_content::LayerHandle(index as u32);
         self.global_objects.layers.push(LayerRecord { layer, ref_ });
         handle
     }
