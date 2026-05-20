@@ -924,6 +924,121 @@ fn namespace_override_ignored_on_pdf_17() {
     );
 }
 
+// --- custom external namespaces (MathML, HTML 4, …) -----------------
+
+const MATHML_URI: &str = "http://www.w3.org/1998/Math/MathML";
+const HTML4_URI: &str = "http://www.w3.org/TR/REC-html40";
+
+#[test]
+fn register_namespace_emits_namespace_dict_under_pdf_20() {
+    let mut document = Document::new_with(pretty(settings_25()));
+    let _ = document.register_namespace(MATHML_URI);
+    document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::P));
+    document.set_tag_tree(tag_tree);
+    let pdf = document.finish().unwrap();
+
+    // The MathML URI must appear verbatim inside a Namespace
+    // dict, and the dict must be referenced from the catalogue's
+    // /Namespaces array. The URL is a UTF-16BE text string in
+    // PDF 2.0 tagged output; search for the ASCII bytes — they
+    // appear in clear because the URL is all ASCII.
+    assert!(
+        contains(&pdf, MATHML_URI.as_bytes()),
+        "MathML namespace URI missing from output",
+    );
+    assert!(
+        contains(&pdf, b"/Namespaces"),
+        "/Namespaces array missing from catalogue",
+    );
+}
+
+#[test]
+fn register_namespace_is_idempotent() {
+    let mut document = Document::new_with(pretty(settings_25()));
+    let h1 = document.register_namespace(MATHML_URI);
+    let h2 = document.register_namespace(MATHML_URI);
+    let h3 = document.register_namespace(HTML4_URI);
+    assert_eq!(h1, h2, "registering the same URI twice must return the same handle");
+    assert_ne!(h1, h3, "distinct URIs must return distinct handles");
+
+    document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::P));
+    document.set_tag_tree(tag_tree);
+    let pdf = document.finish().unwrap();
+
+    // Exactly one MathML Namespace dict — the second registration
+    // must not produce a duplicate.
+    let count = pdf
+        .windows(MATHML_URI.len())
+        .filter(|w| *w == MATHML_URI.as_bytes())
+        .count();
+    assert_eq!(
+        count, 1,
+        "MathML URI appears {count} times; expected exactly 1",
+    );
+}
+
+#[test]
+fn tag_with_custom_namespace_changes_bytes() {
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::Formula(None)));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let bound_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        let mathml = document.register_namespace(MATHML_URI);
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        // Bind the Formula tag to MathML rather than the SSN.
+        tag_tree.push(TagGroup::new(
+            Tag::Formula(None).with_namespace(Some(TagNamespace::Custom(mathml))),
+        ));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_ne!(
+        default_doc, bound_doc,
+        "Tag::with_namespace(Custom(mathml)) must change the emitted bytes",
+    );
+    assert!(
+        contains(&bound_doc, MATHML_URI.as_bytes()),
+        "MathML URI missing from the bound document",
+    );
+    assert!(
+        !contains(&default_doc, MATHML_URI.as_bytes()),
+        "MathML URI leaked into the default document (no registration)",
+    );
+}
+
+#[test]
+fn register_namespace_silently_dropped_on_pdf_17() {
+    // PDF 1.7 has no namespace model; the registration must not
+    // affect the produced bytes.
+    let no_ns_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        document.finish().unwrap()
+    };
+    let with_ns_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        let _ = document.register_namespace(MATHML_URI);
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        document.finish().unwrap()
+    };
+    assert_eq!(
+        no_ns_doc, with_ns_doc,
+        "register_namespace must not affect the bytes of a PDF 1.7 document",
+    );
+}
+
 #[test]
 fn role_map_omitted_under_pdf_20_namespaces() {
     // PDF 2.0 uses /Namespaces + /RoleMapNS (a namespace-keyed

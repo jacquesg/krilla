@@ -1146,6 +1146,56 @@ impl SerializeContext {
             .expect("LayerHandle out of bounds — was it created on a different Document?")
     }
 
+    /// Register a custom external namespace by URI. Returns an opaque
+    /// handle that can be passed to
+    /// [`crate::tagging::TagNamespace::Custom`] (and ultimately to
+    /// [`Tag::with_namespace`](crate::tagging::TagKind::with_namespace))
+    /// to bind a structure element to the namespace. Repeated calls
+    /// with the same URI return the same handle — the on-disk PDF
+    /// carries at most one `Namespace` dict per URI.
+    pub(crate) fn register_namespace(
+        &mut self,
+        uri: impl Into<String>,
+    ) -> crate::interchange::tagging::NamespaceHandle {
+        let uri = uri.into();
+        if let Some(pos) = self
+            .global_objects
+            .custom_namespaces
+            .iter()
+            .position(|r| r.uri == uri)
+        {
+            return crate::interchange::tagging::NamespaceHandle(pos as u32);
+        }
+        let ref_ = self.new_ref();
+        let index = self.global_objects.custom_namespaces.len();
+        assert!(
+            index < u32::MAX as usize,
+            "exceeded the {} custom-namespace registration limit",
+            u32::MAX,
+        );
+        self.global_objects
+            .custom_namespaces
+            .push(CustomNamespaceRecord { uri, ref_ });
+        crate::interchange::tagging::NamespaceHandle(index as u32)
+    }
+
+    /// Resolve a [`NamespaceHandle`](crate::tagging::NamespaceHandle)
+    /// back to the indirect ref of its `Namespace` dictionary.
+    ///
+    /// # Panics
+    /// Panics if the handle does not correspond to a namespace
+    /// registered on this document.
+    pub(crate) fn custom_namespace_ref(
+        &self,
+        handle: crate::interchange::tagging::NamespaceHandle,
+    ) -> Ref {
+        self.global_objects
+            .custom_namespaces
+            .get(handle.0 as usize)
+            .map(|r| r.ref_)
+            .expect("NamespaceHandle out of bounds — was it created on a different Document?")
+    }
+
     /// Indirect ref of the document-level Type1 Helvetica font dict
     /// used for AcroForm widget appearance streams (ISO 32000-2 §12.7.4).
     ///
@@ -1805,6 +1855,14 @@ impl SerializeContext {
                 &mut id_tree_map,
                 struct_tree_root_ref,
             )?;
+            // Take the custom-namespace registry only AFTER tag
+            // serialisation — `resolve_ns_override` inside
+            // `write_kind` looks up handles through
+            // `SerializeContext::custom_namespace_ref` during the
+            // call above, which queries the registry via &self.
+            // Taking before that call would `MaybeTaken::take` it
+            // out from under those reads.
+            let custom_namespaces = self.global_objects.custom_namespaces.take();
 
             root.validate(&id_tree_map)?;
 
@@ -1871,6 +1929,25 @@ impl SerializeContext {
 
                 ns.finish();
                 sub_chunks.push(ns_chunk);
+
+                // Caller-registered external namespaces (MathML,
+                // HTML 4, PDF Math, …) declared via
+                // `Document::register_namespace`. Each entry adds
+                // one ref to the catalogue's `/Namespaces` array
+                // and one indirect `Namespace` dict whose `/NS`
+                // entry carries the URI. The default-binding
+                // tables in `write_kind_*` continue to use the
+                // standard / krilla namespaces; structure elements
+                // pick up a custom namespace only when the caller
+                // sets `with_namespace(Some(TagNamespace::Custom(...)))`.
+                for record in &custom_namespaces {
+                    namespaces.item(record.ref_);
+                    let mut ns_chunk = self.new_chunk();
+                    let mut ns = ns_chunk.namespace(record.ref_);
+                    ns.ns(TextStr(&record.uri));
+                    ns.finish();
+                    sub_chunks.push(ns_chunk);
+                }
             }
             tree.children().item(document_ref);
 
@@ -1941,6 +2018,16 @@ impl SerializeContext {
             chunk_container.non_stream.struct_tree_root = Some((struct_tree_root_ref, chunk));
         } else {
             self.register_validation_error(ValidationError::MissingTagging);
+        }
+
+        if !self.global_objects.custom_namespaces.is_taken() {
+            // Documents without a tag tree never entered the branch
+            // above that took the registry; consume the MaybeTaken
+            // slot here so `finish()`'s `assert_all_taken`
+            // discipline holds. Registrations made on a document
+            // that ultimately has no tag tree are silently dropped
+            // — there is no structure element to bind them to.
+            let _ = self.global_objects.custom_namespaces.take();
         }
 
         Ok(())
@@ -2110,6 +2197,15 @@ pub(crate) struct GlobalObjects {
     /// underlying `/OCG` object. Taken at finalise time when the
     /// catalogue's `/OCProperties` dict is written.
     pub(crate) layers: MaybeTaken<Vec<LayerRecord>>,
+    /// External structure namespaces (`/NS`) registered via
+    /// [`crate::Document::register_namespace`]. Each entry pairs
+    /// the caller-supplied namespace URI (MathML, HTML 4, PDF Math,
+    /// …) with the indirect ref of the `Namespace` dictionary
+    /// krilla writes at finalise time. PDF 2.0 only — pre-2.0
+    /// documents emit nothing here. Taken at the same point
+    /// `serialize_tag_tree` emits the catalogue's `/Namespaces`
+    /// array.
+    pub(crate) custom_namespaces: MaybeTaken<Vec<CustomNamespaceRecord>>,
     /// The context tracking all of the pdfs and their pages that have been inserted.
     #[cfg(feature = "pdf")]
     pub(crate) pdf_ctx: MaybeTaken<PdfSerializerContext>,
@@ -2120,6 +2216,14 @@ pub(crate) struct GlobalObjects {
 #[derive(Debug, Clone)]
 pub(crate) struct LayerRecord {
     pub(crate) layer: crate::optional_content::Layer,
+    pub(crate) ref_: Ref,
+}
+
+/// A caller-registered external namespace plus the indirect ref of
+/// the `Namespace` dictionary that holds its URI in the final PDF.
+#[derive(Debug, Clone)]
+pub(crate) struct CustomNamespaceRecord {
+    pub(crate) uri: String,
     pub(crate) ref_: Ref,
 }
 
@@ -2135,6 +2239,7 @@ impl GlobalObjects {
         assert!(self.tag_tree.is_taken());
         assert!(self.embedded_files.is_taken());
         assert!(self.layers.is_taken());
+        assert!(self.custom_namespaces.is_taken());
         #[cfg(feature = "pdf")]
         assert!(self.pdf_ctx.is_taken());
     }
