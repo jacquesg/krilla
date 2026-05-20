@@ -328,6 +328,24 @@ pub struct SerializeSettings {
     ///
     /// [`no_device_cs`]: SerializeSettings::no_device_cs
     pub preserve_black: bool,
+    /// Encrypt the document with AES-256 (Standard Security Handler
+    /// V=5, R=6 — ISO 32000-2 §7.6.4 "AESV3"). When `Some`, krilla
+    /// applies the configuration to the underlying `Pdf` before any
+    /// indirect object is written, so every string and stream the
+    /// document subsequently emits is encrypted under the document's
+    /// file key. The `/Encrypt` dict, the trailer `/ID` strings, and
+    /// (when [`Encryption::with_encrypt_metadata`] is `false`) the
+    /// metadata stream remain plaintext per the spec.
+    ///
+    /// Compatibility note: the AESV3 cipher suite was introduced by
+    /// PDF 2.0; most modern readers (Acrobat 9+, MuPDF, pdf.js) accept
+    /// it on PDF 1.7 documents as well, but readers limited to PDF
+    /// 1.6 or older will refuse to open the file.
+    ///
+    /// Default is `None` (no encryption).
+    ///
+    /// [`Encryption`]: crate::encryption::Encryption
+    pub encryption: Option<crate::encryption::Encryption>,
     /// Write the file's cross-reference information as a
     /// `/Type /XRef` stream (ISO 32000-1 §7.5.8 / 32000-2 §7.5.8)
     /// instead of the traditional plain `xref` table.
@@ -522,6 +540,7 @@ impl Default for SerializeSettings {
             shape_optimisation: ShapeOptimisation::Auto,
             rgb_grey_to_devicegray: false,
             preserve_black: false,
+            encryption: None,
             xref_streams: false,
         }
     }

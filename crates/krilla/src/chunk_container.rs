@@ -119,6 +119,17 @@ impl ChunkContainer {
             chunks_byte_len += chunk.len();
         })?;
 
+        // Reserve an indirect ref for the `/Encrypt` dictionary if
+        // the document is to be encrypted. Allocated here — after the
+        // chunk refs have all been mapped but before any object is
+        // written — so the slot never collides with a chunk's
+        // renumbered ref or with a downstream metadata/info object.
+        let encrypt_ref = sc
+            .serialize_settings()
+            .encryption
+            .as_ref()
+            .map(|_| remapped_ref.bump());
+
         // Chunk length is not an exact number because the length might change as we renumber,
         // so we add a bit of a padding by multiplying with 1.1. The 200 is additional padding
         // for the document catalog. This hopefully allows us to avoid re-alloactions in the general
@@ -134,6 +145,21 @@ impl ChunkContainer {
                 .requires_binary_header()
         {
             pdf.set_binary_marker(b"AAAA")
+        }
+
+        // Apply AES-256 encryption to the underlying `Pdf` BEFORE any
+        // indirect object body is written. From this point on,
+        // pdf-writer transparently encrypts every string and stream
+        // emitted into the buffer with a per-object IV under the
+        // document's file encryption key. The `/Encrypt` dict (written
+        // by `Pdf::encrypt` itself), the trailer `/ID` strings, and —
+        // when the caller disables `encrypt_metadata` — the metadata
+        // stream remain in clear per ISO 32000-2 §7.6.
+        if let (Some(ref_), Some(enc)) = (
+            encrypt_ref,
+            sc.serialize_settings().encryption.as_ref(),
+        ) {
+            pdf.encrypt(ref_, enc.to_pdf_writer());
         }
 
         // Write the chunks in all the fields.
