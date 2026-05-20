@@ -1181,6 +1181,28 @@ pub fn settings_33() -> SerializeSettings {
     }
 }
 
+// PDF/UA-2 (ISO 14289-2:2024).
+pub fn settings_34() -> SerializeSettings {
+    SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::UA2)
+            .finish()
+            .unwrap(),
+        ..settings_1()
+    }
+}
+
+// WTPDF 1.0 (PDF Association well-tagged PDF 2.0 profile).
+pub fn settings_35() -> SerializeSettings {
+    SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::WTPDF)
+            .finish()
+            .unwrap(),
+        ..settings_1()
+    }
+}
+
 pub fn metadata_1() -> Metadata {
     Metadata::new()
         .language("en".to_string())
