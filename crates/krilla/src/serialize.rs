@@ -328,6 +328,25 @@ pub struct SerializeSettings {
     ///
     /// [`no_device_cs`]: SerializeSettings::no_device_cs
     pub preserve_black: bool,
+    /// Write the file's cross-reference information as a
+    /// `/Type /XRef` stream (ISO 32000-1 §7.5.8 / 32000-2 §7.5.8)
+    /// instead of the traditional plain `xref` table.
+    ///
+    /// Cross-reference streams allow the xref to be compressed
+    /// alongside the rest of the file body and are a prerequisite
+    /// for any document that uses object streams (also ISO
+    /// 32000-1 §7.5.7).
+    ///
+    /// **Version constraint.** Cross-reference streams require
+    /// PDF 1.5 or later. krilla does not downgrade silently — if
+    /// this flag is set while the active PDF version is below 1.5
+    /// the resulting file will not be readable by PDF 1.4
+    /// consumers. PDF/A-1 (PDF 1.4) callers must keep this
+    /// `false`.
+    ///
+    /// The default is `false`, preserving the traditional
+    /// `xref` + `trailer` layout.
+    pub xref_streams: bool,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -503,6 +522,7 @@ impl Default for SerializeSettings {
             shape_optimisation: ShapeOptimisation::Auto,
             rgb_grey_to_devicegray: false,
             preserve_black: false,
+            xref_streams: false,
         }
     }
 }
@@ -1183,7 +1203,7 @@ impl SerializeContext {
         &mut self.validation_store
     }
 
-    pub(crate) fn finish(mut self, mut chunk_container: ChunkContainer) -> KrillaResult<Pdf> {
+    pub(crate) fn finish(mut self, mut chunk_container: ChunkContainer) -> KrillaResult<Vec<u8>> {
         // We need to be careful here that we serialize the objects in the right order,
         // as in some cases we use MaybeTake::take to remove an object, which means that
         // no object that is serialized afterwards must depend on it.
@@ -1234,7 +1254,19 @@ impl SerializeContext {
         // Just a sanity check that we've actually processed all items.
         self.global_objects.assert_all_taken();
 
-        Ok(pdf)
+        // Choose the cross-reference layout. `xref_streams` is opt-in;
+        // when set we allocate one extra indirect ref for the xref
+        // stream itself (its `/Length`, filter chain and field-width
+        // dict live in that object). The ref MUST come from
+        // `SerializeContext::new_ref` so the numbering stays
+        // collision-free with everything already written.
+        let xref_stream_ref =
+            if self.serialize_settings.xref_streams { Some(self.new_ref()) } else { None };
+
+        Ok(match xref_stream_ref {
+            Some(r) => pdf.finish_with_xref_stream(r),
+            None => pdf.finish(),
+        })
     }
 }
 
