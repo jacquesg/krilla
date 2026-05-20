@@ -322,6 +322,121 @@ fn layer_used_inside_form_xobject_registers_on_form_resources() {
     );
 }
 
+// --- layers + encryption -------------------------------------------
+
+#[test]
+fn layers_plus_encryption_emit_both_subsystems() {
+    // The two subsystems share the same final-renumbering ref
+    // chain in `ChunkContainer::finish` (layers first, then the
+    // encrypt ref, both bumped from `remapped_ref`). The previous
+    // encryption + xref_streams test caught a coordination bug
+    // there; this one exercises layers + encryption.
+    //
+    // Both the `/Encrypt` trailer entry and the catalogue's
+    // `/OCProperties` must survive, the per-page `/Properties`
+    // dict must reference the layer, and the strings emitted on
+    // the page (the document title, the layer name) must be
+    // encrypted in the body.
+    use krilla::encryption::Encryption;
+    let settings = krilla::SerializeSettings {
+        encryption: Some(Encryption::new("u", "o")),
+        ..crate::settings_1()
+    };
+    let mut doc = Document::new_with(settings);
+    doc.set_metadata(
+        krilla::metadata::Metadata::new().title("Layered Secret".into()),
+    );
+    let layer = doc.add_layer(Layer::new("OverlayName"));
+
+    let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
+    let mut surface = page.surface();
+    surface.push_layer(layer);
+    surface.pop();
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+
+    // Encryption survived.
+    assert!(contains(&pdf, b"/Encrypt "), "/Encrypt missing from trailer");
+    assert!(
+        contains(&pdf, b"/Filter /Standard"),
+        "/Encrypt dict missing from PDF body",
+    );
+    assert!(
+        contains(&pdf, b"/CFM /AESV3"),
+        "AESV3 crypt filter missing",
+    );
+
+    // Layers survived.
+    assert!(
+        contains(&pdf, b"/OCProperties"),
+        "/OCProperties missing from catalog under encryption",
+    );
+    assert!(
+        contains(&pdf, b"/Type /OCG"),
+        "OCG dict missing under encryption",
+    );
+    // The named-property lookup must still wire through page resources.
+    assert!(
+        contains(&pdf, b"/L0"),
+        "/L0 named-property entry missing — layer-to-resource binding broken under encryption",
+    );
+
+    // Encryption hides plaintext. The layer name flows through
+    // `TextStr` into the OCG dict, which IS encrypted — so the
+    // literal must NOT appear in the output. Same for the
+    // document title.
+    assert!(
+        !contains(&pdf, b"OverlayName"),
+        "layer /Name plaintext leaked through encryption",
+    );
+    assert!(
+        !contains(&pdf, b"Layered Secret"),
+        "document title plaintext leaked through encryption",
+    );
+}
+
+#[test]
+#[ignore = "shells out to qpdf; run via cargo test -- --ignored qpdf_layers_plus_encryption"]
+fn qpdf_layers_plus_encryption() {
+    use krilla::encryption::Encryption;
+    use std::process::Command;
+
+    let settings = krilla::SerializeSettings {
+        encryption: Some(Encryption::new("u", "o")),
+        ..crate::settings_1()
+    };
+    let mut doc = Document::new_with(settings);
+    doc.set_metadata(
+        krilla::metadata::Metadata::new().title("Layered Secret".into()),
+    );
+    let layer = doc.add_layer(Layer::new("OverlayName"));
+    let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
+    let mut surface = page.surface();
+    surface.push_layer(layer);
+    surface.pop();
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+
+    let path = std::env::temp_dir().join("krilla_layers_enc.pdf");
+    std::fs::write(&path, &pdf).unwrap();
+    let output = Command::new("qpdf")
+        .arg("--check")
+        .arg("--password=u")
+        .arg(&path)
+        .output()
+        .expect("qpdf not on PATH");
+    assert!(
+        output.status.success(),
+        "qpdf rejected the layered + encrypted PDF: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AESv3"));
+}
+
 // --- positive control: default_visible=true → /ON ------------------
 
 #[test]
