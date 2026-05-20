@@ -227,6 +227,30 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Start a marked-content section that brackets purely
+    /// decorative or page-furniture content (header, footer, page
+    /// number, background image, cut marks, &c.) as a PDF
+    /// `Artifact`.
+    ///
+    /// Content emitted between this call and the matching
+    /// [`Surface::end_tagged`] is excluded from the logical
+    /// structure tree, so assistive technology skips it. This is
+    /// the right marker for any visible content that is not part
+    /// of the reading-order document — most importantly it is the
+    /// only way to make a decorative image not appear in the
+    /// accessible tree without giving it an alt description.
+    ///
+    /// `kind` selects the `/Type` and (PDF 1.7+) `/Subtype` of
+    /// the artifact; `bbox` is required for
+    /// [`ArtifactType::Background`] and optional otherwise. This
+    /// is a thin wrapper around
+    /// [`start_tagged(ContentTag::Artifact(Artifact::new(...)))`](Self::start_tagged).
+    pub fn start_artifact(&mut self, kind: ArtifactType, bbox: Option<crate::geom::Rect>) {
+        let _ = self.start_tagged(ContentTag::Artifact(
+            crate::interchange::tagging::Artifact::new(kind, bbox),
+        ));
+    }
+
     /// End the current tagged section.
     ///
     /// # Panics
