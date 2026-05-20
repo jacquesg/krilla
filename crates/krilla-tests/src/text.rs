@@ -508,6 +508,7 @@ fn text_rendering_setting_switches_glyph_to_vector_emission() {
 
     fn render(setting: TextRendering) -> Vec<u8> {
         let settings = SerializeSettings {
+            pretty: true,
             compress_content_streams: false,
             text_rendering: setting,
             ..Default::default()
