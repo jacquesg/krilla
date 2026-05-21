@@ -978,8 +978,17 @@ pub(crate) enum MaybeDeviceColorSpace {
 pub(crate) struct SerializeContext {
     /// The ref of the page tree.
     page_tree_ref: Ref,
-    /// PDF 2.0 namespaces.
-    pub(crate) pdf2_ns: Pdf2Namespaces,
+    /// PDF 2.0 namespaces, allocated lazily on first use.
+    ///
+    /// The standard structure namespace (`ssn`) and the custom krilla
+    /// namespace dictionaries are only written when serialising a
+    /// tagged PDF 2.0 document. Allocating their indirect refs at
+    /// construction time leaked two unused entries into `Ref` numbering
+    /// for every PDF (including PDF 1.7 and untagged PDF 2.0) and
+    /// caused the trailer `/Size` to overshoot the highest emitted
+    /// object id by two — lopdf and other strict readers warn about
+    /// this. `pdf2_namespaces()` allocates the pair on first call.
+    pdf2_ns: OnceCell<Pdf2Namespaces>,
     /// All global objects, such as PDF fonts, that are populated over time.
     pub(crate) global_objects: GlobalObjects,
     /// Information for each page written so far, index by the page index.
@@ -1020,10 +1029,6 @@ impl SerializeContext {
 
         let mut cur_ref = Ref::new(1);
         let page_tree_ref = cur_ref.bump();
-        let pdf2_ns = Pdf2Namespaces {
-            ssn_ref: cur_ref.bump(),
-            krilla_ref: cur_ref.bump(),
-        };
 
         let chunk_settings = Settings {
             pretty: serialize_settings.pretty,
@@ -1031,7 +1036,7 @@ impl SerializeContext {
 
         Self {
             cached_mappings: HashMap::new(),
-            pdf2_ns,
+            pdf2_ns: OnceCell::new(),
             global_objects: GlobalObjects::default(),
             cur_ref,
             page_tree_ref,
@@ -1043,6 +1048,28 @@ impl SerializeContext {
             limits: Limits::new(),
             validation_store: ValidationStore::new(),
         }
+    }
+
+    /// Return the PDF 2.0 namespace refs, allocating them on first
+    /// call. Callers must only invoke this on paths that go on to
+    /// emit the corresponding `Namespace` dictionaries — typically the
+    /// PDF 2.0 tagged-document branch in `serialize`. The accessor is
+    /// `&mut self` because allocating the refs requires bumping
+    /// `cur_ref`; the returned borrow is read-only.
+    pub(crate) fn pdf2_namespaces(&mut self) -> &Pdf2Namespaces {
+        if self.pdf2_ns.get().is_none() {
+            let ns = Pdf2Namespaces {
+                ssn_ref: self.cur_ref.bump(),
+                krilla_ref: self.cur_ref.bump(),
+            };
+            // `set` only fails if the cell is already initialised,
+            // which we have just ruled out under the `&mut self`
+            // borrow.
+            let _ = self.pdf2_ns.set(ns);
+        }
+        self.pdf2_ns
+            .get()
+            .expect("pdf2_ns was initialised in the branch above")
     }
 
     pub(crate) fn page_infos(&self) -> &[PageInfo] {
@@ -1912,24 +1939,31 @@ impl SerializeContext {
                     role_map.insert(Name(name.as_slice()), *role);
                 }
             } else {
+                // Allocate the standard structure and custom krilla
+                // namespace refs only on this branch — the PDF 2.0
+                // tagged-document path. PDF 1.7 documents and
+                // untagged PDF 2.0 documents never reach here, so
+                // their refs are never bumped and trailer `/Size`
+                // matches the highest emitted object id.
+                let pdf2_ns = *self.pdf2_namespaces();
                 let mut namespaces = tree.namespaces();
 
                 // PDF 2.0 standard structure namespace
-                namespaces.item(self.pdf2_ns.ssn_ref);
+                namespaces.item(pdf2_ns.ssn_ref);
                 let mut ns_chunk = self.new_chunk();
-                ns_chunk.namespace(self.pdf2_ns.ssn_ref).pdf_2_ns();
+                ns_chunk.namespace(pdf2_ns.ssn_ref).pdf_2_ns();
                 sub_chunks.push(ns_chunk);
 
                 // Custom krilla namspace
-                namespaces.item(self.pdf2_ns.krilla_ref);
+                namespaces.item(pdf2_ns.krilla_ref);
                 let mut ns_chunk = self.new_chunk();
-                let mut ns = ns_chunk.namespace(self.pdf2_ns.krilla_ref);
+                let mut ns = ns_chunk.namespace(pdf2_ns.krilla_ref);
                 ns.ns(TextStr("https://github.com/LaurenzV/krilla"));
 
                 // Custom structure elements.
                 ns.role_map_ns()
-                    .to_pdf_2_0(Name(b"Datetime"), StructRole2::Span, self.pdf2_ns.ssn_ref)
-                    .to_pdf_2_0(Name(b"Terms"), StructRole2::Part, self.pdf2_ns.ssn_ref);
+                    .to_pdf_2_0(Name(b"Datetime"), StructRole2::Span, pdf2_ns.ssn_ref)
+                    .to_pdf_2_0(Name(b"Terms"), StructRole2::Part, pdf2_ns.ssn_ref);
 
                 ns.finish();
                 sub_chunks.push(ns_chunk);
@@ -2145,6 +2179,7 @@ impl<T> DerefMut for MaybeTaken<T> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct Pdf2Namespaces {
     /// The ref of the PDF 2.0 standard structure namspace (`https://www.iso.org/pdf2/ssn`).
     pub(crate) ssn_ref: Ref,
