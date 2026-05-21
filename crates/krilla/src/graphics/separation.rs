@@ -29,8 +29,12 @@ impl Cacheable for SeparationColorSpace {
         let fallback_cs = self.space.fallback.color_space(sc);
         let fallback_cs_resource = sc.register_colorspace(chunk_container, fallback_cs.into());
 
-        // Get fallback color components for tint function
-        let fallback_color = crate::color::Color::from(self.space.fallback).to_pdf_color();
+        // Get fallback color components for tint function. Clone the
+        // fallback because `RegularColor` is no longer `Copy`
+        // (`IccBased` carries an `Arc`-backed profile); the second
+        // read at line `is_subtractive()` below borrows the field.
+        let fallback_color =
+            crate::color::Color::from(self.space.fallback.clone()).to_pdf_color();
         let num_components = fallback_color.len();
 
         // Determine C0 based on whether the fallback is subtractive or additive

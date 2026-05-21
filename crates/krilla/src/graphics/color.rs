@@ -62,7 +62,7 @@ use std::fmt::Debug;
 use std::hash::Hash;
 
 use crate::configure::ValidationError;
-use crate::graphics::icc::ICCBasedColorSpace;
+use crate::graphics::icc::{ICCBasedColorSpace, ICCProfile};
 use crate::serialize::SerializeContext;
 
 /// The PDF name for the device RGB color space.
@@ -82,7 +82,20 @@ pub enum Color {
 }
 
 /// A device or CIE-based color.
-#[derive(Debug, Hash, Eq, PartialEq, Clone, Copy)]
+///
+/// `Clone` rather than `Copy` because [`RegularColor::IccBased`] carries
+/// an [`ICCProfile<3>`] which is internally an `Arc`-backed handle. The
+/// `Arc` makes the clone cheap (refcount bump) but precludes `Copy`.
+/// All other variants remain trivially copyable; sites that move a
+/// `RegularColor` by value now call `.clone()`.
+///
+/// `Hash` / `Eq` are implemented manually because [`RegularColor::IccBased`]
+/// stores `[f32; 3]` components and `f32` does not implement either
+/// trait. The bit-representation (`to_bits`) is hashed and compared so
+/// equal colours produce equal hashes (with the standard caveat that
+/// `+0.0` and `-0.0` hash to different values — acceptable here because
+/// the components come from `[0.0, 1.0]` cascade values).
+#[derive(Debug, Clone)]
 pub enum RegularColor {
     /// An RGB-based color.
     Rgb(rgb::Color),
@@ -90,6 +103,70 @@ pub enum RegularColor {
     Luma(luma::Color),
     /// A device CMYK color.
     Cmyk(cmyk::Color),
+    /// A three-component colour authored in a wide-gamut ICC-based
+    /// space (`color(display-p3 …)`, `color(rec2020 …)`,
+    /// `color(a98-rgb …)`, `color(prophoto-rgb …)`,
+    /// `color(xyz-d50 …)`, `color(xyz-d65 …)` per CSS Color 5 §4).
+    ///
+    /// `profile` carries the ICC profile bytes the caller supplied; the
+    /// content stream emits `/CS<n> cs <c0> <c1> <c2> scn` and the page
+    /// `/Resources /ColorSpace` dictionary gains a `/CS<n> [/ICCBased
+    /// <stream>]` entry (ISO 32000-2 §8.6.5.5). Components are in the
+    /// `[0.0, 1.0]` range expected by an ICCBased N=3 space.
+    ///
+    /// The profile is hashed (and compared) by content via the
+    /// internal `Prehashed` wrapper, so two `IccBased` colours sharing
+    /// the same profile bytes reuse the same `/CS<n>` resource entry.
+    IccBased {
+        /// Three-component ICC profile (e.g. embedded display-p3.icc).
+        profile: ICCProfile<3>,
+        /// Source-space components in `[0.0, 1.0]` order matching the
+        /// ICC profile's channel layout.
+        components: [f32; 3],
+    },
+}
+
+impl PartialEq for RegularColor {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Rgb(a), Self::Rgb(b)) => a == b,
+            (Self::Luma(a), Self::Luma(b)) => a == b,
+            (Self::Cmyk(a), Self::Cmyk(b)) => a == b,
+            (
+                Self::IccBased {
+                    profile: pa,
+                    components: ca,
+                },
+                Self::IccBased {
+                    profile: pb,
+                    components: cb,
+                },
+            ) => pa == pb && ca.map(f32::to_bits) == cb.map(f32::to_bits),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for RegularColor {}
+
+impl Hash for RegularColor {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            Self::Rgb(c) => c.hash(state),
+            Self::Luma(c) => c.hash(state),
+            Self::Cmyk(c) => c.hash(state),
+            Self::IccBased {
+                profile,
+                components,
+            } => {
+                profile.hash(state);
+                for c in components {
+                    c.to_bits().hash(state);
+                }
+            }
+        }
+    }
 }
 
 /// A special color space color.
@@ -105,6 +182,7 @@ impl Color {
             Color::Regular(RegularColor::Rgb(rgb)) => rgb.to_pdf_color().to_vec(),
             Color::Regular(RegularColor::Luma(l)) => vec![l.to_pdf_color()],
             Color::Regular(RegularColor::Cmyk(cmyk)) => cmyk.to_pdf_color().to_vec(),
+            Color::Regular(RegularColor::IccBased { components, .. }) => components.to_vec(),
             Color::Special(SpecialColor::Separation(spot)) => vec![spot.to_pdf_color()],
         }
     }
@@ -117,11 +195,16 @@ impl Color {
     }
 
     /// Convert a color to a regular color for use with constructs like tags or
-    /// annotations that don't support special color spaces
+    /// annotations that don't support special color spaces.
+    ///
+    /// Returns a `Clone` rather than a `Copy` because [`RegularColor`]
+    /// holds an `Arc`-backed [`RegularColor::IccBased`] variant. The
+    /// clone is cheap (Arc refcount bump for `IccBased`, byte-wise
+    /// copy for every other arm).
     pub(crate) fn to_regular(&self) -> RegularColor {
         match self {
-            Color::Regular(c) => *c,
-            Color::Special(SpecialColor::Separation(c)) => c.space.fallback,
+            Color::Regular(c) => c.clone(),
+            Color::Special(SpecialColor::Separation(c)) => c.space.fallback.clone(),
         }
     }
 
@@ -149,6 +232,9 @@ impl Color {
             Color::Regular(RegularColor::Rgb(r)) if r.0 == r.1 && r.1 == r.2 => {
                 luma::Color::new(r.0).into()
             }
+            // `IccBased` is a wide-gamut authoring path; promoting it
+            // to DeviceGray would discard the source-space precision
+            // the caller deliberately retained. Pass through unchanged.
             _ => self,
         }
     }
@@ -173,6 +259,12 @@ impl Color {
                 Color::Regular(RegularColor::Luma(l)) => {
                     rgb::Color::new(l.0, l.0, l.0).into()
                 }
+                // `IccBased` is a wide-gamut path that the projection
+                // helpers (which work in u8) cannot honour without
+                // discarding the very precision the caller asked us to
+                // preserve. Pass through; the content emission already
+                // resolves to an ICC stream resource.
+                Color::Regular(RegularColor::IccBased { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -187,6 +279,7 @@ impl Color {
                     let k = 255u8.saturating_sub(l.0);
                     cmyk::Color::new(0, 0, 0, k).into()
                 }
+                Color::Regular(RegularColor::IccBased { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -197,6 +290,7 @@ impl Color {
                 Color::Regular(RegularColor::Luma(_)) => self,
                 Color::Regular(RegularColor::Rgb(r)) => rgb_to_grey(r).into(),
                 Color::Regular(RegularColor::Cmyk(c)) => cmyk_to_grey(c).into(),
+                Color::Regular(RegularColor::IccBased { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -213,6 +307,23 @@ impl RegularColor {
     #[inline]
     fn into_color(self) -> Color {
         Color::Regular(self)
+    }
+
+    /// Construct a three-component ICC-based wide-gamut colour.
+    ///
+    /// `profile` is an [`ICCProfile<3>`] (build it via
+    /// [`crate::icc::ICCProfile::new`]) and `components` are the
+    /// source-space channel values in the `[0.0, 1.0]` range that the
+    /// profile expects. Each call returns a fresh `RegularColor` —
+    /// dedup happens at the resource-registration layer via the
+    /// profile's content-addressed hash, so it is safe (and cheap)
+    /// to call this constructor every time a wide-gamut paint is
+    /// resolved.
+    pub fn icc_based(profile: ICCProfile<3>, components: [f32; 3]) -> Self {
+        Self::IccBased {
+            profile,
+            components,
+        }
     }
 }
 
@@ -296,7 +407,7 @@ pub(crate) fn cmyk_to_grey(cmyk: cmyk::Color) -> luma::Color {
 /// done channel-wise in the fallback's native space.
 pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
     let tint = u8_to_unit(spot.tint);
-    match spot.space.fallback {
+    match &spot.space.fallback {
         RegularColor::Rgb(c) => rgb::Color::new(
             unit_to_u8(u8_to_unit(c.0) * tint),
             unit_to_u8(u8_to_unit(c.1) * tint),
@@ -313,6 +424,18 @@ pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
         RegularColor::Luma(c) => {
             luma::Color::new(unit_to_u8(u8_to_unit(c.0) * tint)).into()
         }
+        // Separation fallback cannot legally be an ICC-based wide-gamut
+        // colour: PDF 32000-2 §8.6.6.4 requires the alternate space to
+        // be a process colour (DeviceGray / DeviceRGB / DeviceCMYK / a
+        // CIE-based equivalent). Callers passing an ICC fallback get a
+        // black fallback (defensive — every existing constructor uses
+        // RGB / CMYK / Luma).
+        RegularColor::IccBased { components, .. } => rgb::Color::new(
+            unit_to_u8(components[0] * tint),
+            unit_to_u8(components[1] * tint),
+            unit_to_u8(components[2] * tint),
+        )
+        .into(),
     }
 }
 
@@ -355,22 +478,38 @@ impl RegularColor {
                     Some(cs) => cs,
                 }
             }
+            Self::IccBased { profile, .. } => {
+                // PDF/X-1a (ISO 15930-4) forbids non-CMYK content,
+                // which captures wide-gamut RGB-equivalent ICC paints
+                // too. Surface the validator violation; emission still
+                // proceeds via the ICCBased N=3 path.
+                if sc.serialize_settings().validators().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
+                CieBasedColorSpace::IccRgb(ICCBasedColorSpace::<3>(profile.clone())).into()
+            }
         }
     }
 
     /// Return the current color as RGB for use with colored glyphs (SVG and
     /// COLR).
-    pub(crate) fn as_rgb(self) -> Option<rgb::Color> {
+    pub(crate) fn as_rgb(&self) -> Option<rgb::Color> {
         Some(match self {
-            Self::Rgb(r) => r,
+            Self::Rgb(r) => *r,
             Self::Luma(l) => rgb::Color::new(l.0, l.0, l.0),
             Self::Cmyk(_) => return None,
+            // Colour-font glyph paint paths expect device-space RGB
+            // bytes. An ICC-based wide-gamut colour has no defined
+            // single u8 RGB projection without an ICC engine, so we
+            // refuse here — the caller's existing `None` branch falls
+            // back to the foreground colour.
+            Self::IccBased { .. } => return None,
         })
     }
 
     /// Returns true if this is a subtractive color space (CMYK), false otherwise (RGB, Luma).
     /// Used for determining the correct tint transform behavior in Separation color spaces.
-    pub(crate) fn is_subtractive(self) -> bool {
+    pub(crate) fn is_subtractive(&self) -> bool {
         matches!(self, Self::Cmyk(_))
     }
 }
@@ -796,6 +935,12 @@ pub(crate) enum CieBasedColorSpace {
     Srgb,
     Luma,
     Cmyk(ICCBasedColorSpace<4>),
+    /// Three-component ICC-based RGB-equivalent space used for CSS
+    /// Color 5 wide-gamut paints (`display-p3`, `rec2020`, `a98-rgb`,
+    /// `prophoto-rgb`, `xyz-d50`, `xyz-d65`). Plumbed through
+    /// `register_colorspace` -> `register_resourceable`, identical
+    /// dedup semantics as the CMYK ICC path.
+    IccRgb(ICCBasedColorSpace<3>),
 }
 
 impl From<CieBasedColorSpace> for ColorSpace {

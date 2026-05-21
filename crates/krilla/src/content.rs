@@ -1393,6 +1393,16 @@ impl ContentBuilder {
                         let comps = c.to_pdf_color();
                         content.set_fill_cmyk(comps[0], comps[1], comps[2], comps[3]);
                     }
+                    Color::Regular(crate::color::RegularColor::IccBased { .. }) => {
+                        // `IccBased` always resolves to
+                        // `CieBasedColorSpace::IccRgb` in
+                        // `RegularColor::color_space`, which lands in
+                        // the `Named(n)` arm below. Reaching `Device`
+                        // here would indicate a routing regression.
+                        unreachable!(
+                            "IccBased wide-gamut colours must route through ContentColorSpace::Named"
+                        )
+                    }
                     Color::Special(_) => {
                         panic!("Device color space cannot be used with special colors")
                     }
@@ -1440,6 +1450,11 @@ impl ContentBuilder {
                     Color::Regular(crate::color::RegularColor::Cmyk(c)) => {
                         let comps = c.to_pdf_color();
                         content.set_stroke_cmyk(comps[0], comps[1], comps[2], comps[3]);
+                    }
+                    Color::Regular(crate::color::RegularColor::IccBased { .. }) => {
+                        unreachable!(
+                            "IccBased wide-gamut colours must route through ContentColorSpace::Named"
+                        )
                     }
                     Color::Special(_) => {
                         panic!("Device color space cannot be used with special colors")

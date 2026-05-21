@@ -50,6 +50,7 @@ mod destination;
 mod embed;
 mod encryption;
 mod font;
+mod icc_based;
 mod graphic;
 mod image;
 mod mask;
