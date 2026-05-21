@@ -5,12 +5,13 @@
 //! in the document via [`Document::set_metadata`].
 //!
 //! [`Document::set_metadata`]: crate::document::Document::set_metadata
+use pdf_writer::types::TrappingStatus;
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
 use std::ops::DerefMut;
-use xmp_writer::{LangId, Timezone, XmpWriter};
+use xmp_writer::{LangId, Namespace, Timezone, XmpWriter};
 
-use crate::configure::{Configuration, PdfVersion, ValidationError};
+use crate::configure::{Configuration, PdfVersion, ValidationError, Validators};
 use crate::serialize::SerializeContext;
 
 /// Metadata for a PDF document.
@@ -29,10 +30,48 @@ pub struct Metadata {
     pub(crate) page_layout: Option<PageLayout>,
     pub(crate) page_mode: Option<PageMode>,
     pub(crate) viewer_preferences: ViewerPreferences,
+    pub(crate) trapped: Option<Trapping>,
     /// Author-supplied verbatim XMP packet. When set, it replaces the
     /// stream payload that krilla would otherwise build via [`XmpWriter`].
     /// See [`Metadata::raw_xmp`].
     pub(crate) raw_xmp: Option<Vec<u8>>,
+}
+
+/// Trapping status for a PDF document.
+///
+/// PDF/X-1a through PDF/X-6p require the `/Trapped` entry in the Document
+/// Info dictionary to be either `/True` or `/False`. `Trapping::Unknown`
+/// is permitted by base PDF but forbidden by PDF/X; krilla downgrades it
+/// to `NotTrapped` in that case to keep the output conformant.
+#[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
+pub enum Trapping {
+    /// The document has been fully trapped for prepress.
+    Trapped,
+    /// The document has not been trapped.
+    NotTrapped,
+    /// Trapping state is unspecified. Not permitted by PDF/X.
+    Unknown,
+}
+
+impl Trapping {
+    fn to_pdf_status(self) -> TrappingStatus {
+        match self {
+            Trapping::Trapped => TrappingStatus::Trapped,
+            Trapping::NotTrapped => TrappingStatus::NotTrapped,
+            Trapping::Unknown => TrappingStatus::Unknown,
+        }
+    }
+}
+
+fn resolve_trapping(trapped: Option<Trapping>, validators: Validators) -> Trapping {
+    match trapped {
+        Some(Trapping::Unknown) if validators.requires_trapping_metadata() => {
+            Trapping::NotTrapped
+        }
+        Some(t) => t,
+        None if validators.requires_trapping_metadata() => Trapping::NotTrapped,
+        None => Trapping::Unknown,
+    }
 }
 
 impl Metadata {
@@ -145,6 +184,18 @@ impl Metadata {
     /// values from this struct take precedence when set.
     pub fn viewer_preferences(mut self, preferences: ViewerPreferences) -> Self {
         self.viewer_preferences = preferences;
+        self
+    }
+
+    /// Whether the document has been adjusted with traps for colorant
+    /// misregistration during the printing process.
+    ///
+    /// This property is required for PDF/X export modes. If not set for
+    /// PDF/X, it will default to [`Trapping::NotTrapped`]. PDF/X forbids
+    /// [`Trapping::Unknown`]; krilla downgrades it to `NotTrapped` when a
+    /// PDF/X validator is active.
+    pub fn trapped(mut self, trapped: Trapping) -> Self {
+        self.trapped = Some(trapped);
         self
     }
 
@@ -292,6 +343,25 @@ impl Metadata {
         } else {
             sc.register_validation_error(ValidationError::MissingDocumentDate);
         }
+
+        // PDF/X: write `pdf:Trapped` in XMP metadata. Mirrors the Info-dict
+        // path so the two streams agree. PDF/X forbids the `Unknown`
+        // state, so when the caller supplies `Unknown` under a PDF/X
+        // validator we downgrade to `NotTrapped`.
+        let validators = sc.serialize_settings().validators();
+        if validators.requires_trapping_metadata() || self.trapped.is_some() {
+            match resolve_trapping(self.trapped, validators) {
+                Trapping::Trapped => {
+                    xmp.trapped(true);
+                }
+                Trapping::NotTrapped => {
+                    xmp.trapped(false);
+                }
+                Trapping::Unknown => {
+                    xmp.element("Trapped", Namespace::AdobePdf).value("Unknown");
+                }
+            }
+        }
     }
 
     pub(crate) fn serialize_document_info(
@@ -307,9 +377,12 @@ impl Metadata {
         // PDF/X (ISO 15930-*) mandates `/GTS_PDFXVersion` and `/Trapped` in
         // the Info dictionary even on PDF 2.0 (ISO 15930-9 still requires
         // them despite the general PDF 2.0 Info-dict deprecation). Force
-        // the dict to be written under any PDF/X validator.
+        // the dict to be written under any PDF/X validator. A caller-set
+        // `/Trapped` value also forces emission outside PDF/X so the Info
+        // and XMP streams stay in agreement.
         let requires_pdfx_info = config.validators().requires_pdfx_identification()
-            || config.validators().requires_trapping_metadata();
+            || config.validators().requires_trapping_metadata()
+            || self.trapped.is_some();
 
         if self.has_document_info() || requires_pdfx_info {
             let ref_ = ref_.bump();
@@ -358,13 +431,19 @@ impl Metadata {
                     .pair(Name(b"GTS_PDFXVersion"), TextStr(version));
             }
 
-            // `/Trapped` mandated by every PDF/X revision. krilla does not
-            // model trap state today, so emit `/False` as the conservative
-            // default — PDF/X forbids `/Unknown`.
-            if config.validators().requires_trapping_metadata() {
-                document_info
-                    .deref_mut()
-                    .pair(Name(b"Trapped"), Name(b"False"));
+            // `/Trapped` is mandated by every PDF/X revision; callers may
+            // also set it explicitly outside PDF/X. `resolve_trapping`
+            // downgrades `Unknown` to `NotTrapped` under PDF/X (which
+            // forbids `Unknown`) and defaults to `NotTrapped` when a
+            // PDF/X validator is active without an explicit caller value.
+            if config.validators().requires_trapping_metadata() || self.trapped.is_some() {
+                let status = resolve_trapping(self.trapped, config.validators()).to_pdf_status();
+                let name = match status {
+                    TrappingStatus::Trapped => Name(b"True"),
+                    TrappingStatus::NotTrapped => Name(b"False"),
+                    TrappingStatus::Unknown => Name(b"Unknown"),
+                };
+                document_info.deref_mut().pair(Name(b"Trapped"), name);
             }
         }
     }
