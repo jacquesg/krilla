@@ -123,6 +123,7 @@ impl Output for TagKind {
             TagKind::Article(_) => write!(f, "Article"),
             TagKind::Section(_) => write!(f, "Section"),
             TagKind::Div(_) => write!(f, "Div"),
+            TagKind::Aside(_) => write!(f, "Aside"),
             TagKind::BlockQuote(_) => write!(f, "BlockQuote"),
             TagKind::Caption(_) => write!(f, "Caption"),
             TagKind::TOC(_) => write!(f, "TOC"),
@@ -158,6 +159,7 @@ impl Output for TagKind {
             TagKind::Title(_) => write!(f, "Title"),
             TagKind::Strong(_) => write!(f, "Strong"),
             TagKind::Em(_) => write!(f, "Em"),
+            TagKind::Sub(_) => write!(f, "Sub"),
         }?;
         writeln!(f)?;
 
