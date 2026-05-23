@@ -31,6 +31,11 @@ pub struct Metadata {
     pub(crate) page_mode: Option<PageMode>,
     pub(crate) viewer_preferences: ViewerPreferences,
     pub(crate) trapped: Option<Trapping>,
+    /// G5b — `/OpenAction` document action (ISO 32000-2 §12.6.4.3).
+    /// `None` (the default) emits no `/OpenAction` slot in the
+    /// catalogue dictionary; PDF readers open the document at the
+    /// first page at their preferred zoom level.
+    pub(crate) open_action: Option<OpenAction>,
     /// Author-supplied verbatim XMP packet. When set, it replaces the
     /// stream payload that krilla would otherwise build via [`XmpWriter`].
     /// See [`Metadata::raw_xmp`].
@@ -196,6 +201,26 @@ impl Metadata {
     /// PDF/X validator is active.
     pub fn trapped(mut self, trapped: Trapping) -> Self {
         self.trapped = Some(trapped);
+        self
+    }
+
+    /// Set the document's `/OpenAction` (ISO 32000-2 §12.6.4.3).
+    ///
+    /// The viewer executes this action when the document is opened.
+    /// Krilla supports the `[<page-ref> <destination>]` direct-link
+    /// form via [`OpenAction::go_to_page_with_zoom`]; this is the only
+    /// form needed for the moegoe G5b PDFreactor parity surface
+    /// (`-bd-initial-page` + `-bd-initial-zoom`). Other forms
+    /// (`/JavaScript`, `/Named`, `/SubmitForm`, etc.) are not exposed.
+    ///
+    /// The 0-indexed page reference is resolved at serialise time
+    /// against the `PageInfo` table; an out-of-range page index is
+    /// not detected here (it would panic during serialisation
+    /// mirroring `XyzDestination::serialize`'s behaviour). Callers
+    /// must clamp into `[0, page_count)` before invoking this
+    /// setter.
+    pub fn open_action(mut self, action: OpenAction) -> Self {
+        self.open_action = Some(action);
         self
     }
 
@@ -589,6 +614,64 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
         second: Some(datetime.second.unwrap_or(0)),
         timezone,
     }
+}
+
+/// `/OpenAction` document action (ISO 32000-2 §12.6.4.3).
+///
+/// Currently only the direct-link `[<page-ref> <destination>]`
+/// form is exposed. Krilla serialises this as a single-line
+/// array entry on the catalogue dictionary; the destination
+/// flavour comes from [`OpenZoom`].
+#[derive(Copy, Clone, Debug)]
+pub struct OpenAction {
+    /// 0-indexed page the viewer should open on. Resolved against
+    /// the document's `PageInfo` table at serialise time; an
+    /// out-of-range index panics in the same way `XyzDestination`
+    /// does.
+    pub(crate) page_index: usize,
+    /// Destination flavour.
+    pub(crate) zoom: OpenZoom,
+}
+
+impl OpenAction {
+    /// Build an `/OpenAction` direct-link entry that opens
+    /// `page_index` (0-indexed) at the given destination flavour.
+    pub fn go_to_page_with_zoom(page_index: usize, zoom: OpenZoom) -> Self {
+        Self { page_index, zoom }
+    }
+}
+
+/// Destination flavour for `/OpenAction` (ISO 32000-2 §12.3.2).
+///
+/// Each variant maps onto one of the eight destination arrays the
+/// PDF spec accepts in this slot:
+/// `Xyz(zoom)` → `[<page> /XYZ null null <zoom>]`;
+/// `FitPage` → `[<page> /Fit]`;
+/// `FitHorizontalToWidth` → `[<page> /FitH null]`;
+/// `FitVerticalToHeight` → `[<page> /FitV null]`;
+/// `FitBoundingBox` → `[<page> /FitB]`;
+/// `FitBoundingBoxHorizontal` → `[<page> /FitBH null]`;
+/// `FitBoundingBoxVertical` → `[<page> /FitBV null]`.
+#[derive(Copy, Clone, Debug)]
+pub enum OpenZoom {
+    /// `/XYZ null null <zoom>` — open at an explicit zoom factor.
+    /// `1.0` = 100 %. Negative or zero values are silently treated
+    /// as "viewer default" by conforming readers, per the spec.
+    Xyz(f32),
+    /// `/Fit` — fit the entire page into the viewer window.
+    FitPage,
+    /// `/FitH null` — fit the page's width to the window; vertical
+    /// position chosen by the viewer.
+    FitHorizontalToWidth,
+    /// `/FitV null` — fit the page's height to the window;
+    /// horizontal position chosen by the viewer.
+    FitVerticalToHeight,
+    /// `/FitB` — fit the page's bounding box into the window.
+    FitBoundingBox,
+    /// `/FitBH null` — fit the bounding-box width to the window.
+    FitBoundingBoxHorizontal,
+    /// `/FitBV null` — fit the bounding-box height to the window.
+    FitBoundingBoxVertical,
 }
 
 /// The main text direction of the document.
