@@ -8,6 +8,7 @@ pub mod image;
 pub mod mask;
 pub mod overprint;
 pub mod paint;
+pub(crate) mod devicen;
 pub(crate) mod separation;
 pub(crate) mod shading_function;
 pub(crate) mod shading_pattern;

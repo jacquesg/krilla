@@ -30,6 +30,7 @@ use pdf_writer::types::OutputIntentSubtype;
 use xmp_writer::pdfa::PdfAExtSchemasWriter;
 use xmp_writer::XmpWriter;
 
+use crate::color::devicen::DeviceNSpace;
 use crate::color::separation::SeparationColorant;
 use crate::color::separation::SeparationSpace;
 use crate::color::RegularColor;
@@ -148,6 +149,13 @@ pub enum ValidationError {
     /// or separation fallback colors when exporting to PDF/X-1a. Grayscale
     /// colors are permitted.
     ContainsRgb(Option<Location>),
+    /// The PDF contains a DeviceN colour space, which is forbidden by
+    /// PDF/A-1 (ISO 19005-1 §6.2.4). PDF/A-2 onward and every PDF/X
+    /// profile admit DeviceN.
+    ///
+    /// Occurs if a DeviceN colour was used in fills, strokes,
+    /// gradients, or shadings when exporting to PDF/A-1a / PDF/A-1b.
+    ContainsDeviceN(Option<Location>),
     /// A gradient's stops are not all in the same color space.
     ///
     /// Occurs if the [`Stop`](crate::paint::Stop)s supplied to a
@@ -837,6 +845,13 @@ impl Archival {
                 ValidationError::EmbeddedFile(EmbedError::MissingDescription, _),
             ) => self == Self::A4,
 
+            // ISO 19005-1 §6.2.4 forbids DeviceN under PDF/A-1; every
+            // subsequent revision (A-2 onward) admits it. Carry this
+            // as a single PDF/A-1-targeted rule before the catch-all
+            // PDF/X-specific bucket below.
+            (Self::A1_A | Self::A1_B, ValidationError::ContainsDeviceN(_)) => true,
+            (_, ValidationError::ContainsDeviceN(_)) => false,
+
             // PDF/X-specific errors: PDF/A is silent on them, so allow.
             (
                 _,
@@ -1459,6 +1474,7 @@ impl Accessibility {
             (
                 _,
                 ValidationError::ContainsRgb(_)
+                | ValidationError::ContainsDeviceN(_)
                 | ValidationError::MissingTrimOrArtBox(_, _)
                 | ValidationError::ContainsAnnotation(_),
             ) => false,
@@ -1660,6 +1676,7 @@ impl Pdfx {
                 | ValidationError::ImageInterpolation(_)
                 | ValidationError::EmbeddedFile(_, _)
                 | ValidationError::MissingTagging
+                | ValidationError::ContainsDeviceN(_)
                 | ValidationError::RequiresNewerPdfVersion(_, _),
             ) => false,
             // PDF/X-1a and PDF/X-3 (PDF 1.4 base) enforce the PDF 1.4 limits.
@@ -1802,6 +1819,20 @@ impl ValidationStore {
         Default::default()
     }
 
+    /// Register a DeviceN colour-space registration. Currently this
+    /// only surfaces the "DeviceN was used at all" signal for PDF/A-1
+    /// validation; future revisions may also enforce per-colorant
+    /// consistency analogous to [`Self::validate_separation`].
+    pub(crate) fn validate_devicen(
+        &mut self,
+        _space: &DeviceNSpace,
+    ) -> Result<(), ValidationError> {
+        // Raise the "contains DeviceN" signal unconditionally; the
+        // profile-level `prohibits` table decides whether it actually
+        // fires (PDF/A-1 forbids; everyone else allows).
+        Err(ValidationError::ContainsDeviceN(None))
+    }
+
     /// Register a colorant and its fallback and raise an error if it already
     /// exists.
     pub(crate) fn validate_separation(
@@ -1822,6 +1853,67 @@ impl ValidationStore {
             Err(ValidationError::InconsistentSeparationFallback(
                 separation.colorant.clone(),
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PDF/A-1 (ISO 19005-1 §6.2.4) prohibits DeviceN; both the
+    /// accessibility-aware and accessibility-blind profiles must
+    /// surface the violation.
+    #[test]
+    fn pdf_a_1_prohibits_devicen() {
+        let err = ValidationError::ContainsDeviceN(None);
+        assert!(Archival::A1_A.prohibits(&err));
+        assert!(Archival::A1_B.prohibits(&err));
+    }
+
+    /// PDF/A-2 onward — and PDF/A-3, PDF/A-4 in every flavour —
+    /// admit DeviceN.
+    #[test]
+    fn pdf_a_2_and_later_admit_devicen() {
+        let err = ValidationError::ContainsDeviceN(None);
+        for profile in [
+            Archival::A2_A,
+            Archival::A2_B,
+            Archival::A2_U,
+            Archival::A3_A,
+            Archival::A3_B,
+            Archival::A3_U,
+            Archival::A4,
+            Archival::A4F,
+            Archival::A4E,
+        ] {
+            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+        }
+    }
+
+    /// Every PDF/X profile admits DeviceN.
+    #[test]
+    fn pdf_x_admits_devicen() {
+        let err = ValidationError::ContainsDeviceN(None);
+        for profile in [
+            Pdfx::X1A,
+            Pdfx::X3,
+            Pdfx::X4,
+            Pdfx::X4P,
+            Pdfx::X6,
+            Pdfx::X6P,
+        ] {
+            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+        }
+    }
+
+    /// PDF/UA / WTPDF (accessibility-only) profiles are silent on
+    /// colour-space choice — DeviceN passes.
+    #[test]
+    fn pdf_ua_admits_devicen() {
+        let err = ValidationError::ContainsDeviceN(None);
+        for profile in [Accessibility::UA1, Accessibility::UA2, Accessibility::WTPDF] {
+            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
         }
     }
 }

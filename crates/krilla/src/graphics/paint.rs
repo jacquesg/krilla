@@ -186,6 +186,12 @@ impl Paint {
             InnerPaint::Color(c) => match c {
                 Color::Regular(c) => c.as_rgb(),
                 Color::Special(SpecialColor::Separation(c)) => c.space.fallback.as_rgb(),
+                // DeviceN can't be projected to a single RGB triple
+                // without applying the full tint transform. Fall back
+                // to the alternate space's projection so glyph paint
+                // paths (which expect device-space RGB bytes) get a
+                // defined answer.
+                Color::Special(SpecialColor::DeviceN(c)) => c.space.alternate.as_rgb(),
             },
             _ => None,
         }

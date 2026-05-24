@@ -174,6 +174,12 @@ impl Hash for RegularColor {
 pub enum SpecialColor {
     /// A separation color.
     Separation(separation::Color),
+    /// A DeviceN (multi-colorant) colour value. See
+    /// [`devicen`] for the surface and [ISO 32000-2 §8.6.6.5] for the
+    /// underlying colour-space construction.
+    ///
+    /// [ISO 32000-2 §8.6.6.5]: https://www.iso.org/standard/75839.html
+    DeviceN(devicen::Color),
 }
 
 impl Color {
@@ -184,6 +190,7 @@ impl Color {
             Color::Regular(RegularColor::Cmyk(cmyk)) => cmyk.to_pdf_color().to_vec(),
             Color::Regular(RegularColor::IccBased { components, .. }) => components.to_vec(),
             Color::Special(SpecialColor::Separation(spot)) => vec![spot.to_pdf_color()],
+            Color::Special(SpecialColor::DeviceN(dn)) => dn.to_pdf_color(),
         }
     }
 
@@ -205,6 +212,10 @@ impl Color {
         match self {
             Color::Regular(c) => c.clone(),
             Color::Special(SpecialColor::Separation(c)) => c.space.fallback.clone(),
+            // DeviceN's alternate process space is the "fallback" we
+            // surface to constructs that can't honour multi-colorant
+            // paints (tag content, annotations).
+            Color::Special(SpecialColor::DeviceN(c)) => c.space.alternate.clone(),
         }
     }
 
@@ -270,6 +281,17 @@ impl Color {
                         .into_color()
                         .project(ColourConversion::ForceRgb)
                 }
+                // Stage A DeviceN projection: fall back to the
+                // alternate process colour. A proper blend over N
+                // tints requires multi-channel arithmetic that Stage A
+                // does not yet wire — the alt-space pass-through is
+                // safe (it matches the `to_regular()` semantics) and
+                // gets refined in Stage C.
+                Color::Special(SpecialColor::DeviceN(c)) => c
+                    .space
+                    .alternate
+                    .into_color()
+                    .project(ColourConversion::ForceRgb),
             },
             ColourConversion::ForceCmyk => match self {
                 Color::Regular(RegularColor::Cmyk(_)) => self,
@@ -285,6 +307,11 @@ impl Color {
                         .into_color()
                         .project(ColourConversion::ForceCmyk)
                 }
+                Color::Special(SpecialColor::DeviceN(c)) => c
+                    .space
+                    .alternate
+                    .into_color()
+                    .project(ColourConversion::ForceCmyk),
             },
             ColourConversion::ForceGrey => match self {
                 Color::Regular(RegularColor::Luma(_)) => self,
@@ -296,6 +323,11 @@ impl Color {
                         .into_color()
                         .project(ColourConversion::ForceGrey)
                 }
+                Color::Special(SpecialColor::DeviceN(c)) => c
+                    .space
+                    .alternate
+                    .into_color()
+                    .project(ColourConversion::ForceGrey),
             },
         }
     }
@@ -518,6 +550,7 @@ impl SpecialColor {
     pub(crate) fn color_space(&self) -> SpecialColorSpace {
         match self {
             Self::Separation(spot) => spot.color_space().into(),
+            Self::DeviceN(dn) => dn.color_space().into(),
         }
     }
 }
@@ -835,6 +868,287 @@ pub mod separation {
     }
 }
 
+/// DeviceN (multi-colorant spot) colour space surface, ISO 32000-2
+/// §8.6.6.5.
+///
+/// A DeviceN colour space lists *N* colorant names alongside an
+/// alternate process colour space and a tint-transform function that
+/// maps the *N* tints onto the alternate space's components. Authoring
+/// flow:
+///
+/// 1. Build a [`TintTransform`] describing how each colorant contributes
+///    to the alternate-space components at full tint.
+/// 2. Build a [`DeviceNSpace`] from the colorant names, the alternate
+///    process colour (its variant fixes the channel count), and the
+///    tint transform.
+/// 3. Paint with a [`Color`] carrying *N* per-channel tints in
+///    `[0.0, 1.0]`.
+///
+/// Stage A exposes only [`TintTransform::Linear`] — a blend in the
+/// alternate space. PDF/A profiles forbid DeviceN that uses a Type 4
+/// (PostScript) tint transform; the writer therefore emits a single
+/// Type 2 exponential function for the `N = 1` case (PDF/A-friendly)
+/// and a Type 4 PostScript calculator for `N > 1` (PDF/X-4 / PDF 2.0
+/// only — the validator flags the PostScript dependency).
+pub mod devicen {
+    use super::RegularColor;
+
+    /// A DeviceN colour value: per-colorant tints in `[0.0, 1.0]`
+    /// against a [`DeviceNSpace`].
+    ///
+    /// `tints.len()` must equal `space.colorants.len()` — the
+    /// constructor enforces this invariant.
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct Color {
+        pub(crate) tints: Vec<f32>,
+        pub(crate) space: DeviceNSpace,
+    }
+
+    impl Eq for Color {}
+
+    impl std::hash::Hash for Color {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            // Hash bit patterns: `f32` has no `Hash`. `+0.0` and
+            // `-0.0` hash differently — acceptable; tints are
+            // normalised cascade inputs.
+            for t in &self.tints {
+                t.to_bits().hash(state);
+            }
+            self.space.hash(state);
+        }
+    }
+
+    impl Color {
+        /// Create a new DeviceN colour value.
+        ///
+        /// Returns `None` if `tints.len() != space.colorants.len()`.
+        /// Callers supply normalised tints in `[0.0, 1.0]`; values
+        /// outside that range are passed through verbatim to the
+        /// content stream (PDF interpreters clamp).
+        pub fn new(tints: Vec<f32>, space: DeviceNSpace) -> Option<Self> {
+            if tints.len() == space.colorants.len() {
+                Some(Self { tints, space })
+            } else {
+                None
+            }
+        }
+
+        pub(crate) fn to_pdf_color(&self) -> Vec<f32> {
+            self.tints.clone()
+        }
+
+        pub(crate) fn color_space(&self) -> DeviceNSpace {
+            self.space.clone()
+        }
+
+        /// Borrow the per-colorant tints.
+        pub fn tints(&self) -> &[f32] {
+            &self.tints
+        }
+
+        /// Borrow the colour space this value paints in.
+        pub fn space(&self) -> &DeviceNSpace {
+            &self.space
+        }
+    }
+
+    impl From<Color> for super::SpecialColor {
+        fn from(val: Color) -> Self {
+            super::SpecialColor::DeviceN(val)
+        }
+    }
+
+    impl From<Color> for super::Color {
+        fn from(val: Color) -> Self {
+            super::SpecialColor::from(val).into()
+        }
+    }
+
+    /// A DeviceN colour space — *N* colorant names plus an alternate
+    /// process colour space plus a tint transform.
+    ///
+    /// The alternate space is carried as a [`RegularColor`] whose
+    /// variant fixes the channel layout: [`RegularColor::Rgb`] yields
+    /// a `/DeviceRGB` alt-space entry, [`RegularColor::Cmyk`] yields
+    /// `/DeviceCMYK`, etc. The actual colour value of `alternate` is
+    /// ignored by the writer — only its variant matters — but the
+    /// type is held verbatim so `Color::to_regular()` returns a
+    /// well-defined fallback for clients that cannot honour multi-
+    /// colorant paints (tag-tree alt-text, annotation colours).
+    ///
+    /// PDF/A-1 forbids DeviceN; PDF/A-2 onward and every PDF/X profile
+    /// admit it. The writer dispatches the validator hook through
+    /// [`crate::configure::ValidationStore::validate_devicen`].
+    #[derive(Debug, Eq, PartialEq, Hash, Clone)]
+    pub struct DeviceNSpace {
+        pub(crate) colorants: Vec<String>,
+        pub(crate) alternate: RegularColor,
+        pub(crate) tint_transform: TintTransform,
+    }
+
+    impl DeviceNSpace {
+        /// Create a new DeviceN colour space.
+        ///
+        /// Returns `None` if `colorants` is empty, the tint transform's
+        /// per-colorant component vector has a different length to
+        /// `colorants`, or any inner per-colorant vector's length
+        /// disagrees with the alternate space's channel count.
+        pub fn new(
+            colorants: Vec<String>,
+            alternate: RegularColor,
+            tint_transform: TintTransform,
+        ) -> Option<Self> {
+            if colorants.is_empty() {
+                return None;
+            }
+            if !tint_transform.matches_arity(colorants.len(), &alternate) {
+                return None;
+            }
+            Some(Self {
+                colorants,
+                alternate,
+                tint_transform,
+            })
+        }
+
+        /// Number of colorants. Written verbatim as the `/N` count in
+        /// the DeviceN colour-space array.
+        pub fn colorant_count(&self) -> usize {
+            self.colorants.len()
+        }
+
+        /// Borrow the colorant-name slice.
+        pub fn colorants(&self) -> &[String] {
+            &self.colorants
+        }
+
+        /// Borrow the alternate-space anchor.
+        pub fn alternate(&self) -> &RegularColor {
+            &self.alternate
+        }
+    }
+
+    impl From<DeviceNSpace> for super::SpecialColorSpace {
+        fn from(value: DeviceNSpace) -> Self {
+            Self::DeviceN(value)
+        }
+    }
+
+    /// Tint-transform function for a [`DeviceNSpace`].
+    ///
+    /// Stage A exposes only [`TintTransform::Linear`]. A second
+    /// variant carrying a raw Type 4 PostScript program will join the
+    /// enum in Stage C of the moegoe wire-through.
+    ///
+    /// `Hash`/`Eq` are implemented manually because the variant carries
+    /// `f32` channel values. The `f32::to_bits` round-trip is hashed
+    /// and compared — `+0.0` and `-0.0` therefore hash to different
+    /// values, which is acceptable: tint-transform inputs come from
+    /// the cascade as normalised `[0.0, 1.0]` values that never carry
+    /// a negative zero in practice.
+    #[derive(Debug, Clone)]
+    pub enum TintTransform {
+        /// Linear blend in the alternate process space.
+        ///
+        /// `per_colorant_components[i]` lists the alternate-space
+        /// channel values produced by colorant `i` at full tint
+        /// (tint = 1.0). Each inner vector must have the same length
+        /// as the alternate space's channel count (3 for RGB / 4 for
+        /// CMYK / 1 for Luma / 3 for ICC-based wide gamut). The
+        /// blend at output channel `m` is
+        ///   out[m] = Σᵢ tintᵢ * per_colorant_components[i][m]
+        /// emitted as a single Type 2 exponential function when `N
+        /// == 1` (PDF/A-friendly) and as a Type 4 PostScript
+        /// calculator otherwise (PDF/X-4 / PDF 2.0 only).
+        Linear {
+            /// Outer-vector length equals the colorant count; each
+            /// inner vector lists that colorant's contribution to the
+            /// alternate space at full tint.
+            per_colorant_components: Vec<Vec<f32>>,
+        },
+    }
+
+    impl PartialEq for TintTransform {
+        fn eq(&self, other: &Self) -> bool {
+            match (self, other) {
+                (
+                    Self::Linear {
+                        per_colorant_components: a,
+                    },
+                    Self::Linear {
+                        per_colorant_components: b,
+                    },
+                ) => {
+                    if a.len() != b.len() {
+                        return false;
+                    }
+                    a.iter().zip(b.iter()).all(|(av, bv)| {
+                        av.len() == bv.len()
+                            && av
+                                .iter()
+                                .zip(bv.iter())
+                                .all(|(x, y)| x.to_bits() == y.to_bits())
+                    })
+                }
+            }
+        }
+    }
+
+    impl Eq for TintTransform {}
+
+    impl std::hash::Hash for TintTransform {
+        fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+            std::mem::discriminant(self).hash(state);
+            match self {
+                Self::Linear {
+                    per_colorant_components,
+                } => {
+                    for inner in per_colorant_components {
+                        inner.len().hash(state);
+                        for v in inner {
+                            v.to_bits().hash(state);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    impl TintTransform {
+        /// Verify that the tint transform's per-colorant data agrees
+        /// with both the colorant count and the alternate-space
+        /// channel count.
+        pub(crate) fn matches_arity(
+            &self,
+            colorant_count: usize,
+            alternate: &RegularColor,
+        ) -> bool {
+            let alt_channels = alternate_channel_count(alternate);
+            match self {
+                TintTransform::Linear {
+                    per_colorant_components,
+                } => {
+                    per_colorant_components.len() == colorant_count
+                        && per_colorant_components
+                            .iter()
+                            .all(|v| v.len() == alt_channels)
+                }
+            }
+        }
+    }
+
+    /// Number of components an alternate [`RegularColor`] contributes
+    /// to the DeviceN tint transform's range.
+    pub(crate) fn alternate_channel_count(alternate: &RegularColor) -> usize {
+        match alternate {
+            RegularColor::Rgb(_) => 3,
+            RegularColor::Cmyk(_) => 4,
+            RegularColor::Luma(_) => 1,
+            RegularColor::IccBased { .. } => 3,
+        }
+    }
+}
+
 /// Colour-conversion policy applied to every fill, stroke, and glyph
 /// paint before content-stream emission.
 ///
@@ -959,6 +1273,9 @@ impl From<CieBasedColorSpace> for RegularColorSpace {
 pub(crate) enum SpecialColorSpace {
     /// A Separation color space with its colorant and fallback.
     Separation(separation::SeparationSpace),
+    /// A DeviceN colour space (ISO 32000-2 §8.6.6.5) with its
+    /// colorant list, alternate process space, and tint transform.
+    DeviceN(devicen::DeviceNSpace),
 }
 
 impl From<SpecialColorSpace> for ColorSpace {
@@ -1151,5 +1468,174 @@ mod tests {
     #[test]
     fn colour_conversion_default_is_auto() {
         assert_eq!(ColourConversion::default(), ColourConversion::Auto);
+    }
+
+    // --- DeviceN constructor invariants -----------------------------
+
+    #[test]
+    fn devicen_constructs_two_colorant_cmyk_alt() {
+        let space = devicen::DeviceNSpace::new(
+            vec!["PANTONE 185 C".to_string(), "PANTONE 286 C".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![
+                    vec![0.0, 1.0, 1.0, 0.0],
+                    vec![1.0, 1.0, 0.0, 0.0],
+                ],
+            },
+        );
+        assert!(space.is_some());
+        assert_eq!(space.unwrap().colorant_count(), 2);
+    }
+
+    #[test]
+    fn devicen_three_colorant_rgb_alt_n_equals_three() {
+        let space = devicen::DeviceNSpace::new(
+            vec![
+                "Spot1".to_string(),
+                "Spot2".to_string(),
+                "Spot3".to_string(),
+            ],
+            rgb::Color::new(0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![
+                    vec![1.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0],
+                    vec![0.0, 0.0, 1.0],
+                ],
+            },
+        )
+        .expect("three-colorant space should construct");
+        assert_eq!(space.colorant_count(), 3);
+        assert_eq!(space.colorants(), &["Spot1", "Spot2", "Spot3"]);
+    }
+
+    #[test]
+    fn devicen_rejects_empty_colorants() {
+        let space = devicen::DeviceNSpace::new(
+            vec![],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![],
+            },
+        );
+        assert!(space.is_none());
+    }
+
+    #[test]
+    fn devicen_rejects_colorant_arity_mismatch() {
+        // Two names but one per-colorant component vector.
+        let space = devicen::DeviceNSpace::new(
+            vec!["A".to_string(), "B".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0, 0.0]],
+            },
+        );
+        assert!(space.is_none());
+    }
+
+    #[test]
+    fn devicen_rejects_alt_channel_mismatch() {
+        // Alt is CMYK (4 channels) but inner data has 3 components.
+        let space = devicen::DeviceNSpace::new(
+            vec!["A".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0]],
+            },
+        );
+        assert!(space.is_none());
+    }
+
+    #[test]
+    fn devicen_color_arity_must_match_space() {
+        let space = devicen::DeviceNSpace::new(
+            vec!["A".to_string(), "B".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0, 0.0],
+                ],
+            },
+        )
+        .expect("space should construct");
+        assert!(devicen::Color::new(vec![0.5, 0.25], space.clone()).is_some());
+        assert!(devicen::Color::new(vec![0.5], space.clone()).is_none());
+        assert!(devicen::Color::new(vec![0.5, 0.25, 0.1], space).is_none());
+    }
+
+    // --- DeviceN integrates with the `Color` / `SpecialColor` chain --
+
+    #[test]
+    fn devicen_color_lifts_through_special_into_color() {
+        let space = devicen::DeviceNSpace::new(
+            vec!["Spot".to_string()],
+            rgb::Color::new(255, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0]],
+            },
+        )
+        .unwrap();
+        let dn = devicen::Color::new(vec![0.5], space).unwrap();
+        let lifted: Color = dn.clone().into();
+        assert_eq!(lifted, Color::Special(SpecialColor::DeviceN(dn)));
+    }
+
+    #[test]
+    fn devicen_to_pdf_color_returns_all_tints() {
+        let space = devicen::DeviceNSpace::new(
+            vec!["A".to_string(), "B".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![
+                    vec![1.0, 0.0, 0.0, 0.0],
+                    vec![0.0, 1.0, 0.0, 0.0],
+                ],
+            },
+        )
+        .unwrap();
+        let dn: Color = devicen::Color::new(vec![0.25, 0.75], space)
+            .unwrap()
+            .into();
+        let components = dn.to_pdf_color();
+        assert_eq!(components.len(), 2);
+        assert!((components[0] - 0.25).abs() < f32::EPSILON);
+        assert!((components[1] - 0.75).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn force_rgb_from_devicen_projects_alt_space() {
+        // Alt is pure red; ForceRgb should pass through the alt's
+        // ForceRgb projection (which keeps RGB unchanged).
+        let space = devicen::DeviceNSpace::new(
+            vec!["Spot".to_string()],
+            rgb::Color::new(255, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0]],
+            },
+        )
+        .unwrap();
+        let c: Color = devicen::Color::new(vec![0.5], space).unwrap().into();
+        let projected = c.project(ColourConversion::ForceRgb);
+        let Color::Regular(RegularColor::Rgb(out)) = projected else {
+            panic!("expected RGB projection, got {projected:?}");
+        };
+        assert_eq!(out, rgb::Color::new(255, 0, 0));
+    }
+
+    #[test]
+    fn force_spot_passes_through_devicen() {
+        let space = devicen::DeviceNSpace::new(
+            vec!["Spot".to_string()],
+            cmyk::Color::new(0, 0, 0, 0).into(),
+            devicen::TintTransform::Linear {
+                per_colorant_components: vec![vec![0.0, 1.0, 0.0, 0.0]],
+            },
+        )
+        .unwrap();
+        let c: Color = devicen::Color::new(vec![0.5], space).unwrap().into();
+        assert_eq!(c.clone().project(ColourConversion::ForceSpot), c);
     }
 }
