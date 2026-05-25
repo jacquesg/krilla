@@ -40,6 +40,38 @@ pub struct Metadata {
     /// stream payload that krilla would otherwise build via [`XmpWriter`].
     /// See [`Metadata::raw_xmp`].
     pub(crate) raw_xmp: Option<Vec<u8>>,
+    /// G64 — document-level JavaScript entries written into the
+    /// catalogue's `/Names /JavaScript` name tree (ISO 32000-2
+    /// §12.6.4.16). Each entry is `(name, source)`; the name must be
+    /// unique in the tree, and the source is registered verbatim as
+    /// a `/S /JavaScript` action dictionary. Order is preserved at
+    /// the API boundary; the writer sorts the name tree
+    /// alphabetically as required by ISO 32000-1 §7.9.6.
+    pub(crate) document_javascripts: Vec<(String, String)>,
+    /// G64 — JavaScript actions attached to the document catalogue's
+    /// `/AA` additional-actions dictionary (ISO 32000-2 §12.6.3
+    /// Table 200). One entry per event key; `set_document_event_script`
+    /// overwrites a duplicate event.
+    pub(crate) document_event_scripts: Vec<(DocumentEvent, String)>,
+}
+
+/// PDF catalogue-level additional-action event keys (ISO 32000-2
+/// §12.6.3 Table 200).
+///
+/// The discriminant matches the PDF event name and the rendered
+/// dictionary key (`/WC`, `/WS`, `/DS`, `/WP`, `/DP`).
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub enum DocumentEvent {
+    /// `/WC` — fires before the document is closed.
+    WillClose,
+    /// `/WS` — fires before the document is saved.
+    WillSave,
+    /// `/DS` — fires after the document is saved.
+    DidSave,
+    /// `/WP` — fires before the document is printed.
+    WillPrint,
+    /// `/DP` — fires after the document is printed.
+    DidPrint,
 }
 
 /// Trapping status for a PDF document.
@@ -244,6 +276,52 @@ impl Metadata {
     /// [`XmpWriter`]: xmp_writer::XmpWriter
     pub fn raw_xmp(mut self, bytes: Vec<u8>) -> Self {
         self.raw_xmp = Some(bytes);
+        self
+    }
+
+    /// Register a document-level JavaScript action under `name` in the
+    /// catalogue's `/Names /JavaScript` name tree (ISO 32000-2
+    /// §12.6.4.16).
+    ///
+    /// The `source` string is written verbatim into the action
+    /// dictionary's `/JS` entry as a `TextStr` — no escaping or
+    /// sanitisation is applied. Authors building executable AcroForm
+    /// or document-level scripts are responsible for emitting
+    /// well-formed JavaScript.
+    ///
+    /// Names must be unique within the tree; a duplicate name from
+    /// the same metadata builder silently overwrites the earlier
+    /// entry to keep the surface idempotent.
+    pub fn document_javascript(
+        mut self,
+        name: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let source = source.into();
+        self.document_javascripts.retain(|(existing, _)| existing != &name);
+        self.document_javascripts.push((name, source));
+        self
+    }
+
+    /// Attach a JavaScript action to a catalogue-level additional
+    /// action event (ISO 32000-2 §12.6.3 Table 200).
+    ///
+    /// `/WC` (Will Close), `/WS` (Will Save), `/DS` (Did Save),
+    /// `/WP` (Will Print), `/DP` (Did Print).
+    ///
+    /// At most one script can be attached per event; calling this
+    /// setter again with the same event overwrites the earlier
+    /// script. The `source` is byte-passthrough — see
+    /// [`Metadata::document_javascript`] for the escaping contract.
+    pub fn document_event_script(
+        mut self,
+        event: DocumentEvent,
+        source: impl Into<String>,
+    ) -> Self {
+        let source = source.into();
+        self.document_event_scripts.retain(|(existing, _)| *existing != event);
+        self.document_event_scripts.push((event, source));
         self
     }
 
