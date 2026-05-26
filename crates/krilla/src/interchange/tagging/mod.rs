@@ -987,6 +987,38 @@ impl TagGroup {
         }
         table_attributes.finish();
 
+        // Lazily initialise the `/PrintField` attribute owner so an
+        // empty array is never emitted. PDF 1.6+ per ISO 32000-2
+        // §14.7.4.4 Table 359 ("PrintField" attribute owner) —
+        // exposes accessibility metadata for non-interactive form
+        // controls so PDF/UA-1 (§7.18) / PDF/UA-2 (§8.13) consumers
+        // announce role, checked-state, and accessible name.
+        let pdf2 = pdf_version >= PdfVersion::Pdf20;
+        let mut form_attributes = LazyCell::new(|| attributes.push().field());
+        for attr in tag.attrs.iter() {
+            let Attr::Form(attr) = attr else {
+                continue;
+            };
+            match attr {
+                FormAttr::Role(role) => {
+                    if pdf_version >= PdfVersion::Pdf16 {
+                        form_attributes.role(role.to_pdf());
+                    }
+                }
+                FormAttr::Checked(state) => {
+                    if pdf_version >= PdfVersion::Pdf16 {
+                        form_attributes.checked(state.to_pdf(), pdf2);
+                    }
+                }
+                FormAttr::Name(name) => {
+                    if pdf_version >= PdfVersion::Pdf16 {
+                        form_attributes.description(TextStr(name));
+                    }
+                }
+            }
+        }
+        form_attributes.finish();
+
         // Lazily initialize the list attributes to avoid an empty array.
         let mut layout_attributes = LazyCell::new(|| attributes.push().layout());
         for attr in tag.attrs.iter() {
