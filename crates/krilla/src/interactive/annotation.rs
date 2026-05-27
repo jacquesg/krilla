@@ -501,6 +501,22 @@ impl Annotation {
         }
     }
 
+    /// Create a new rubber-stamp annotation per ISO 32000-2 §12.5.6.13.
+    ///
+    /// Stamp annotations display a predefined or author-defined stamp
+    /// glyph (Approved, Confidential, Draft, …) over the annotation
+    /// rectangle. The alt text may be required by certain export
+    /// profiles (e.g. PDF/UA). See [`StampAnnotation`] for the
+    /// available fields.
+    pub fn new_stamp(annotation: StampAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Stamp(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
@@ -575,6 +591,17 @@ impl From<FileAttachmentAnnotation> for Annotation {
     fn from(value: FileAttachmentAnnotation) -> Self {
         Self {
             annotation_type: AnnotationType::FileAttachment(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<StampAnnotation> for Annotation {
+    fn from(value: StampAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Stamp(value),
             alt: None,
             struct_parent: None,
             location: None,
@@ -886,6 +913,8 @@ pub enum AnnotationType {
     Widget(WidgetAnnotation),
     /// A file-attachment annotation (ISO 32000-2 §12.5.6.15).
     FileAttachment(FileAttachmentAnnotation),
+    /// A rubber-stamp annotation (ISO 32000-2 §12.5.6.13).
+    Stamp(StampAnnotation),
 }
 
 impl AnnotationType {
@@ -904,6 +933,7 @@ impl AnnotationType {
                 w.serialize_type(sc, annotation, page_height, widget_icon_refs)
             }
             AnnotationType::FileAttachment(f) => f.serialize_type(sc, annotation, page_height),
+            AnnotationType::Stamp(s) => s.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -1782,6 +1812,225 @@ impl FileAttachmentAnnotation {
             self.creation_date.as_deref(),
             self.modification_date.as_deref(),
         );
+
+        Ok(None)
+    }
+}
+
+/// `/Name` (icon) keyword on a [`StampAnnotation`] per ISO 32000-2
+/// §12.5.6.13 Table 184. The keyword selects one of the predefined
+/// rubber-stamp glyphs every conforming PDF reader provides
+/// (Approved, Confidential, Draft, Final, …) or, via [`Self::Custom`],
+/// an author-defined name string for an embedder-supplied stamp
+/// appearance.
+///
+/// The default ([`Self::Draft`]) matches the spec's "no explicit
+/// `/Name` shall default to Draft" behaviour for stamp annotations.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub enum StampIcon {
+    /// `/Approved` — green checkmark.
+    Approved,
+    /// `/AsIs` — slanted "AS IS" label.
+    AsIs,
+    /// `/Confidential` — red "CONFIDENTIAL" label.
+    Confidential,
+    /// `/Departmental` — blue "DEPARTMENTAL" label.
+    Departmental,
+    /// `/Draft` — red "DRAFT" label. Default per ISO 32000-2 §12.5.6.13.
+    #[default]
+    Draft,
+    /// `/Experimental` — blue "EXPERIMENTAL" label.
+    Experimental,
+    /// `/Expired` — red "EXPIRED" label.
+    Expired,
+    /// `/Final` — green "FINAL" label.
+    Final,
+    /// `/ForComment` — green "FOR COMMENT" label.
+    ForComment,
+    /// `/ForPublicRelease` — green "FOR PUBLIC RELEASE" label.
+    ForPublicRelease,
+    /// `/NotApproved` — red "NOT APPROVED" label.
+    NotApproved,
+    /// `/NotForPublicRelease` — red "NOT FOR PUBLIC RELEASE" label.
+    NotForPublicRelease,
+    /// `/Sold` — blue "SOLD" label.
+    Sold,
+    /// `/TopSecret` — red "TOP SECRET" label.
+    TopSecret,
+    /// Author-defined name. The string is emitted verbatim as the
+    /// `/Name` value; the embedder is responsible for accompanying it
+    /// with an `/AP` appearance stream so viewers without a built-in
+    /// rendering for the name still display the stamp.
+    Custom(String),
+}
+
+impl StampIcon {
+    /// Project onto the bytes the `/Name` entry will carry. Returns a
+    /// borrowed slice that lives as long as `self` so the caller can
+    /// forward it into a `pdf_writer::Name`.
+    pub fn as_pdf_name(&self) -> &[u8] {
+        match self {
+            Self::Approved => b"Approved",
+            Self::AsIs => b"AsIs",
+            Self::Confidential => b"Confidential",
+            Self::Departmental => b"Departmental",
+            Self::Draft => b"Draft",
+            Self::Experimental => b"Experimental",
+            Self::Expired => b"Expired",
+            Self::Final => b"Final",
+            Self::ForComment => b"ForComment",
+            Self::ForPublicRelease => b"ForPublicRelease",
+            Self::NotApproved => b"NotApproved",
+            Self::NotForPublicRelease => b"NotForPublicRelease",
+            Self::Sold => b"Sold",
+            Self::TopSecret => b"TopSecret",
+            Self::Custom(name) => name.as_bytes(),
+        }
+    }
+}
+
+/// A rubber-stamp annotation per ISO 32000-2 §12.5.6.13.
+///
+/// Stamp annotations display a predefined or author-defined rubber-
+/// stamp glyph over the annotation rectangle. Conforming PDF readers
+/// supply a built-in appearance for every standard `/Name` keyword
+/// (Approved, Draft, Confidential, …); for [`StampIcon::Custom`]
+/// names the embedder is expected to also supply an `/AP` appearance
+/// stream — krilla does not synthesise one.
+///
+/// Build with [`StampAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_stamp`]
+/// or [`From<StampAnnotation>`].
+pub struct StampAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) icon: StampIcon,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) subject: Option<String>,
+    /// `/IT` (intent) entry per ISO 32000-2 §12.5.6.2. Stamp
+    /// annotations admit `/StampImage` and `/StampSnapshot` intents;
+    /// the embedder may also pass an author-defined intent string.
+    pub(crate) intent: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl StampAnnotation {
+    /// Create a new stamp annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; krilla applies the
+    /// same page-root transform as the other annotation kinds. `icon`
+    /// selects the predefined or author-defined stamp glyph.
+    pub fn new(rect: Rect, icon: StampIcon) -> Self {
+        Self {
+            rect,
+            icon,
+            contents: None,
+            title: None,
+            subject: None,
+            intent: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the stamp pop-up. Used
+    /// by assistive technology as the alternate description for a
+    /// custom stamp without an `/AP` appearance.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the stamp pop-up.
+    /// Typically the author's name.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the stamp subject line per ISO 32000-2
+    /// §12.5.6.4 Table 169 (the field is shared across markup-style
+    /// annotations including stamps). PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the `/IT` (intent) entry per ISO 32000-2 §12.5.6.2 Table
+    /// 168. The two spec-defined values are `/StampImage` (the stamp
+    /// renders an image annotation glyph) and `/StampSnapshot` (the
+    /// stamp captures a snapshot of underlying page content); custom
+    /// names are admitted but only round-trip through readers that
+    /// recognise them. The string is emitted verbatim as a PDF name.
+    pub fn with_intent(mut self, intent: impl Into<String>) -> Self {
+        self.intent = Some(intent.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2 §7.9.4
+    /// (e.g. `D:20260515120000Z`). The caller is responsible for
+    /// constructing a syntactically valid date string; krilla emits
+    /// the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last modified,
+    /// formatted as a PDF date string per ISO 32000-2 §7.9.4. The
+    /// caller is responsible for constructing a syntactically valid
+    /// date string; krilla emits the value verbatim as a literal
+    /// string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // `/Subtype /Stamp` per ISO 32000-2 §12.5.6.13. The
+        // pdf-writer crate's typed AnnotationType enum doesn't yet
+        // model Stamp, so write the name directly via the dict
+        // surface.
+        annotation.pair(Name(b"Subtype"), Name(b"Stamp"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        // `/Name` (icon) — the keyword selects the predefined stamp
+        // glyph; custom names rely on an embedder-supplied `/AP`
+        // stream.
+        annotation.pair(Name(b"Name"), Name(self.icon.as_pdf_name()));
+
+        if let Some(intent) = &self.intent {
+            annotation.pair(Name(b"IT"), Name(intent.as_bytes()));
+        }
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
 
         Ok(None)
     }
@@ -3692,6 +3941,72 @@ mod tests {
         let markup = MarkupAnnotation::new(MarkupSubtype::Underline, vec![quad]);
         let annotation: Annotation = markup.into();
         assert!(matches!(annotation.annotation_type, AnnotationType::Markup(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn stamp_annotation_emits_subtype_and_predefined_icon_name() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 60.0, 24.0).unwrap(),
+            StampIcon::Confidential,
+        )
+        .with_contents("classified")
+        .with_title("reviewer")
+        .with_subject("confidential");
+
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("confidential".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Stamp"), "missing /Subtype /Stamp");
+        assert!(
+            contains(&pdf, b"/Name /Confidential"),
+            "missing /Name /Confidential"
+        );
+        assert!(contains(&pdf, b"(reviewer)"), "missing /T author");
+        assert!(contains(&pdf, b"(confidential)"), "missing /Subj");
+    }
+
+    #[test]
+    fn stamp_annotation_default_icon_is_draft() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::default(),
+        );
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
+        assert!(contains(&pdf, b"/Name /Draft"), "default icon should be Draft");
+    }
+
+    #[test]
+    fn stamp_annotation_custom_icon_emits_author_defined_name() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Custom("MyHouseStamp".into()),
+        );
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("house stamp".into())));
+        assert!(
+            contains(&pdf, b"/Name /MyHouseStamp"),
+            "custom icon name should round-trip"
+        );
+    }
+
+    #[test]
+    fn stamp_annotation_with_intent_emits_it_entry() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Final,
+        )
+        .with_intent("StampImage");
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
+        assert!(contains(&pdf, b"/IT /StampImage"), "missing /IT entry");
+    }
+
+    #[test]
+    fn stamp_annotation_from_trait_wraps_without_alt() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Approved,
+        );
+        let annotation: Annotation = stamp.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Stamp(_)));
         assert!(annotation.alt.is_none());
     }
 
