@@ -303,11 +303,20 @@ pub(crate) fn patch_signature(
     }
     // Locate the `/Contents` literal-string placeholder. pdf-writer's
     // ASCII `Str` path writes `(0000…0000)` with N zeros (where N
-    // is `placeholder_size_bytes * 2`). We scan for `/Contents`
-    // followed by an opening `(`.
-    let contents_key_pos = find_subsequence(&buffer, b"/Contents").ok_or_else(|| {
-        KrillaError::DigitalSignature("/Contents key not found in PDF buffer".into())
-    })?;
+    // is `placeholder_size_bytes * 2`). The sig dict's `/Contents`
+    // appears AFTER `/ByteRange` within the same `/Sig` indirect
+    // object; we restrict the search to bytes after the byte-range
+    // array so a page's `/Contents <ref>` (which appears earlier in
+    // the PDF) does not steal the match.
+    let search_start = cursor;
+    let contents_key_rel =
+        find_subsequence(&buffer[search_start..], b"/Contents").ok_or_else(|| {
+            KrillaError::DigitalSignature(
+                "/Contents key not found after /ByteRange — signature dict missing or malformed"
+                    .into(),
+            )
+        })?;
+    let contents_key_pos = search_start + contents_key_rel;
     let contents_open = skip_whitespace_to(
         &buffer,
         contents_key_pos + b"/Contents".len(),
