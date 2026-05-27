@@ -59,6 +59,19 @@ impl PdfDocument {
         Self(Arc::new(Prehashed::new(PdfDocumentRepr(pdf))))
     }
 
+    /// Number of pages in the embedded PDF document.
+    ///
+    /// Use this to drive [`Document::embed_pdf_pages`] when the caller
+    /// wants to embed every page of a foreign PDF without first parsing
+    /// the byte stream out-of-band. Returns `0` for PDFs with an empty
+    /// page tree (which is technically allowed by ISO 32000-2 §7.7.3
+    /// but rare in practice).
+    ///
+    /// [`Document::embed_pdf_pages`]: crate::Document::embed_pdf_pages
+    pub fn page_count(&self) -> usize {
+        self.0.deref().0.pages().len()
+    }
+
     pub(crate) fn pdf(&self) -> &Pdf {
         &self.0.deref().0
     }
