@@ -240,19 +240,46 @@ impl ColrBuilder {
 }
 
 impl ColrBuilder {
+    /// Resolve a per-glyph CPAL palette index into an RGBA colour.
+    ///
+    /// Per OpenType `CPAL` §5.7.11.1 the color-records array is a
+    /// flat sequence of `num_palettes * num_palette_entries` colour
+    /// records: palette `p` occupies the slice `[p *
+    /// num_palette_entries .. (p + 1) * num_palette_entries]`. krilla
+    /// computes the palette base from [`Font::palette_base`] —
+    /// embedders authoring a non-default `font-palette` construct a
+    /// distinct [`Font`] instance per palette so the per-draw-call
+    /// surface remains palette-free.
+    ///
+    /// Out-of-range palette selections fall back to palette `0` so a
+    /// misconfigured cascade still produces visible glyphs instead of
+    /// silently dropping the glyph; `palette_index == u16::MAX`
+    /// continues to resolve to the [`Self::context_color`] foreground.
     fn palette_index_to_color(
         &self,
         palette_index: u16,
         alpha: f32,
     ) -> Option<(rgb::Color, NormalizedF32)> {
         if palette_index != u16::MAX {
-            let color = self
-                .font
-                .font_ref()
-                .cpal()
-                .ok()?
-                .color_records_array()?
-                .ok()?[palette_index as usize];
+            let cpal = self.font.font_ref().cpal().ok()?;
+            let records = cpal.color_records_array()?.ok()?;
+            let num_palette_entries = usize::from(cpal.num_palette_entries());
+
+            // Compute the absolute index into the flat colour-records
+            // array. The palette base is clamped to palette `0` when
+            // the embedder selected an out-of-range palette so the
+            // glyph still draws with a defined colour.
+            let palette_base = if num_palette_entries == 0 {
+                0
+            } else {
+                let palette_count = records.len() / num_palette_entries;
+                let raw_base = usize::from(self.font.palette_base());
+                if raw_base < palette_count { raw_base } else { 0 }
+            };
+            let absolute_index = palette_base
+                .saturating_mul(num_palette_entries)
+                .saturating_add(usize::from(palette_index));
+            let color = records.get(absolute_index)?;
 
             Some((
                 rgb::Color::new(color.red, color.green, color.blue),
