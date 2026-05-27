@@ -156,6 +156,8 @@ pub use pdf_writer::types::StructRole;
 
 pub mod fmt;
 mod tag;
+#[cfg(test)]
+mod test_form;
 
 /// An artifact that should not be part of the accessible structure.
 #[derive(Copy, Clone, Debug, PartialEq, Default)]
