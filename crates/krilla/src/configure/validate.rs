@@ -1622,6 +1622,50 @@ pub enum Pdfx {
     /// - All requirements of PDF/X-4.
     /// - The `external_output_profile` setting must be provided.
     X4P,
+    /// The validator for the PDF/X-5g standard (ISO 15930-7).
+    ///
+    /// PDF/X-5g is the OPI (Open Prepress Interface) graphical-content
+    /// variant of PDF/X-4: graphical content may be referenced
+    /// externally via OPI links instead of being embedded directly. In
+    /// every other respect — colour-managed output, embedded output
+    /// intent, transparency allowed, PDF 1.6 base — the requirements
+    /// mirror PDF/X-4.
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile must be provided via the
+    ///   `cmyk_profile` setting for the embedded PDF/X output intent.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    X5g,
+    /// The validator for the PDF/X-5pg standard (ISO 15930-7).
+    ///
+    /// PDF/X-5pg is the partial-graphics OPI variant: like PDF/X-5g,
+    /// but the output intent ICC profile is referenced externally
+    /// instead of being embedded. PDF/X-5pg keeps the same colour and
+    /// trim/art-box requirements as PDF/X-4p; OPI-referenced graphics
+    /// are exchanged out-of-band alongside the PDF.
+    ///
+    /// **Requirements**:
+    /// - All requirements of PDF/X-5g.
+    /// - The `external_output_profile` setting must be provided.
+    X5pg,
+    /// The validator for the PDF/X-5n standard (ISO 15930-8).
+    ///
+    /// PDF/X-5n is the n-colorant variant. It admits an n-colorant
+    /// output intent ICC profile (DeviceN-class output devices —
+    /// hexachrome, seven-colour gamut presses, etc.) so a print
+    /// pipeline targeting a non-CMYK colorant set can declare its
+    /// output intent without coercing to four-colour process. Other
+    /// requirements mirror PDF/X-4: PDF 1.6 base, every page carries
+    /// a TrimBox or ArtBox, transparency permitted.
+    ///
+    /// **Requirements**:
+    /// - A printer/output ICC profile (n-colorant) must be provided via
+    ///   the `cmyk_profile` setting for the embedded PDF/X output
+    ///   intent.
+    /// - Every page must have a TrimBox or ArtBox set.
+    /// - A creation date must be set via metadata.
+    X5n,
     /// The validator for the PDF/X-6 standard (ISO 15930-9).
     ///
     /// Based on PDF 2.0.
@@ -1690,9 +1734,16 @@ impl Pdfx {
                 | ValidationError::ContainsPostScript(_),
             ) => true,
             // PDF/X-4 onward (PDF 1.6+) lifts the PDF 1.4 caps and permits
-            // PostScript-calculator functions.
+            // PostScript-calculator functions. The PDF/X-5 family is
+            // also based on PDF 1.6 so it joins the relaxed cohort.
             (
-                Self::X4 | Self::X4P | Self::X6 | Self::X6P,
+                Self::X4
+                | Self::X4P
+                | Self::X5g
+                | Self::X5pg
+                | Self::X5n
+                | Self::X6
+                | Self::X6P,
                 ValidationError::TooLongString
                 | ValidationError::TooLongName
                 | ValidationError::TooLongArray
@@ -1742,8 +1793,12 @@ impl Pdfx {
 
     /// Whether this PDF/X profile requires the caller to supply an
     /// `external_output_profile`.
+    ///
+    /// PDF/X-4p (ISO 15930-7), PDF/X-5pg (ISO 15930-7 partial-graphics
+    /// OPI variant) and PDF/X-6p (ISO 15930-9) all reference the
+    /// output-intent ICC profile externally rather than embedding it.
     pub(crate) fn requires_external_output_profile(self) -> bool {
-        matches!(self, Self::X4P | Self::X6P)
+        matches!(self, Self::X4P | Self::X5pg | Self::X6P)
     }
 
     /// Whether this PDF/X profile forbids RGB content (X-1a only).
@@ -1769,6 +1824,12 @@ impl Pdfx {
             Self::X3 => "PDF/X-3:2003",
             Self::X4 => "PDF/X-4",
             Self::X4P => "PDF/X-4p",
+            // ISO 15930-7 (PDF/X-5g, PDF/X-5pg) and ISO 15930-8
+            // (PDF/X-5n) share the GTS_PDFXVersion lineage but
+            // distinguish themselves via the PDF/X-5 suffix variants.
+            Self::X5g => "PDF/X-5g",
+            Self::X5pg => "PDF/X-5pg",
+            Self::X5n => "PDF/X-5n",
             Self::X6 => "PDF/X-6",
             Self::X6P => "PDF/X-6p",
         })
@@ -1781,6 +1842,9 @@ impl Pdfx {
             Self::X3 => "PDF/X-3",
             Self::X4 => "PDF/X-4",
             Self::X4P => "PDF/X-4p",
+            Self::X5g => "PDF/X-5g",
+            Self::X5pg => "PDF/X-5pg",
+            Self::X5n => "PDF/X-5n",
             Self::X6 => "PDF/X-6",
             Self::X6P => "PDF/X-6p",
         }
@@ -1790,7 +1854,11 @@ impl Pdfx {
     pub const fn min(self) -> Option<PdfVersion> {
         match self {
             Self::X1A | Self::X3 => Some(PdfVersion::Pdf14),
-            Self::X4 | Self::X4P => Some(PdfVersion::Pdf16),
+            // PDF/X-4 / X-4p / X-5g / X-5pg / X-5n are all based on
+            // PDF 1.6; ISO 15930-7 and ISO 15930-8 share that base.
+            Self::X4 | Self::X4P | Self::X5g | Self::X5pg | Self::X5n => {
+                Some(PdfVersion::Pdf16)
+            }
             Self::X6 | Self::X6P => Some(PdfVersion::Pdf20),
         }
     }
@@ -1799,7 +1867,7 @@ impl Pdfx {
     pub const fn max(self) -> PdfVersion {
         match self {
             Self::X1A | Self::X3 => PdfVersion::Pdf14,
-            Self::X4 | Self::X4P => PdfVersion::Pdf16,
+            Self::X4 | Self::X4P | Self::X5g | Self::X5pg | Self::X5n => PdfVersion::Pdf16,
             Self::X6 | Self::X6P => PdfVersion::Pdf20,
         }
     }
@@ -1900,10 +1968,33 @@ mod tests {
             Pdfx::X3,
             Pdfx::X4,
             Pdfx::X4P,
+            Pdfx::X5g,
+            Pdfx::X5pg,
+            Pdfx::X5n,
             Pdfx::X6,
             Pdfx::X6P,
         ] {
             assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+        }
+    }
+
+    /// PDF/X-5pg (ISO 15930-7 partial-graphics OPI variant) joins
+    /// PDF/X-4p and PDF/X-6p as the profiles that reference the
+    /// output-intent ICC profile externally. PDF/X-5g and PDF/X-5n
+    /// embed it like PDF/X-4 / X-6 do.
+    #[test]
+    fn pdf_x_5pg_requires_external_output_profile() {
+        assert!(Pdfx::X5pg.requires_external_output_profile());
+        assert!(!Pdfx::X5g.requires_external_output_profile());
+        assert!(!Pdfx::X5n.requires_external_output_profile());
+    }
+
+    /// PDF/X-5 family is PDF 1.6 based per ISO 15930-7 / -8.
+    #[test]
+    fn pdf_x_5_pdf_version_is_1_6() {
+        for profile in [Pdfx::X5g, Pdfx::X5pg, Pdfx::X5n] {
+            assert_eq!(profile.min(), Some(PdfVersion::Pdf16));
+            assert_eq!(profile.max(), PdfVersion::Pdf16);
         }
     }
 
