@@ -217,16 +217,28 @@ impl ChunkContainer {
             .then(|| remapped_ref.bump());
 
         // Reserve a final-numbering ref for the `/Sig` indirect
-        // dictionary so the widget annotation's `/V <ref>` (written
-        // during chunk emission with the old build-time ref) can be
-        // renumbered through the same remapper used for every other
-        // indirect reference. The dict body itself is emitted at the
-        // bottom of `finish` — after the catalogue, alongside the
-        // signature post-processing.
-        if let Some(old_sig_ref) = sc.signature_dict_ref {
-            let final_sig_ref = remapped_ref.bump();
-            remapper.insert(old_sig_ref, final_sig_ref);
-        }
+        // dictionary. When at least one `SignatureField` widget
+        // pre-allocated the build-time ref via
+        // `SerializeContext::signature_dict_ref`, we remap it through
+        // the same `remapper` used for every other indirect reference
+        // so the widget's `/V <ref>` resolves correctly. When the
+        // document is configured for signing but no widget allocated
+        // the ref (PDFreactor's `signPDF: true` does not require an
+        // explicit author-supplied widget), we allocate one here so
+        // `chunk_container::finish` still emits the `/Sig` dict body
+        // and the AcroForm catalogue carries it directly in
+        // `/Fields`.
+        let standalone_sig_ref = if sc.signing_enabled {
+            if let Some(old_sig_ref) = sc.signature_dict_ref {
+                let final_sig_ref = remapped_ref.bump();
+                remapper.insert(old_sig_ref, final_sig_ref);
+                None
+            } else {
+                Some(remapped_ref.bump())
+            }
+        } else {
+            None
+        };
 
         // Chunk length is not an exact number because the length might change as we renumber,
         // so we add a bit of a padding by multiplying with 1.1. The 200 is additional padding
@@ -754,11 +766,19 @@ impl ChunkContainer {
             // each field's `/V` and `/DA` on first save, which is the
             // standard fallback for engines that emit field values
             // without bundled appearances.
-            if !widget_fields.is_empty() {
+            if !widget_fields.is_empty() || standalone_sig_ref.is_some() {
                 let mut acro_form = catalog.insert(Name(b"AcroForm")).dict();
                 let mut fields = acro_form.insert(Name(b"Fields")).array();
                 for field_ref in &widget_fields {
                     fields.item(remapper[field_ref]);
+                }
+                // PDFreactor `signPDF: true` without an explicit
+                // signature widget: emit the `/Sig` dict ref
+                // directly as a field on the AcroForm so consumers
+                // see the signature even when no widget annotation
+                // anchors it to a visible page region.
+                if let Some(sig_ref) = standalone_sig_ref {
+                    fields.item(sig_ref);
                 }
                 fields.finish();
                 acro_form.pair(Name(b"NeedAppearances"), true);
@@ -873,20 +893,24 @@ impl ChunkContainer {
         // We allocate the ref lazily so PDFs that opt into signing
         // but emit no `/Sig` widget on any page do not consume an
         // indirect-object slot.
+        // Emit the `/Sig` indirect dictionary when signing is on.
+        // The ref source depends on whether at least one
+        // `SignatureField` widget pre-allocated the build-time ref
+        // (via `SerializeContext::signature_dict_ref`) — in which
+        // case we resolve through the remapper — or whether the
+        // standalone-signing branch above pre-allocated a fresh
+        // final-numbering ref.
         if let Some(sig_ref) = sc.signature_dict_ref {
-            // Use the remapped ref — every other indirect reference
-            // to this object (from widget annotations' `/V`) has
-            // already been rewritten through `remapper` during
-            // chunk renumbering, so the dict must be emitted at
-            // the remapped ref to match.
             let remapped_sig_ref = remapper.get(&sig_ref).copied().ok_or_else(|| {
                 crate::error::KrillaError::DigitalSignature(
                     "signature dict ref was not present in the chunk remapper — \
-                     no widget annotation referenced it"
+                     widget arm allocated it but renumbering dropped the entry"
                         .into(),
                 )
             })?;
             self.write_signature_dict(&mut pdf, remapped_sig_ref)?;
+        } else if let Some(standalone_ref) = standalone_sig_ref {
+            self.write_signature_dict(&mut pdf, standalone_ref)?;
         }
 
         Ok((pdf, xref_stream_ref))
