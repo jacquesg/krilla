@@ -52,6 +52,15 @@ pub enum KrillaError {
     /// supported by the used PDF version (only available in PDF 1.5+).
     #[cfg(feature = "raster-images")]
     SixteenBitImage(Image, Option<Location>),
+    /// A digital-signature post-processing step failed — the
+    /// `/Sig` dictionary could not be located, the placeholder
+    /// width did not match the reservation, or the embedder's
+    /// signer callback returned a fatal error. The carried
+    /// string is a human-readable diagnostic suitable for
+    /// surfacing to the caller. Only emitted when the document
+    /// is configured with
+    /// [`Document::with_digital_signature`](crate::Document::with_digital_signature).
+    DigitalSignature(String),
 }
 
 /// A limit imposed by the selected PDF version.
