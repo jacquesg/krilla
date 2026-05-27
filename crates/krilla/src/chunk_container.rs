@@ -502,64 +502,87 @@ impl ChunkContainer {
             }
 
             // G5b — `/OpenAction` document action (ISO 32000-2
-            // §12.6.4.3). Only the direct-link
-            // `[<page-ref> <destination>]` form is supported (see
-            // `Metadata::open_action`). The destination flavour is
-            // mapped through `OpenZoom`; out-of-range page indices
-            // are clamped at the caller boundary, so resolving
-            // against `page_infos()` here is infallible-by-construction.
+            // §12.6.4.3). Two flavours are supported (see
+            // `Metadata::open_action`):
+            //
+            // - `OpenAction::GoToPage { page_index, zoom }` — the
+            //   direct-link `[<page-ref> <destination>]` form. The
+            //   destination flavour is mapped through `OpenZoom`;
+            //   out-of-range page indices are clamped at the caller
+            //   boundary, so resolving against `page_infos()` here
+            //   is infallible-by-construction.
+            // - `OpenAction::Named(NamedAction)` — the named-action
+            //   form `<< /Type /Action /S /Named /N /<name> >>`
+            //   (ISO 32000-2 §12.6.4.9 Table 200). Used by the
+            //   PDFreactor `printDialogPrompt` parity surface
+            //   (NamedAction::Print).
             if let Some(open_action) =
                 self.metadata.as_ref().and_then(|m| m.open_action)
             {
-                use crate::interchange::metadata::OpenZoom;
+                use crate::interchange::metadata::{OpenAction, OpenZoom};
                 use crate::serialize::PageInfo;
-                let page_info = sc
-                    .page_infos()
-                    .get(open_action.page_index)
-                    .expect(
-                        "Metadata::open_action page_index out of range; \
-                         the embedder must clamp before calling",
-                    );
-                let page_ref = match page_info {
-                    PageInfo::Krilla { ref_, .. } => *ref_,
-                    PageInfo::Pdf { ref_, .. } => *ref_,
-                };
-                let mut array = catalog
-                    .deref_mut()
-                    .insert(Name(b"OpenAction"))
-                    .array();
-                array.item(page_ref);
-                match open_action.zoom {
-                    OpenZoom::Xyz(zoom) => {
-                        array.item(Name(b"XYZ"));
-                        array.item(pdf_writer::Null);
-                        array.item(pdf_writer::Null);
-                        array.item(zoom);
+                match open_action {
+                    OpenAction::GoToPage { page_index, zoom } => {
+                        let page_info = sc.page_infos().get(page_index).expect(
+                            "Metadata::open_action page_index out of range; \
+                             the embedder must clamp before calling",
+                        );
+                        let page_ref = match page_info {
+                            PageInfo::Krilla { ref_, .. } => *ref_,
+                            PageInfo::Pdf { ref_, .. } => *ref_,
+                        };
+                        let mut array = catalog
+                            .deref_mut()
+                            .insert(Name(b"OpenAction"))
+                            .array();
+                        array.item(page_ref);
+                        match zoom {
+                            OpenZoom::Xyz(zoom) => {
+                                array.item(Name(b"XYZ"));
+                                array.item(pdf_writer::Null);
+                                array.item(pdf_writer::Null);
+                                array.item(zoom);
+                            }
+                            OpenZoom::FitPage => {
+                                array.item(Name(b"Fit"));
+                            }
+                            OpenZoom::FitHorizontalToWidth => {
+                                array.item(Name(b"FitH"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitVerticalToHeight => {
+                                array.item(Name(b"FitV"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitBoundingBox => {
+                                array.item(Name(b"FitB"));
+                            }
+                            OpenZoom::FitBoundingBoxHorizontal => {
+                                array.item(Name(b"FitBH"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitBoundingBoxVertical => {
+                                array.item(Name(b"FitBV"));
+                                array.item(pdf_writer::Null);
+                            }
+                        }
+                        array.finish();
                     }
-                    OpenZoom::FitPage => {
-                        array.item(Name(b"Fit"));
-                    }
-                    OpenZoom::FitHorizontalToWidth => {
-                        array.item(Name(b"FitH"));
-                        array.item(pdf_writer::Null);
-                    }
-                    OpenZoom::FitVerticalToHeight => {
-                        array.item(Name(b"FitV"));
-                        array.item(pdf_writer::Null);
-                    }
-                    OpenZoom::FitBoundingBox => {
-                        array.item(Name(b"FitB"));
-                    }
-                    OpenZoom::FitBoundingBoxHorizontal => {
-                        array.item(Name(b"FitBH"));
-                        array.item(pdf_writer::Null);
-                    }
-                    OpenZoom::FitBoundingBoxVertical => {
-                        array.item(Name(b"FitBV"));
-                        array.item(pdf_writer::Null);
+                    OpenAction::Named(named) => {
+                        // `<< /Type /Action /S /Named /N /<name> >>`
+                        // per ISO 32000-2 §12.6.4.9 Table 200. pdf-writer
+                        // does not expose a Named ActionType today so
+                        // the dictionary is written directly.
+                        let mut dict = catalog
+                            .deref_mut()
+                            .insert(Name(b"OpenAction"))
+                            .dict();
+                        dict.pair(Name(b"Type"), Name(b"Action"));
+                        dict.pair(Name(b"S"), Name(b"Named"));
+                        dict.pair(Name(b"N"), named.to_name());
+                        dict.finish();
                     }
                 }
-                array.finish();
             }
 
             let settings = sc.serialize_settings();
