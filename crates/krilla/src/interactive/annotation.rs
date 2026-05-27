@@ -1224,6 +1224,8 @@ pub struct TextAnnotation {
     pub(crate) open: bool,
     pub(crate) creation_date: Option<String>,
     pub(crate) modification_date: Option<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) review_state: Option<ReviewState>,
 }
 
 impl TextAnnotation {
@@ -1241,12 +1243,30 @@ impl TextAnnotation {
             open: false,
             creation_date: None,
             modification_date: None,
+            subject: None,
+            review_state: None,
         }
     }
 
     /// Set the `/Contents` text — the body of the pop-up.
     pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
         self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the annotation subject line per
+    /// ISO 32000-2 §12.5.6.4 Table 169. PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the `/State` + `/StateModel` review-state markup per
+    /// ISO 32000-2 §12.5.6.4 Table 170. Both entries are written
+    /// together — viewers reject `/State` without a matching
+    /// `/StateModel`.
+    pub fn with_review_state(mut self, state: ReviewState) -> Self {
+        self.review_state = Some(state);
         self
     }
 
@@ -1331,7 +1351,54 @@ impl TextAnnotation {
             self.modification_date.as_deref(),
         );
 
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
+        write_review_state(annotation, self.review_state.as_ref());
+
         Ok(None)
+    }
+}
+
+/// Review-state markup for a Text or Markup annotation per
+/// ISO 32000-2 §12.5.6.4 Table 170. The PDF specification couples
+/// each `/State` value with one of two `/StateModel` values
+/// (`Marked` for the marked/unmarked pair; `Review` for the
+/// accepted/rejected/cancelled/completed/none cluster), so this
+/// enum encodes the combination directly to keep callers from
+/// emitting an invalid (state, model) pair.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ReviewState {
+    /// `/State /Marked /StateModel /Marked` — annotation marked.
+    Marked,
+    /// `/State /Unmarked /StateModel /Marked` — annotation unmarked.
+    Unmarked,
+    /// `/State /Accepted /StateModel /Review` — comment accepted.
+    Accepted,
+    /// `/State /Rejected /StateModel /Review` — comment rejected.
+    Rejected,
+    /// `/State /Cancelled /StateModel /Review` — comment cancelled.
+    Cancelled,
+    /// `/State /Completed /StateModel /Review` — comment completed.
+    Completed,
+    /// `/State /None /StateModel /Review` — explicit no-action.
+    None,
+}
+
+impl ReviewState {
+    /// Resolve to the `(state, model)` pair of PDF name tokens
+    /// emitted into the annotation's `/State` and `/StateModel`
+    /// dictionary entries.
+    pub fn to_pdf_names(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Marked => ("Marked", "Marked"),
+            Self::Unmarked => ("Unmarked", "Marked"),
+            Self::Accepted => ("Accepted", "Review"),
+            Self::Rejected => ("Rejected", "Review"),
+            Self::Cancelled => ("Cancelled", "Review"),
+            Self::Completed => ("Completed", "Review"),
+            Self::None => ("None", "Review"),
+        }
     }
 }
 
@@ -1386,6 +1453,8 @@ pub struct MarkupAnnotation {
     pub(crate) color: Option<Color>,
     pub(crate) creation_date: Option<String>,
     pub(crate) modification_date: Option<String>,
+    pub(crate) subject: Option<String>,
+    pub(crate) review_state: Option<ReviewState>,
 }
 
 impl MarkupAnnotation {
@@ -1440,6 +1509,8 @@ impl MarkupAnnotation {
             color: None,
             creation_date: None,
             modification_date: None,
+            subject: None,
+            review_state: None,
         }
     }
 
@@ -1452,6 +1523,22 @@ impl MarkupAnnotation {
     /// Set the `/T` text — the title bar of the markup pop-up.
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the annotation subject line per
+    /// ISO 32000-2 §12.5.6.4 Table 169. PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the `/State` + `/StateModel` review-state markup per
+    /// ISO 32000-2 §12.5.6.4 Table 170. Both entries are written
+    /// together — viewers reject `/State` without a matching
+    /// `/StateModel`.
+    pub fn with_review_state(mut self, state: ReviewState) -> Self {
+        self.review_state = Some(state);
         self
     }
 
@@ -1521,6 +1608,11 @@ impl MarkupAnnotation {
             self.creation_date.as_deref(),
             self.modification_date.as_deref(),
         );
+
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
+        write_review_state(annotation, self.review_state.as_ref());
 
         Ok(None)
     }
@@ -3299,6 +3391,21 @@ fn write_annotation_dates(
     if let Some(date) = modification_date {
         annotation.pair(Name(b"M"), Str(date.as_bytes()));
     }
+}
+
+/// Emit `/State` and `/StateModel` entries on a Text or Markup
+/// annotation per ISO 32000-2 §12.5.6.4 Table 170. The two entries
+/// are coupled: a viewer ignores `/State` without a matching
+/// `/StateModel`, so the helper writes both whenever a
+/// [`ReviewState`] is set.
+fn write_review_state(
+    annotation: &mut pdf_writer::writers::Annotation,
+    state: Option<&ReviewState>,
+) {
+    let Some(state) = state else { return };
+    let (state_name, model_name) = state.to_pdf_names();
+    annotation.pair(Name(b"State"), TextStr(state_name));
+    annotation.pair(Name(b"StateModel"), TextStr(model_name));
 }
 
 /// Emit a `/C` colour entry on an annotation using the regular-colour
