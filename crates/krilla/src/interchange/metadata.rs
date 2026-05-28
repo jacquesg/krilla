@@ -1047,6 +1047,43 @@ impl Duplex {
     }
 }
 
+/// Page-box selector for `/ViewerPreferences` page-display and
+/// printing entries (ISO 32000-2 §12.4.4 Table 168).
+///
+/// `MediaBox` (the page's full extent) is the spec-defined default
+/// for all four slots when the entry is omitted. The remaining
+/// variants select one of the optional page boxes: `CropBox`
+/// (visible region), `BleedBox` (extent including bleed), `TrimBox`
+/// (final trimmed page), or `ArtBox` (meaningful artwork).
+///
+/// Used by `ViewerPreferences::view_area` / `view_clip` /
+/// `print_area` / `print_clip`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PageBoxSelector {
+    /// `/MediaBox` — the page's full media extent. Spec default.
+    MediaBox,
+    /// `/CropBox` — the visible region of the page.
+    CropBox,
+    /// `/BleedBox` — the region including any bleed area.
+    BleedBox,
+    /// `/TrimBox` — the intended final trimmed extent.
+    TrimBox,
+    /// `/ArtBox` — the region containing meaningful artwork.
+    ArtBox,
+}
+
+impl PageBoxSelector {
+    pub(crate) fn to_pdf_name(self) -> Name<'static> {
+        match self {
+            PageBoxSelector::MediaBox => Name(b"MediaBox"),
+            PageBoxSelector::CropBox => Name(b"CropBox"),
+            PageBoxSelector::BleedBox => Name(b"BleedBox"),
+            PageBoxSelector::TrimBox => Name(b"TrimBox"),
+            PageBoxSelector::ArtBox => Name(b"ArtBox"),
+        }
+    }
+}
+
 /// `/ViewerPreferences` dictionary entries (ISO 32000-2 §12.4.4).
 ///
 /// Every field is optional. Setters on this struct return `Self` for
@@ -1066,6 +1103,31 @@ pub struct ViewerPreferences {
     pub(crate) print_scaling: Option<PrintScaling>,
     pub(crate) duplex: Option<Duplex>,
     pub(crate) pick_tray_by_pdf_size: Option<bool>,
+    /// `/NumCopies` — default number of copies for the print dialog
+    /// (ISO 32000-2 §12.4.4 Table 168). Spec requires a positive
+    /// integer; `0` is silently clamped to `1` at emission time.
+    pub(crate) num_copies: Option<u32>,
+    /// `/PrintPageRange` — default page subset for the print dialog
+    /// expressed as an even-length array of inclusive 1-indexed
+    /// `[from, to]` pairs (ISO 32000-2 §12.4.4 Table 168). Empty
+    /// vector means "all pages" (the entry is not emitted).
+    pub(crate) print_page_range: Option<Vec<(u32, u32)>>,
+    /// `/ViewArea` — which page box the viewer should display
+    /// (ISO 32000-2 §12.4.4 Table 168). Default `MediaBox` when
+    /// absent.
+    pub(crate) view_area: Option<PageBoxSelector>,
+    /// `/ViewClip` — which page box the viewer should clip page
+    /// contents to (ISO 32000-2 §12.4.4 Table 168). Default
+    /// `MediaBox` when absent.
+    pub(crate) view_clip: Option<PageBoxSelector>,
+    /// `/PrintArea` — which page box the printer should print
+    /// (ISO 32000-2 §12.4.4 Table 168). Default `MediaBox` when
+    /// absent.
+    pub(crate) print_area: Option<PageBoxSelector>,
+    /// `/PrintClip` — which page box the printer should clip page
+    /// contents to (ISO 32000-2 §12.4.4 Table 168). Default
+    /// `MediaBox` when absent.
+    pub(crate) print_clip: Option<PageBoxSelector>,
 }
 
 impl ViewerPreferences {
@@ -1139,6 +1201,62 @@ impl ViewerPreferences {
         self
     }
 
+    /// `/NumCopies` — default number of copies for the print dialog
+    /// (ISO 32000-2 §12.4.4 Table 168). Mirrors PDFreactor's
+    /// `@-ro-preferences { number-of-copies: <n> }`. The spec
+    /// requires a positive integer; `0` is silently coerced to `1`
+    /// at the emission boundary so a faithful round-trip of an
+    /// author's intent is always representable.
+    pub fn num_copies(mut self, copies: u32) -> Self {
+        self.num_copies = Some(copies);
+        self
+    }
+
+    /// `/PrintPageRange` — default page subset for the print dialog
+    /// (ISO 32000-2 §12.4.4 Table 168). Each `(from, to)` pair is an
+    /// inclusive 1-indexed range; the spec mandates an even-length
+    /// array with `from <= to` for every pair and `to <= page count`
+    /// for the document. An empty `ranges` slice clears the entry
+    /// (printers fall back to "all pages").
+    pub fn print_page_range(mut self, ranges: Vec<(u32, u32)>) -> Self {
+        self.print_page_range = Some(ranges);
+        self
+    }
+
+    /// `/ViewArea` — which page box the viewer should display
+    /// (ISO 32000-2 §12.4.4 Table 168). Default `MediaBox` when
+    /// absent. Pairs with the `BleedBox` / `TrimBox` / `ArtBox` /
+    /// `CropBox` page-box geometry authored elsewhere on the
+    /// document.
+    pub fn view_area(mut self, selector: PageBoxSelector) -> Self {
+        self.view_area = Some(selector);
+        self
+    }
+
+    /// `/ViewClip` — which page box the viewer should clip page
+    /// contents to (ISO 32000-2 §12.4.4 Table 168). Default
+    /// `MediaBox` when absent.
+    pub fn view_clip(mut self, selector: PageBoxSelector) -> Self {
+        self.view_clip = Some(selector);
+        self
+    }
+
+    /// `/PrintArea` — which page box the printer should print
+    /// (ISO 32000-2 §12.4.4 Table 168). Default `MediaBox` when
+    /// absent.
+    pub fn print_area(mut self, selector: PageBoxSelector) -> Self {
+        self.print_area = Some(selector);
+        self
+    }
+
+    /// `/PrintClip` — which page box the printer should clip page
+    /// contents to (ISO 32000-2 §12.4.4 Table 168). Default
+    /// `MediaBox` when absent.
+    pub fn print_clip(mut self, selector: PageBoxSelector) -> Self {
+        self.print_clip = Some(selector);
+        self
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.hide_toolbar.is_none()
             && self.hide_menubar.is_none()
@@ -1150,5 +1268,60 @@ impl ViewerPreferences {
             && self.print_scaling.is_none()
             && self.duplex.is_none()
             && self.pick_tray_by_pdf_size.is_none()
+            && self.num_copies.is_none()
+            && self.print_page_range.is_none()
+            && self.view_area.is_none()
+            && self.view_clip.is_none()
+            && self.print_area.is_none()
+            && self.print_clip.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_preferences_num_copies_builder_round_trips() {
+        let vp = ViewerPreferences::new().num_copies(3);
+        assert_eq!(vp.num_copies, Some(3));
+        // Empty viewer-preferences must report empty when no
+        // declarations have been set; setting num_copies makes it
+        // non-empty.
+        assert!(!vp.is_empty());
+    }
+
+    #[test]
+    fn viewer_preferences_print_page_range_builder_round_trips() {
+        let ranges = vec![(1, 5), (10, 12)];
+        let vp = ViewerPreferences::new().print_page_range(ranges.clone());
+        assert_eq!(vp.print_page_range.as_deref(), Some(ranges.as_slice()));
+    }
+
+    #[test]
+    fn viewer_preferences_page_box_selectors_round_trip() {
+        let vp = ViewerPreferences::new()
+            .view_area(PageBoxSelector::CropBox)
+            .view_clip(PageBoxSelector::TrimBox)
+            .print_area(PageBoxSelector::BleedBox)
+            .print_clip(PageBoxSelector::ArtBox);
+        assert_eq!(vp.view_area, Some(PageBoxSelector::CropBox));
+        assert_eq!(vp.view_clip, Some(PageBoxSelector::TrimBox));
+        assert_eq!(vp.print_area, Some(PageBoxSelector::BleedBox));
+        assert_eq!(vp.print_clip, Some(PageBoxSelector::ArtBox));
+    }
+
+    #[test]
+    fn page_box_selector_to_pdf_name_matches_spec() {
+        assert_eq!(PageBoxSelector::MediaBox.to_pdf_name().0, b"MediaBox");
+        assert_eq!(PageBoxSelector::CropBox.to_pdf_name().0, b"CropBox");
+        assert_eq!(PageBoxSelector::BleedBox.to_pdf_name().0, b"BleedBox");
+        assert_eq!(PageBoxSelector::TrimBox.to_pdf_name().0, b"TrimBox");
+        assert_eq!(PageBoxSelector::ArtBox.to_pdf_name().0, b"ArtBox");
+    }
+
+    #[test]
+    fn viewer_preferences_empty_by_default() {
+        assert!(ViewerPreferences::new().is_empty());
     }
 }
