@@ -619,7 +619,7 @@ impl ChunkContainer {
             }
 
             // G5b — `/OpenAction` document action (ISO 32000-2
-            // §12.6.4.3). Two flavours are supported (see
+            // §12.6.4.3). Three flavours are supported (see
             // `Metadata::open_action`):
             //
             // - `OpenAction::GoToPage { page_index, zoom }` — the
@@ -633,14 +633,20 @@ impl ChunkContainer {
             //   (ISO 32000-2 §12.6.4.9 Table 200). Used by the
             //   PDFreactor `printDialogPrompt` parity surface
             //   (NamedAction::Print).
+            // - `OpenAction::JavaScript(script)` — the JavaScript
+            //   action form
+            //   `<< /Type /Action /S /JavaScript /JS (<script>) >>`
+            //   (ISO 32000-2 §12.6.4.16). The script is written
+            //   verbatim through `TextStr` so PDFDocEncoding /
+            //   UTF-16BE escaping is handled by `pdf_writer`.
             if let Some(open_action) =
-                self.metadata.as_ref().and_then(|m| m.open_action)
+                self.metadata.as_ref().and_then(|m| m.open_action.as_ref())
             {
                 use crate::interchange::metadata::{OpenAction, OpenZoom};
                 use crate::serialize::PageInfo;
                 match open_action {
                     OpenAction::GoToPage { page_index, zoom } => {
-                        let page_info = sc.page_infos().get(page_index).expect(
+                        let page_info = sc.page_infos().get(*page_index).expect(
                             "Metadata::open_action page_index out of range; \
                              the embedder must clamp before calling",
                         );
@@ -658,7 +664,7 @@ impl ChunkContainer {
                                 array.item(Name(b"XYZ"));
                                 array.item(pdf_writer::Null);
                                 array.item(pdf_writer::Null);
-                                array.item(zoom);
+                                array.item(*zoom);
                             }
                             OpenZoom::FitPage => {
                                 array.item(Name(b"Fit"));
@@ -697,6 +703,21 @@ impl ChunkContainer {
                         dict.pair(Name(b"Type"), Name(b"Action"));
                         dict.pair(Name(b"S"), Name(b"Named"));
                         dict.pair(Name(b"N"), named.to_name());
+                        dict.finish();
+                    }
+                    OpenAction::JavaScript(script) => {
+                        // `<< /Type /Action /S /JavaScript /JS (<script>) >>`
+                        // per ISO 32000-2 §12.6.4.16. The script is
+                        // emitted verbatim via `TextStr`, matching the
+                        // `Action::JavaScript` widget-annotation path
+                        // in `interactive/action.rs`.
+                        let mut dict = catalog
+                            .deref_mut()
+                            .insert(Name(b"OpenAction"))
+                            .dict();
+                        dict.pair(Name(b"Type"), Name(b"Action"));
+                        dict.pair(Name(b"S"), Name(b"JavaScript"));
+                        dict.pair(Name(b"JS"), TextStr(script.as_str()));
                         dict.finish();
                     }
                 }
