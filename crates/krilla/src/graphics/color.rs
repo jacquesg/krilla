@@ -61,9 +61,14 @@
 use std::fmt::Debug;
 use std::hash::Hash;
 
+use pdf_writer::{Finish, Name, Ref};
+
+use crate::chunk_container::ChunkContainer;
 use crate::configure::ValidationError;
 use crate::graphics::icc::{ICCBasedColorSpace, ICCProfile};
-use crate::serialize::SerializeContext;
+use crate::resource;
+use crate::resource::Resourceable;
+use crate::serialize::{Cacheable, SerializeContext};
 
 /// The PDF name for the device RGB color space.
 pub(crate) const DEVICE_RGB: &str = "DeviceRGB";
@@ -124,6 +129,188 @@ pub enum RegularColor {
         /// ICC profile's channel layout.
         components: [f32; 3],
     },
+    /// A three-component colour authored in a PDF-native CalRGB
+    /// calibrated colour space (ISO 32000-2 §8.6.5.6).
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Gamma` /
+    /// `Matrix` dictionary; the content stream emits
+    /// `/CS<n> cs <r> <g> <b> scn` against a
+    /// `[/CalRGB <<...>>]` colour-space array embedded inline in the
+    /// page resources. Components are in the `[0.0, 1.0]` range that
+    /// the gamma transfer expects.
+    CalRgb {
+        /// CalRGB parameter dictionary — WhitePoint (required),
+        /// BlackPoint, Gamma, Matrix (all optional, ISO 32000-2 §8.6.5.6).
+        params: CalRgbParams,
+        /// Three calibrated-space components in `[0.0, 1.0]`.
+        components: [f32; 3],
+    },
+    /// A single-component colour authored in a PDF-native CalGray
+    /// calibrated colour space (ISO 32000-2 §8.6.5.5).
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Gamma`
+    /// scalar dictionary; the content stream emits
+    /// `/CS<n> cs <g> scn` against a `[/CalGray <<...>>]` colour-space
+    /// array.
+    CalGray {
+        /// CalGray parameter dictionary.
+        params: CalGrayParams,
+        /// Single calibrated-grey component in `[0.0, 1.0]`.
+        component: f32,
+    },
+    /// A three-component colour authored in the CIE 1976 L*a*b*
+    /// (Lab) colour space (ISO 32000-2 §8.6.5.4).
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Range`
+    /// dictionary; the content stream emits
+    /// `/CS<n> cs <L> <a> <b> scn` against a `[/Lab <<...>>]`
+    /// colour-space array. L is in `[0.0, 100.0]`; `a` and `b` are
+    /// within the configured `Range` (default `[-100, 100]`).
+    Lab {
+        /// Lab parameter dictionary.
+        params: LabParams,
+        /// `[L, a, b]` triple. L in `[0, 100]`, a/b within the
+        /// configured `Range`.
+        components: [f32; 3],
+    },
+}
+
+/// CalRGB parameter dictionary (ISO 32000-2 §8.6.5.6 Table 63).
+///
+/// `WhitePoint` is required and identifies the diffuse white of the
+/// calibrated viewing condition (typically D65 = `[0.9505, 1.0, 1.089]`).
+/// `BlackPoint` defaults to `[0, 0, 0]` when absent. `Gamma` is the
+/// per-channel transfer-function exponent (default `[1, 1, 1]`).
+/// `Matrix` is a 3x3 column-major linearisation matrix used by viewers
+/// to map calibrated RGB to XYZ (default identity).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalRgbParams {
+    /// Tristimulus white-point in CIE 1931 XYZ.
+    pub white_point: [f32; 3],
+    /// Optional black-point. `None` defaults to `[0, 0, 0]`.
+    pub black_point: Option<[f32; 3]>,
+    /// Optional per-channel gamma. `None` defaults to `[1, 1, 1]`.
+    pub gamma: Option<[f32; 3]>,
+    /// Optional 3x3 RGB-to-XYZ matrix (column-major: `[Xr, Yr, Zr,
+    /// Xg, Yg, Zg, Xb, Yb, Zb]`). `None` defaults to identity.
+    pub matrix: Option<[f32; 9]>,
+}
+
+impl Eq for CalRgbParams {}
+
+impl Hash for CalRgbParams {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for v in self.white_point {
+            v.to_bits().hash(state);
+        }
+        match self.black_point {
+            Some(bp) => {
+                state.write_u8(1);
+                for v in bp {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+        match self.gamma {
+            Some(g) => {
+                state.write_u8(1);
+                for v in g {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+        match self.matrix {
+            Some(m) => {
+                state.write_u8(1);
+                for v in m {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+    }
+}
+
+/// CalGray parameter dictionary (ISO 32000-2 §8.6.5.5 Table 62).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalGrayParams {
+    /// Tristimulus white-point in CIE 1931 XYZ.
+    pub white_point: [f32; 3],
+    /// Optional black-point. `None` defaults to `[0, 0, 0]`.
+    pub black_point: Option<[f32; 3]>,
+    /// Optional gamma scalar. `None` defaults to `1.0`.
+    pub gamma: Option<f32>,
+}
+
+impl Eq for CalGrayParams {}
+
+impl Hash for CalGrayParams {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for v in self.white_point {
+            v.to_bits().hash(state);
+        }
+        match self.black_point {
+            Some(bp) => {
+                state.write_u8(1);
+                for v in bp {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+        match self.gamma {
+            Some(g) => {
+                state.write_u8(1);
+                g.to_bits().hash(state);
+            }
+            None => state.write_u8(0),
+        }
+    }
+}
+
+/// Lab parameter dictionary (ISO 32000-2 §8.6.5.4 Table 61).
+///
+/// `Range` defaults to `[-100, 100, -100, 100]` (for `a`/`b`); the
+/// L component is always `[0, 100]` and is not part of `Range`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LabParams {
+    /// Tristimulus white-point in CIE 1931 XYZ.
+    pub white_point: [f32; 3],
+    /// Optional black-point. `None` defaults to `[0, 0, 0]`.
+    pub black_point: Option<[f32; 3]>,
+    /// Optional `[a_min, a_max, b_min, b_max]` range. `None` defaults
+    /// to `[-100, 100, -100, 100]`.
+    pub range: Option<[f32; 4]>,
+}
+
+impl Eq for LabParams {}
+
+impl Hash for LabParams {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        for v in self.white_point {
+            v.to_bits().hash(state);
+        }
+        match self.black_point {
+            Some(bp) => {
+                state.write_u8(1);
+                for v in bp {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+        match self.range {
+            Some(r) => {
+                state.write_u8(1);
+                for v in r {
+                    v.to_bits().hash(state);
+                }
+            }
+            None => state.write_u8(0),
+        }
+    }
 }
 
 impl PartialEq for RegularColor {
@@ -139,6 +326,36 @@ impl PartialEq for RegularColor {
                 },
                 Self::IccBased {
                     profile: pb,
+                    components: cb,
+                },
+            ) => pa == pb && ca.map(f32::to_bits) == cb.map(f32::to_bits),
+            (
+                Self::CalRgb {
+                    params: pa,
+                    components: ca,
+                },
+                Self::CalRgb {
+                    params: pb,
+                    components: cb,
+                },
+            ) => pa == pb && ca.map(f32::to_bits) == cb.map(f32::to_bits),
+            (
+                Self::CalGray {
+                    params: pa,
+                    component: ca,
+                },
+                Self::CalGray {
+                    params: pb,
+                    component: cb,
+                },
+            ) => pa == pb && ca.to_bits() == cb.to_bits(),
+            (
+                Self::Lab {
+                    params: pa,
+                    components: ca,
+                },
+                Self::Lab {
+                    params: pb,
                     components: cb,
                 },
             ) => pa == pb && ca.map(f32::to_bits) == cb.map(f32::to_bits),
@@ -161,6 +378,22 @@ impl Hash for RegularColor {
                 components,
             } => {
                 profile.hash(state);
+                for c in components {
+                    c.to_bits().hash(state);
+                }
+            }
+            Self::CalRgb { params, components } => {
+                params.hash(state);
+                for c in components {
+                    c.to_bits().hash(state);
+                }
+            }
+            Self::CalGray { params, component } => {
+                params.hash(state);
+                component.to_bits().hash(state);
+            }
+            Self::Lab { params, components } => {
+                params.hash(state);
                 for c in components {
                     c.to_bits().hash(state);
                 }
@@ -189,6 +422,9 @@ impl Color {
             Color::Regular(RegularColor::Luma(l)) => vec![l.to_pdf_color()],
             Color::Regular(RegularColor::Cmyk(cmyk)) => cmyk.to_pdf_color().to_vec(),
             Color::Regular(RegularColor::IccBased { components, .. }) => components.to_vec(),
+            Color::Regular(RegularColor::CalRgb { components, .. }) => components.to_vec(),
+            Color::Regular(RegularColor::CalGray { component, .. }) => vec![*component],
+            Color::Regular(RegularColor::Lab { components, .. }) => components.to_vec(),
             Color::Special(SpecialColor::Separation(spot)) => vec![spot.to_pdf_color()],
             Color::Special(SpecialColor::DeviceN(dn)) => dn.to_pdf_color(),
         }
@@ -276,6 +512,15 @@ impl Color {
                 // preserve. Pass through; the content emission already
                 // resolves to an ICC stream resource.
                 Color::Regular(RegularColor::IccBased { .. }) => self,
+                // `CalRgb`, `CalGray`, and `Lab` are calibrated CIE-based
+                // spaces whose channel values are not in DeviceRGB
+                // primaries; the integer u8 projection helpers cannot
+                // honour them without a CIE-to-device transform. Pass
+                // through; emission resolves them inline as
+                // `[/CalRGB|/CalGray|/Lab <<…>>]` resources.
+                Color::Regular(RegularColor::CalRgb { .. })
+                | Color::Regular(RegularColor::CalGray { .. })
+                | Color::Regular(RegularColor::Lab { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -302,6 +547,9 @@ impl Color {
                     cmyk::Color::new(0, 0, 0, k).into()
                 }
                 Color::Regular(RegularColor::IccBased { .. }) => self,
+                Color::Regular(RegularColor::CalRgb { .. })
+                | Color::Regular(RegularColor::CalGray { .. })
+                | Color::Regular(RegularColor::Lab { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -318,6 +566,9 @@ impl Color {
                 Color::Regular(RegularColor::Rgb(r)) => rgb_to_grey(r).into(),
                 Color::Regular(RegularColor::Cmyk(c)) => cmyk_to_grey(c).into(),
                 Color::Regular(RegularColor::IccBased { .. }) => self,
+                Color::Regular(RegularColor::CalRgb { .. })
+                | Color::Regular(RegularColor::CalGray { .. })
+                | Color::Regular(RegularColor::Lab { .. }) => self,
                 Color::Special(SpecialColor::Separation(spot)) => {
                     separation_to_regular(&spot)
                         .into_color()
@@ -356,6 +607,36 @@ impl RegularColor {
             profile,
             components,
         }
+    }
+
+    /// Construct a CalRGB-calibrated three-component colour.
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Gamma` /
+    /// `Matrix` dictionary the PDF viewer uses to map calibrated RGB to
+    /// XYZ. `components` are in the `[0.0, 1.0]` range that the gamma
+    /// transfer expects. Per-document dedup happens at the
+    /// colour-space-resource registration layer via the params'
+    /// content hash.
+    pub fn cal_rgb(params: CalRgbParams, components: [f32; 3]) -> Self {
+        Self::CalRgb { params, components }
+    }
+
+    /// Construct a CalGray-calibrated single-component grey.
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Gamma`
+    /// scalar. `component` is in the `[0.0, 1.0]` range.
+    pub fn cal_gray(params: CalGrayParams, component: f32) -> Self {
+        Self::CalGray { params, component }
+    }
+
+    /// Construct a CIE 1976 L*a*b* (Lab) three-component colour.
+    ///
+    /// `params` carries the `WhitePoint` / `BlackPoint` / `Range`
+    /// dictionary. `components[0]` (L) is in `[0.0, 100.0]`; `a` and
+    /// `b` are within the configured `Range` (default
+    /// `[-100, 100, -100, 100]`).
+    pub fn lab(params: LabParams, components: [f32; 3]) -> Self {
+        Self::Lab { params, components }
     }
 }
 
@@ -468,6 +749,27 @@ pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
             unit_to_u8(components[2] * tint),
         )
         .into(),
+        // Calibrated CIE-based fallbacks (CalRGB / CalGray / Lab) are
+        // outside the ISO 32000-2 §8.6.6.4 alternate-space contract.
+        // Project the channel-zero components linearly by the tint as a
+        // defensive device-space approximation — the constructors used
+        // in practice route through the process arms above.
+        RegularColor::CalRgb { components, .. } => rgb::Color::new(
+            unit_to_u8(components[0] * tint),
+            unit_to_u8(components[1] * tint),
+            unit_to_u8(components[2] * tint),
+        )
+        .into(),
+        RegularColor::CalGray { component, .. } => {
+            luma::Color::new(unit_to_u8(*component * tint)).into()
+        }
+        RegularColor::Lab { components, .. } => rgb::Color::new(
+            // L is in [0, 100]; rescale into [0, 1] before tint.
+            unit_to_u8((components[0] / 100.0).clamp(0.0, 1.0) * tint),
+            unit_to_u8(((components[1] + 100.0) / 200.0).clamp(0.0, 1.0) * tint),
+            unit_to_u8(((components[2] + 100.0) / 200.0).clamp(0.0, 1.0) * tint),
+        )
+        .into(),
     }
 }
 
@@ -520,6 +822,30 @@ impl RegularColor {
                 }
                 CieBasedColorSpace::IccRgb(ICCBasedColorSpace::<3>(profile.clone())).into()
             }
+            Self::CalRgb { params, .. } => {
+                // PDF/X-1a forbids RGB-equivalent content; CalRGB is a
+                // three-component CIE-based RGB approximation and is
+                // therefore caught by the same `requires_cmyk_only`
+                // rule. Emission proceeds via the inline
+                // `[/CalRGB <<…>>]` colour-space array.
+                if sc.serialize_settings().validators().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
+                CieBasedColorSpace::CalRgb(CalRgbColorSpace(*params)).into()
+            }
+            Self::CalGray { params, .. } => {
+                // CalGray is a single-component grey space. PDF/X-1a's
+                // CMYK-only check does not fire for grey content
+                // (DeviceGray fallback is unconditional), so no
+                // validation error is registered here.
+                CieBasedColorSpace::CalGray(CalGrayColorSpace(*params)).into()
+            }
+            Self::Lab { params, .. } => {
+                // Lab is device-independent and addressable by
+                // PDF/X-1a; the validator does not flag it as
+                // RGB-equivalent.
+                CieBasedColorSpace::Lab(LabColorSpace(*params)).into()
+            }
         }
     }
 
@@ -536,6 +862,12 @@ impl RegularColor {
             // refuse here — the caller's existing `None` branch falls
             // back to the foreground colour.
             Self::IccBased { .. } => return None,
+            // Calibrated CIE-based variants (CalRGB / CalGray / Lab)
+            // require a viewer-side CIE transform that krilla does not
+            // implement; surfacing a u8 RGB projection here would be
+            // wrong by definition. Refuse so the caller falls back to
+            // the foreground colour, identical to the IccBased path.
+            Self::CalRgb { .. } | Self::CalGray { .. } | Self::Lab { .. } => return None,
         })
     }
 
@@ -1145,6 +1477,9 @@ pub mod devicen {
             RegularColor::Cmyk(_) => 4,
             RegularColor::Luma(_) => 1,
             RegularColor::IccBased { .. } => 3,
+            RegularColor::CalRgb { .. } => 3,
+            RegularColor::CalGray { .. } => 1,
+            RegularColor::Lab { .. } => 3,
         }
     }
 }
@@ -1255,6 +1590,130 @@ pub(crate) enum CieBasedColorSpace {
     /// `register_colorspace` -> `register_resourceable`, identical
     /// dedup semantics as the CMYK ICC path.
     IccRgb(ICCBasedColorSpace<3>),
+    /// CalRGB PDF-native calibrated RGB space (ISO 32000-2 §8.6.5.6).
+    /// Emits an inline `[/CalRGB <<WhitePoint … >>]` colour-space
+    /// array as a `/CS<n>` resource.
+    CalRgb(CalRgbColorSpace),
+    /// CalGray PDF-native calibrated grey space (ISO 32000-2 §8.6.5.5).
+    /// Emits an inline `[/CalGray <<WhitePoint … >>]` colour-space
+    /// array as a `/CS<n>` resource.
+    CalGray(CalGrayColorSpace),
+    /// CIE 1976 L*a*b* (Lab) space (ISO 32000-2 §8.6.5.4). Emits an
+    /// inline `[/Lab <<WhitePoint … >>]` colour-space array as a
+    /// `/CS<n>` resource.
+    Lab(LabColorSpace),
+}
+
+/// Colour-space-resource wrapper around [`CalRgbParams`] that emits the
+/// inline `[/CalRGB <<…>>]` array into the document's colour-space chunk
+/// (ISO 32000-2 §8.6.5.6).
+///
+/// Hashed and compared by params, so two paints sharing the same
+/// dictionary reuse the same `/CS<n>` resource entry.
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub(crate) struct CalRgbColorSpace(pub(crate) CalRgbParams);
+
+/// Colour-space-resource wrapper around [`CalGrayParams`] that emits the
+/// inline `[/CalGray <<…>>]` array (ISO 32000-2 §8.6.5.5).
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub(crate) struct CalGrayColorSpace(pub(crate) CalGrayParams);
+
+/// Colour-space-resource wrapper around [`LabParams`] that emits the
+/// inline `[/Lab <<…>>]` array (ISO 32000-2 §8.6.5.4).
+#[derive(Debug, Eq, PartialEq, Hash, Clone, Copy)]
+pub(crate) struct LabColorSpace(pub(crate) LabParams);
+
+impl Cacheable for CalRgbColorSpace {
+    fn serialize(
+        self,
+        _sc: &mut SerializeContext,
+        chunk_container: &mut ChunkContainer,
+        root_ref: Ref,
+    ) {
+        let chunk = &mut chunk_container.non_stream.color_spaces;
+        let mut array = chunk.indirect(root_ref).array();
+        array.item(Name(b"CalRGB"));
+
+        let mut dict = array.push().dict();
+        dict.insert(Name(b"WhitePoint"))
+            .array()
+            .items(self.0.white_point);
+        if let Some(black_point) = self.0.black_point {
+            dict.insert(Name(b"BlackPoint")).array().items(black_point);
+        }
+        if let Some(gamma) = self.0.gamma {
+            dict.insert(Name(b"Gamma")).array().items(gamma);
+        }
+        if let Some(matrix) = self.0.matrix {
+            dict.insert(Name(b"Matrix")).array().items(matrix);
+        }
+        dict.finish();
+        array.finish();
+    }
+}
+
+impl Resourceable for CalRgbColorSpace {
+    type Resource = resource::ColorSpace;
+}
+
+impl Cacheable for CalGrayColorSpace {
+    fn serialize(
+        self,
+        _sc: &mut SerializeContext,
+        chunk_container: &mut ChunkContainer,
+        root_ref: Ref,
+    ) {
+        let chunk = &mut chunk_container.non_stream.color_spaces;
+        let mut array = chunk.indirect(root_ref).array();
+        array.item(Name(b"CalGray"));
+
+        let mut dict = array.push().dict();
+        dict.insert(Name(b"WhitePoint"))
+            .array()
+            .items(self.0.white_point);
+        if let Some(black_point) = self.0.black_point {
+            dict.insert(Name(b"BlackPoint")).array().items(black_point);
+        }
+        if let Some(gamma) = self.0.gamma {
+            dict.pair(Name(b"Gamma"), gamma);
+        }
+        dict.finish();
+        array.finish();
+    }
+}
+
+impl Resourceable for CalGrayColorSpace {
+    type Resource = resource::ColorSpace;
+}
+
+impl Cacheable for LabColorSpace {
+    fn serialize(
+        self,
+        _sc: &mut SerializeContext,
+        chunk_container: &mut ChunkContainer,
+        root_ref: Ref,
+    ) {
+        let chunk = &mut chunk_container.non_stream.color_spaces;
+        let mut array = chunk.indirect(root_ref).array();
+        array.item(Name(b"Lab"));
+
+        let mut dict = array.push().dict();
+        dict.insert(Name(b"WhitePoint"))
+            .array()
+            .items(self.0.white_point);
+        if let Some(black_point) = self.0.black_point {
+            dict.insert(Name(b"BlackPoint")).array().items(black_point);
+        }
+        if let Some(range) = self.0.range {
+            dict.insert(Name(b"Range")).array().items(range);
+        }
+        dict.finish();
+        array.finish();
+    }
+}
+
+impl Resourceable for LabColorSpace {
+    type Resource = resource::ColorSpace;
 }
 
 impl From<CieBasedColorSpace> for ColorSpace {
@@ -1637,5 +2096,125 @@ mod tests {
         .unwrap();
         let c: Color = devicen::Color::new(vec![0.5], space).unwrap().into();
         assert_eq!(c.clone().project(ColourConversion::ForceSpot), c);
+    }
+
+    // --- Calibrated CIE-based spaces: end-to-end emission -----------
+    //
+    // Each test fills a path with a CalRGB / CalGray / Lab colour and
+    // asserts the inline colour-space array name (`/CalRGB` /
+    // `/CalGray` / `/Lab`) lands in the serialised PDF byte stream.
+    // The tests catch a routing regression — the `Cacheable` impl on
+    // `Cal{Rgb,Gray}ColorSpace` / `LabColorSpace`, the
+    // `register_colorspace` dispatch, or the `RegularColor::color_space`
+    // mapping — without coupling to the rest of the dictionary layout.
+
+    use crate::document::Document;
+    use crate::geom::PathBuilder;
+    use crate::graphics::paint::{Fill, FillRule};
+    use crate::num::NormalizedF32;
+    use crate::page::PageSettings;
+    use crate::SerializeSettings;
+
+    fn finish_with_fill(fill: Fill) -> Vec<u8> {
+        let settings = SerializeSettings {
+            pretty: false,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page =
+            document.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
+        let mut surface = page.surface();
+        surface.set_fill(Some(fill));
+
+        let mut pb = PathBuilder::new();
+        pb.move_to(10.0, 10.0);
+        pb.line_to(90.0, 10.0);
+        pb.line_to(90.0, 90.0);
+        pb.line_to(10.0, 90.0);
+        pb.close();
+        let path = pb.finish().expect("path should build");
+        surface.draw_path(&path);
+        surface.finish();
+        page.finish();
+        document
+            .finish()
+            .expect("document serialisation should succeed")
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn cal_rgb_colour_space_array_lands_in_pdf() {
+        let params = CalRgbParams {
+            // D65 white point per ISO 32000-2 §8.6.5.6.
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: Some([0.0, 0.0, 0.0]),
+            gamma: Some([2.2, 2.2, 2.2]),
+            matrix: None,
+        };
+        let color: Color =
+            RegularColor::cal_rgb(params, [0.5, 0.25, 0.75]).into();
+        let pdf = finish_with_fill(Fill {
+            paint: color.into(),
+            opacity: NormalizedF32::ONE,
+            rule: FillRule::default(),
+        });
+        assert!(
+            contains(&pdf, b"/CalRGB"),
+            "PDF should carry an inline /CalRGB colour-space array"
+        );
+        assert!(
+            contains(&pdf, b"/WhitePoint"),
+            "PDF should carry the CalRGB /WhitePoint key"
+        );
+    }
+
+    #[test]
+    fn cal_gray_colour_space_array_lands_in_pdf() {
+        let params = CalGrayParams {
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: None,
+            gamma: Some(2.2),
+        };
+        let color: Color = RegularColor::cal_gray(params, 0.5).into();
+        let pdf = finish_with_fill(Fill {
+            paint: color.into(),
+            opacity: NormalizedF32::ONE,
+            rule: FillRule::default(),
+        });
+        assert!(
+            contains(&pdf, b"/CalGray"),
+            "PDF should carry an inline /CalGray colour-space array"
+        );
+        assert!(
+            contains(&pdf, b"/Gamma"),
+            "PDF should carry the CalGray /Gamma key"
+        );
+    }
+
+    #[test]
+    fn lab_colour_space_array_lands_in_pdf() {
+        let params = LabParams {
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: None,
+            range: Some([-128.0, 127.0, -128.0, 127.0]),
+        };
+        // L = 50 (mid-grey), a = 20, b = -30.
+        let color: Color = RegularColor::lab(params, [50.0, 20.0, -30.0]).into();
+        let pdf = finish_with_fill(Fill {
+            paint: color.into(),
+            opacity: NormalizedF32::ONE,
+            rule: FillRule::default(),
+        });
+        assert!(
+            contains(&pdf, b"/Lab"),
+            "PDF should carry an inline /Lab colour-space array"
+        );
+        assert!(
+            contains(&pdf, b"/Range"),
+            "PDF should carry the Lab /Range key"
+        );
     }
 }

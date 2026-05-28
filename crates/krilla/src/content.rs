@@ -1403,6 +1403,17 @@ impl ContentBuilder {
                             "IccBased wide-gamut colours must route through ContentColorSpace::Named"
                         )
                     }
+                    Color::Regular(crate::color::RegularColor::CalRgb { .. })
+                    | Color::Regular(crate::color::RegularColor::CalGray { .. })
+                    | Color::Regular(crate::color::RegularColor::Lab { .. }) => {
+                        // Calibrated CIE-based variants always resolve to
+                        // `CieBasedColorSpace::{CalRgb,CalGray,Lab}` and
+                        // land in the `Named(n)` arm. Reaching `Device`
+                        // here is a routing regression.
+                        unreachable!(
+                            "Calibrated CIE-based colours must route through ContentColorSpace::Named"
+                        )
+                    }
                     Color::Special(_) => {
                         panic!("Device color space cannot be used with special colors")
                     }
@@ -1454,6 +1465,13 @@ impl ContentBuilder {
                     Color::Regular(crate::color::RegularColor::IccBased { .. }) => {
                         unreachable!(
                             "IccBased wide-gamut colours must route through ContentColorSpace::Named"
+                        )
+                    }
+                    Color::Regular(crate::color::RegularColor::CalRgb { .. })
+                    | Color::Regular(crate::color::RegularColor::CalGray { .. })
+                    | Color::Regular(crate::color::RegularColor::Lab { .. }) => {
+                        unreachable!(
+                            "Calibrated CIE-based colours must route through ContentColorSpace::Named"
                         )
                     }
                     Color::Special(_) => {
