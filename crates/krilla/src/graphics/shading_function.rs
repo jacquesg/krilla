@@ -809,6 +809,18 @@ fn serialize_stitching(
 
     for window in stops.windows(2) {
         let (first, second) = (&window[0], &window[1]);
+
+        // Skip zero-width segments. CSS hard colour stops place two stops at the
+        // same offset (e.g. `transparent 0 36pt, black 36pt 72pt`); emitting a
+        // sub-function for the empty interval yields a degenerate FunctionType 3
+        // with non-increasing Bounds (malformed per PDF 32000-2 §7.10.4). Some
+        // readers — notably PDFium — rasterise such a shading pathologically
+        // slowly (~14 s for a single masked box). The hard transition is
+        // preserved by the boundary between the neighbouring constant segments.
+        if first.offset.get() == second.offset.get() {
+            continue;
+        }
+
         bounds.push(second.offset.get());
 
         let (c0_components, c1_components) = if use_opacities {
