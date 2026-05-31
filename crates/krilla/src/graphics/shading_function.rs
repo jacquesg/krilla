@@ -873,10 +873,13 @@ fn serialize_stitching(
 /// CSS hard colour stop becomes a steep-but-continuous ramp. See
 /// [`serialize_stitching`] for why the opacity/soft-mask path needs this.
 fn spread_coincident_offsets(stops: &[Stop]) -> Vec<Stop> {
-    /// Half the ramp width, in normalised gradient space (≈0.1 px at 72 dpi on a
-    /// 72 pt gradient) — sub-pixel at any real device resolution, yet wide
-    /// enough that PDFium does not pathologically subdivide the transition.
-    const HARD_STOP_EPSILON: f32 = 1.0e-3;
+    /// Spacing inserted between coincident stops — i.e. the ramp width produced
+    /// for a single hard stop — in normalised gradient space. Measured PDFium
+    /// soft-mask knee: a ramp ≤0.1% of the gradient still subdivides
+    /// pathologically (~20 s), whereas ≥0.2% rasterises in microseconds. 0.3%
+    /// sits comfortably past the knee while staying sub-pixel on typical masks
+    /// at print resolution (0.3% × 72 pt ≈ 0.9 px at 300 dpi).
+    const HARD_STOP_EPSILON: f32 = 3.0e-3;
 
     let mut out = stops.to_vec();
     let len = out.len();
