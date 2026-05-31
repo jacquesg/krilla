@@ -802,27 +802,16 @@ fn serialize_stitching(
     use_opacities: bool,
 ) -> Ref {
     // CSS hard colour stops place two stops at the same offset (e.g.
-    // `transparent 0 36pt, black 36pt 72pt`). A sub-function per stop pair would
-    // then yield a zero-width FunctionType 3 sub-domain and a duplicate Bounds
-    // entry — non-increasing Bounds, malformed per PDF 32000-2 §7.10.4.
+    // `transparent 0 36pt, black 36pt 72pt`). Emitting a sub-function for that
+    // empty interval yields a zero-width FunctionType 3 sub-domain and a
+    // duplicate Bounds entry — non-increasing Bounds, malformed per PDF
+    // 32000-2 §7.10.4.
     //
-    // Colour shadings drop that empty segment (the `>=` guard below): the hard
-    // transition survives as the boundary between the neighbouring constant
-    // segments, and PDFium rasterises a step *fill* cheaply.
-    //
-    // Opacity (soft-mask) shadings are different — a true discontinuity makes
-    // PDFium adaptively subdivide the soft-mask group's shading without bound
-    // (~14 s for a single masked box, independent of output resolution). So we
-    // first spread coincident offsets by a sub-pixel epsilon into a steep-but-
-    // continuous ramp, which PDFium rasterises in microseconds and is visually
-    // indistinguishable from a step at any real device resolution.
-    let spread;
-    let stops = if use_opacities {
-        spread = spread_coincident_offsets(stops);
-        spread.as_slice()
-    } else {
-        stops
-    };
+    // `spread_coincident_offsets` decides, per coincident run, whether to widen
+    // it into a sub-pixel ramp or leave it as an exact step; the `>=` guard in
+    // the loop then drops the zero-width segment any exact step leaves behind.
+    let spread = spread_coincident_offsets(stops, use_opacities);
+    let stops = spread.as_slice();
 
     let root_ref = sc.new_ref();
     let mut functions = vec![];
@@ -868,11 +857,20 @@ fn serialize_stitching(
     root_ref
 }
 
-/// Spread runs of stops that share an offset symmetrically around it by
-/// [`HARD_STOP_EPSILON`], clamped to `[0, 1]` and kept strictly increasing, so a
-/// CSS hard colour stop becomes a steep-but-continuous ramp. See
-/// [`serialize_stitching`] for why the opacity/soft-mask path needs this.
-fn spread_coincident_offsets(stops: &[Stop]) -> Vec<Stop> {
+/// Spread runs of stops that share an offset into a sub-pixel ramp, so a CSS
+/// hard stop does not reach PDFium as a true discontinuity.
+///
+/// Per run, [`should_spread_run`] decides: an opacity (soft-mask) transition is
+/// always widened — a discontinuous opacity inside a soft-mask group makes
+/// PDFium subdivide without bound (~14 s for one masked box); a colour run is
+/// widened only when it is degenerate (all its stops share a colour, e.g. the
+/// constant black of an alpha-only `transparent`→`black` gradient), so a genuine
+/// colour hard stop (`red 50%, blue 50%`) stays an exact step — cheap for PDFium
+/// as a fill, and left for the caller's `>=` guard to collapse.
+///
+/// Widened runs are spread symmetrically about the shared offset by
+/// [`HARD_STOP_EPSILON`], clamped to `[0, 1]` and kept strictly increasing.
+fn spread_coincident_offsets(stops: &[Stop], use_opacities: bool) -> Vec<Stop> {
     /// Spacing inserted between coincident stops — i.e. the ramp width produced
     /// for a single hard stop — in normalised gradient space. Measured PDFium
     /// soft-mask knee: a ramp ≤0.1% of the gradient still subdivides
@@ -890,7 +888,7 @@ fn spread_coincident_offsets(stops: &[Stop]) -> Vec<Stop> {
         while j < len && out[j].offset.get() == offset {
             j += 1;
         }
-        if j - i > 1 {
+        if j - i > 1 && should_spread_run(&out[i..j], use_opacities) {
             let run = (j - i) as f32;
             for (k, stop) in out[i..j].iter_mut().enumerate() {
                 let centred = k as f32 - (run - 1.0) / 2.0;
@@ -903,6 +901,18 @@ fn spread_coincident_offsets(stops: &[Stop]) -> Vec<Stop> {
         i = j;
     }
     out
+}
+
+/// Whether a run of coincident-offset stops should be widened into a ramp
+/// rather than left as an exact step. See [`spread_coincident_offsets`].
+fn should_spread_run(run: &[Stop], use_opacities: bool) -> bool {
+    if use_opacities {
+        // Any opacity step inside a soft-mask group is the pathological case.
+        return true;
+    }
+    // A colour step is widened only when it carries no actual colour change, so
+    // a genuine hard colour stop stays exact.
+    run.iter().all(|stop| stop.color == run[0].color)
 }
 
 fn serialize_exponential(
@@ -936,9 +946,13 @@ mod tests {
     use crate::graphics::color::rgb;
 
     fn stop(offset: f32) -> Stop {
+        stop_rgb(offset, 0, 0, 0)
+    }
+
+    fn stop_rgb(offset: f32, r: u8, g: u8, b: u8) -> Stop {
         Stop {
             offset: NormalizedF32::new(offset).unwrap(),
-            color: rgb::Color::new(0, 0, 0).into(),
+            color: rgb::Color::new(r, g, b).into(),
             opacity: NormalizedF32::ONE,
         }
     }
@@ -958,11 +972,13 @@ mod tests {
     }
 
     #[test]
-    fn spread_separates_a_coincident_pair() {
+    fn opacity_spread_separates_a_coincident_pair() {
         // A CSS hard stop (`transparent 0 50%, black 50% 100%`) yields two stops
         // at 0.5; without spreading they produce a duplicate Bounds entry.
-        let spread =
-            spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)]);
+        let spread = spread_coincident_offsets(
+            &[stop(0.0), stop(0.5), stop(0.5), stop(1.0)],
+            true,
+        );
         assert_eq!(spread.len(), 4);
         assert_strictly_increasing(&spread);
         // The ramp stays centred on the original offset and narrow.
@@ -973,16 +989,49 @@ mod tests {
     #[test]
     fn spread_leaves_distinct_offsets_untouched() {
         let input = [stop(0.0), stop(0.49), stop(0.51), stop(1.0)];
-        assert_eq!(offsets(&spread_coincident_offsets(&input)), offsets(&input));
+        assert_eq!(
+            offsets(&spread_coincident_offsets(&input, true)),
+            offsets(&input)
+        );
     }
 
     #[test]
-    fn spread_keeps_boundary_runs_in_range_and_ordered() {
+    fn opacity_spread_keeps_boundary_runs_in_range_and_ordered() {
         // Coincident stops at both 0 and 1 must stay within [0, 1] yet ordered.
-        let spread =
-            spread_coincident_offsets(&[stop(0.0), stop(0.0), stop(1.0), stop(1.0)]);
+        let spread = spread_coincident_offsets(
+            &[stop(0.0), stop(0.0), stop(1.0), stop(1.0)],
+            true,
+        );
         assert_strictly_increasing(&spread);
         assert!(spread.first().unwrap().offset.get() >= 0.0);
         assert!(spread.last().unwrap().offset.get() <= 1.0);
+    }
+
+    #[test]
+    fn colour_spread_widens_a_degenerate_step() {
+        // An alpha-only gradient is constant black; its coincident colour stops
+        // carry no colour change, so the colour shading is widened too (a step
+        // there is needless and PDFium subdivides it inside a soft-mask group).
+        let spread = spread_coincident_offsets(
+            &[stop(0.0), stop(0.5), stop(0.5), stop(1.0)],
+            false,
+        );
+        assert_strictly_increasing(&spread);
+    }
+
+    #[test]
+    fn colour_spread_keeps_a_genuine_hard_stop_exact() {
+        // `red 50%, blue 50%` is a real colour discontinuity: it must stay an
+        // exact step (cheap for PDFium as a fill), so the offsets are untouched.
+        let input = [
+            stop_rgb(0.0, 255, 0, 0),
+            stop_rgb(0.5, 255, 0, 0),
+            stop_rgb(0.5, 0, 0, 255),
+            stop_rgb(1.0, 0, 0, 255),
+        ];
+        assert_eq!(
+            offsets(&spread_coincident_offsets(&input, false)),
+            offsets(&input)
+        );
     }
 }
