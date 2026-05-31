@@ -801,6 +801,29 @@ fn serialize_stitching(
     sc: &mut SerializeContext,
     use_opacities: bool,
 ) -> Ref {
+    // CSS hard colour stops place two stops at the same offset (e.g.
+    // `transparent 0 36pt, black 36pt 72pt`). A sub-function per stop pair would
+    // then yield a zero-width FunctionType 3 sub-domain and a duplicate Bounds
+    // entry — non-increasing Bounds, malformed per PDF 32000-2 §7.10.4.
+    //
+    // Colour shadings drop that empty segment (the `>=` guard below): the hard
+    // transition survives as the boundary between the neighbouring constant
+    // segments, and PDFium rasterises a step *fill* cheaply.
+    //
+    // Opacity (soft-mask) shadings are different — a true discontinuity makes
+    // PDFium adaptively subdivide the soft-mask group's shading without bound
+    // (~14 s for a single masked box, independent of output resolution). So we
+    // first spread coincident offsets by a sub-pixel epsilon into a steep-but-
+    // continuous ramp, which PDFium rasterises in microseconds and is visually
+    // indistinguishable from a step at any real device resolution.
+    let spread;
+    let stops = if use_opacities {
+        spread = spread_coincident_offsets(stops);
+        spread.as_slice()
+    } else {
+        stops
+    };
+
     let root_ref = sc.new_ref();
     let mut functions = vec![];
     let mut bounds = vec![];
@@ -810,14 +833,8 @@ fn serialize_stitching(
     for window in stops.windows(2) {
         let (first, second) = (&window[0], &window[1]);
 
-        // Skip zero-width segments. CSS hard colour stops place two stops at the
-        // same offset (e.g. `transparent 0 36pt, black 36pt 72pt`); emitting a
-        // sub-function for the empty interval yields a degenerate FunctionType 3
-        // with non-increasing Bounds (malformed per PDF 32000-2 §7.10.4). Some
-        // readers — notably PDFium — rasterise such a shading pathologically
-        // slowly (~14 s for a single masked box). The hard transition is
-        // preserved by the boundary between the neighbouring constant segments.
-        if first.offset.get() == second.offset.get() {
+        // Drop degenerate (zero- or negative-width) segments; see above.
+        if first.offset.get() >= second.offset.get() {
             continue;
         }
 
@@ -851,6 +868,40 @@ fn serialize_stitching(
     root_ref
 }
 
+/// Spread runs of stops that share an offset symmetrically around it by
+/// [`HARD_STOP_EPSILON`], clamped to `[0, 1]` and kept strictly increasing, so a
+/// CSS hard colour stop becomes a steep-but-continuous ramp. See
+/// [`serialize_stitching`] for why the opacity/soft-mask path needs this.
+fn spread_coincident_offsets(stops: &[Stop]) -> Vec<Stop> {
+    /// Half the ramp width, in normalised gradient space (≈0.1 px at 72 dpi on a
+    /// 72 pt gradient) — sub-pixel at any real device resolution, yet wide
+    /// enough that PDFium does not pathologically subdivide the transition.
+    const HARD_STOP_EPSILON: f32 = 1.0e-3;
+
+    let mut out = stops.to_vec();
+    let len = out.len();
+    let mut i = 0;
+    while i < len {
+        let offset = out[i].offset.get();
+        let mut j = i + 1;
+        while j < len && out[j].offset.get() == offset {
+            j += 1;
+        }
+        if j - i > 1 {
+            let run = (j - i) as f32;
+            for (k, stop) in out[i..j].iter_mut().enumerate() {
+                let centred = k as f32 - (run - 1.0) / 2.0;
+                let nudged = (offset + centred * HARD_STOP_EPSILON).clamp(0.0, 1.0);
+                if let Some(value) = NormalizedF32::new(nudged) {
+                    stop.offset = value;
+                }
+            }
+        }
+        i = j;
+    }
+    out
+}
+
 fn serialize_exponential(
     c0: Vec<f32>,
     c1: Vec<f32>,
@@ -874,4 +925,61 @@ fn serialize_exponential(
     exp.n(1.0);
     exp.finish();
     root_ref
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphics::color::rgb;
+
+    fn stop(offset: f32) -> Stop {
+        Stop {
+            offset: NormalizedF32::new(offset).unwrap(),
+            color: rgb::Color::new(0, 0, 0).into(),
+            opacity: NormalizedF32::ONE,
+        }
+    }
+
+    fn offsets(stops: &[Stop]) -> Vec<f32> {
+        stops.iter().map(|s| s.offset.get()).collect()
+    }
+
+    fn assert_strictly_increasing(stops: &[Stop]) {
+        for pair in stops.windows(2) {
+            assert!(
+                pair[0].offset.get() < pair[1].offset.get(),
+                "offsets must be strictly increasing, got {:?}",
+                offsets(stops)
+            );
+        }
+    }
+
+    #[test]
+    fn spread_separates_a_coincident_pair() {
+        // A CSS hard stop (`transparent 0 50%, black 50% 100%`) yields two stops
+        // at 0.5; without spreading they produce a duplicate Bounds entry.
+        let spread =
+            spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)]);
+        assert_eq!(spread.len(), 4);
+        assert_strictly_increasing(&spread);
+        // The ramp stays centred on the original offset and narrow.
+        assert!((spread[1].offset.get() - 0.5).abs() < 1.0e-2);
+        assert!((spread[2].offset.get() - 0.5).abs() < 1.0e-2);
+    }
+
+    #[test]
+    fn spread_leaves_distinct_offsets_untouched() {
+        let input = [stop(0.0), stop(0.49), stop(0.51), stop(1.0)];
+        assert_eq!(offsets(&spread_coincident_offsets(&input)), offsets(&input));
+    }
+
+    #[test]
+    fn spread_keeps_boundary_runs_in_range_and_ordered() {
+        // Coincident stops at both 0 and 1 must stay within [0, 1] yet ordered.
+        let spread =
+            spread_coincident_offsets(&[stop(0.0), stop(0.0), stop(1.0), stop(1.0)]);
+        assert_strictly_increasing(&spread);
+        assert!(spread.first().unwrap().offset.get() >= 0.0);
+        assert!(spread.last().unwrap().offset.get() <= 1.0);
+    }
 }
