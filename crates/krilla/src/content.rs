@@ -161,6 +161,20 @@ impl ContentBuilder {
         self.active_marked_content = false;
     }
 
+    /// Begin an `/Artifact` marked-content section in the content stream,
+    /// regardless of whether the page is tagged. Artifacts carry no MCID and
+    /// are not part of the structure tree, so this is independent of the
+    /// tagging machinery driven by the page identifier. Returns `false`
+    /// (emitting nothing) when a marked-content section is already open —
+    /// marked content does not nest here.
+    pub(crate) fn try_begin_artifact_content(&mut self) -> bool {
+        if self.active_marked_content {
+            return false;
+        }
+        self.start_marked_content(Name(b"Artifact"));
+        true
+    }
+
     /// Begin a `/OC` marked-content sequence pointing at the OCG
     /// dictionary identified by `(name, layer_ref)`.
     ///
