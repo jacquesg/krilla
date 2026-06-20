@@ -175,6 +175,27 @@ impl ContentBuilder {
         true
     }
 
+    /// Begin a `/Span` marked-content section carrying `/ActualText` — the
+    /// reading-order text for the bracketed glyphs — regardless of whether the
+    /// page is tagged. Structure tagging (`start_tagged`) is gated on the page
+    /// identifier and emits nothing on an untagged page, so right-to-left /
+    /// bidi-reordered glyph runs reach a plain content stream in visual order
+    /// and extract reversed. This writes `/Span <</ActualText (…)>> BDC`
+    /// directly so the run extracts in logical order in untagged PDFs too.
+    ///
+    /// Returns `false` (emitting nothing) when a marked-content section is
+    /// already open — marked content does not nest here. Pass the returned
+    /// flag to [`end_marked_content`](Self::end_marked_content).
+    pub(crate) fn try_begin_actual_text_content(&mut self, actual_text: &str) -> bool {
+        if self.active_marked_content {
+            return false;
+        }
+        self.start_marked_content_prelude();
+        let mut mc = self.content.begin_marked_content_with_properties(Name(b"Span"));
+        mc.properties().actual_text(TextStr(actual_text));
+        true
+    }
+
     /// Begin a `/OC` marked-content sequence pointing at the OCG
     /// dictionary identified by `(name, layer_ref)`.
     ///
