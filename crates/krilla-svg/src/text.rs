@@ -29,6 +29,17 @@ pub(crate) fn render(
             path::render(underline, surface, process_context);
         }
 
+        // usvg lays glyphs out in visual order after BIDI reordering. Wrap the
+        // span's glyphs in an /ActualText marked-content region carrying the
+        // source text in logical (reading) order — recovered by sorting on the
+        // logical byte offset — so right-to-left / bidi text extracts in reading
+        // order (ISO 32000-2 §14.9.4). Glyphs are still painted in visual order;
+        // /ActualText only overrides extraction.
+        let mut logical: Vec<_> = span.positioned_glyphs.iter().collect();
+        logical.sort_by_key(|glyph| glyph.byte_idx);
+        let actual_text: String = logical.iter().map(|glyph| glyph.text.as_str()).collect();
+        let actual_text_started = surface.begin_actual_text_content(&actual_text);
+
         for glyph in &span.positioned_glyphs {
             // Ignore glyph if font can't be fetched.
             let Some(font) = process_context.fonts.get(&glyph.font).cloned() else {
@@ -134,6 +145,8 @@ pub(crate) fn render(
 
             surface.pop();
         }
+
+        surface.end_actual_text_content(actual_text_started);
 
         if let Some(line_through) = &span.line_through {
             path::render(line_through, surface, process_context);

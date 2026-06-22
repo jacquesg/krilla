@@ -62,4 +62,10 @@ zune-jpeg = "0.5.5"
 # its indirect dependencies.
 [patch."https://github.com/typst/pdf-writer"]
 pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "c36fa51a041b7c2563bd69742ce9e0f90dcfd4dd" }
+
+# jacquesg/resvg feat/moegoe exposes PositionedGlyph.byte_idx (the logical
+# source offset) so krilla-svg can emit /ActualText in reading order for
+# RTL / bidi SVG text. Not upstream.
+[patch.crates-io]
+usvg = { git = "https://github.com/jacquesg/resvg", rev = "d7e643fe51a91208020cf13e792586545974afbc" }
  
