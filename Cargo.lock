@@ -1970,6 +1970,7 @@ name = "tests"
 version = "0.0.0"
 dependencies = [
  "difference",
+ "flate2",
  "fontdb",
  "image 0.25.10",
  "krilla",
