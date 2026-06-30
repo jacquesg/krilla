@@ -1212,11 +1212,12 @@ impl SerializeContext {
         file: EmbeddedFile,
     ) -> Option<()> {
         let name = file.path.clone();
+        let embed_location = file.embed_location;
         let ref_ = self.register_cacheable(chunk_container, file);
         if self
             .global_objects
             .embedded_files
-            .insert(name, ref_)
+            .insert(name, (ref_, embed_location))
             .is_some()
         {
             None
@@ -2363,7 +2364,16 @@ pub(crate) struct GlobalObjects {
     tag_tree: MaybeTaken<Option<TagTree>>,
     /// Stores the association of the names of embedded files to their refs,
     /// for the catalog dictionary.
-    pub(crate) embedded_files: MaybeTaken<BTreeMap<String, Ref>>,
+    /// File-name → (indirect ref of the FileSpec dict, attachment
+    /// position) for every embedded file registered via
+    /// `Document::embed_file`. The map is alphabetically sorted by
+    /// name (BTreeMap order matches the PDF name-tree sort order
+    /// per ISO 32000-1 §7.9.6). The position drives the
+    /// catalogue's `/AF` array partitioning: `EmbedLocation::Before`
+    /// entries are emitted ahead of `EmbedLocation::After` entries,
+    /// preserving alphabetical order within each partition.
+    pub(crate) embedded_files:
+        MaybeTaken<BTreeMap<String, (Ref, crate::embed::EmbedLocation)>>,
     /// A list of custom headings numbers used in the document.
     pub(crate) custom_heading_roles: BTreeSet<NonZeroU16>,
     /// Optional content groups (layers) registered via
