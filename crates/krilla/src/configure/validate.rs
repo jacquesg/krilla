@@ -2200,10 +2200,13 @@ impl ValidationStore {
         &mut self,
         separation: &SeparationSpace,
     ) -> Result<(), ValidationError> {
+        // `RegularColor` is no longer `Copy` after the `IccBased`
+        // variant landed; clone the fallback once and compare the
+        // already-stored entry against it by reference.
         if self
             .separation_fallback_map
             .entry(separation.colorant.clone())
-            .or_insert(separation.fallback)
+            .or_insert_with(|| separation.fallback.clone())
             == &separation.fallback
         {
             Ok(())

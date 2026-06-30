@@ -245,6 +245,16 @@ impl Annotation {
                             );
                         }
                     }
+                    crate::color::RegularColor::IccBased { .. } => {
+                        // An IccBased annotation colour cannot be ICC-wrapped in
+                        // the raw `/C` array, so its N=3 components emit as
+                        // DeviceRGB — characterised like RGB under the intent.
+                        if !sc.serialize_settings().pdfx_output_intent_is_rgb() {
+                            sc.register_validation_error(ValidationError::AnnotationContainsRgb(
+                                self.location,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -2189,6 +2199,17 @@ fn write_color(annotation: &mut pdf_writer::writers::Annotation, color: &Color) 
         }
         crate::color::RegularColor::Luma(gray) => {
             annotation.color_gray(gray.to_pdf_color());
+        }
+        // PDF 32000-2 §12.5.6.5 `/C` entries on annotations are
+        // device-space only (1, 3 or 4 components — DeviceGray /
+        // DeviceRGB / DeviceCMYK). An ICC-based wide-gamut paint
+        // has no ICC engine inside krilla, so the source components
+        // are written verbatim as a DeviceRGB triple. Authoring a
+        // wide-gamut paint on an annotation surface is a niche edge
+        // case (annotation appearance streams handle gamut more
+        // precisely than the `/C` colour entry).
+        crate::color::RegularColor::IccBased { components, .. } => {
+            annotation.color_rgb(components[0], components[1], components[2]);
         }
     }
 }
