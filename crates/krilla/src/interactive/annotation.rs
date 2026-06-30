@@ -880,11 +880,24 @@ pub struct ButtonField {
 /// An AcroForm choice field (`/FT /Ch`) — combo box or list box. Set
 /// the combo flag via [`ChoiceFieldFlags::with_combo`] to make it a
 /// dropdown.
+///
+/// `values` and `default_values` are vectors of export-value strings.
+/// Their cardinality drives `/V` and `/DV` emission per ISO 32000-2
+/// §12.7.4.4:
+///
+/// - empty vector — entry omitted entirely
+/// - one entry — `/V (literal)` (single string)
+/// - two or more entries — `/V [(a)(b)(c)]` (array of strings); only
+///   valid when the multi-select flag (bit 22) is set on
+///   [`ChoiceFieldFlags`].
+///
+/// Single-select callers pass a one-element vector; multi-select
+/// (`<select multiple>`) callers pass one entry per selected option.
 pub struct ChoiceField {
-    /// Current value (`/V`).
-    pub value: String,
-    /// Default value (`/DV`).
-    pub default_value: String,
+    /// Currently selected export values (`/V`).
+    pub values: Vec<String>,
+    /// Default export values (`/DV`).
+    pub default_values: Vec<String>,
     /// `(export-value, display-name)` pairs written into `/Opt`.
     pub options: Vec<(String, String)>,
     /// Per-field flag bits — see [`ChoiceFieldFlags`].
@@ -1282,8 +1295,14 @@ impl WidgetAnnotation {
                 annotation.pair(Name(b"FT"), Name(b"Ch"));
                 annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
                 annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
-                annotation.pair(Name(b"V"), TextStr(&choice.value));
-                annotation.pair(Name(b"DV"), TextStr(&choice.default_value));
+                // /V and /DV emission follows ISO 32000-2 §12.7.4.4:
+                // empty → omit; one entry → string literal; two or more
+                // → array of strings (MultiSelect, bit 22). Single-
+                // select callers are expected to pass a one-element
+                // vector; the array form is meaningful only when
+                // `ChoiceFieldFlags::multi_select` is set.
+                write_choice_value_entry(annotation, Name(b"V"), &choice.values);
+                write_choice_value_entry(annotation, Name(b"DV"), &choice.default_values);
                 let mut opt = annotation.insert(Name(b"Opt")).array();
                 for (export, display) in &choice.options {
                     let mut entry = opt.push().array();
@@ -1294,13 +1313,17 @@ impl WidgetAnnotation {
                 opt.finish();
                 let ap_ref = sc.new_ref();
                 write_ap_single(annotation, ap_ref);
-                // Find display string for the current /V (export value).
+                // Find display string for the first /V (export value).
+                // The appearance stream renders one selection only —
+                // multi-select fields rely on `/NeedAppearances true`
+                // for the viewer to render the full selection list.
+                let first_export = choice.values.first().map(String::as_str).unwrap_or("");
                 let display = choice
                     .options
                     .iter()
-                    .find(|(export, _)| export == &choice.value)
+                    .find(|(export, _)| export == first_export)
                     .map(|(_, display)| display.as_str())
-                    .unwrap_or(choice.value.as_str());
+                    .unwrap_or(first_export);
                 job = AppearanceJob {
                     helv_ref,
                     on: AppearanceStream {
@@ -1316,6 +1339,33 @@ impl WidgetAnnotation {
         }
 
         Ok(Some(job))
+    }
+}
+
+/// Write a `/V` or `/DV` entry on a choice-field widget annotation.
+///
+/// Cardinality drives the PDF object kind per ISO 32000-2 §12.7.4.4:
+/// an empty vector omits the entry, a single value emits a string
+/// literal, and two or more values emit an array of strings (only
+/// meaningful when the MultiSelect flag, bit 22, is set on the
+/// field's `/Ff`).
+fn write_choice_value_entry(
+    annotation: &mut pdf_writer::writers::Annotation,
+    key: Name<'static>,
+    values: &[String],
+) {
+    match values {
+        [] => {}
+        [single] => {
+            annotation.pair(key, TextStr(single));
+        }
+        many => {
+            let mut array = annotation.insert(key).array();
+            for value in many {
+                array.item(TextStr(value));
+            }
+            array.finish();
+        }
     }
 }
 
@@ -1756,8 +1806,8 @@ mod tests {
     #[test]
     fn widget_annotation_choice_combo_sets_flag_bit_18() {
         let choice = WidgetField::Choice(ChoiceField {
-            value: "US".into(),
-            default_value: "US".into(),
+            values: vec!["US".into()],
+            default_values: vec!["US".into()],
             options: vec![
                 ("US".into(), "United States".into()),
                 ("CA".into(), "Canada".into()),
@@ -1772,6 +1822,63 @@ mod tests {
         assert!(contains(&pdf, b"/Ff 131072"), "missing combo /Ff bit");
         assert!(contains(&pdf, b"/Opt"), "missing /Opt array");
         assert!(contains(&pdf, b"(US)"), "missing US export");
+        // Single value still emits /V as a string literal, not an array.
+        assert!(contains(&pdf, b"/V (US)"), "missing single-value /V");
+        assert!(!contains(&pdf, b"/V ["), "single value must not emit /V array");
+    }
+
+    #[test]
+    fn widget_annotation_choice_multi_select_emits_v_array() {
+        // MultiSelect flag (bit 22) plus three selected export values
+        // round-trip into a `/V [(red)(green)(blue)]` array per
+        // ISO 32000-2 §12.7.4.4.
+        let choice = WidgetField::Choice(ChoiceField {
+            values: vec!["red".into(), "green".into(), "blue".into()],
+            default_values: vec!["red".into()],
+            options: vec![
+                ("red".into(), "Red".into()),
+                ("green".into(), "Green".into()),
+                ("blue".into(), "Blue".into()),
+                ("yellow".into(), "Yellow".into()),
+            ],
+            flags: ChoiceFieldFlags::default().with_multi_select(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "colours", choice);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/FT /Ch"), "missing /FT /Ch");
+        // MultiSelect = bit 22 = 2097152
+        assert!(contains(&pdf, b"/Ff 2097152"), "missing multi-select /Ff bit");
+        // /V is an array, not a string literal — the byte sequence is
+        // `/V [(red)(green)(blue)]` (pdf-writer inserts no separator
+        // between adjacent string literals).
+        assert!(contains(&pdf, b"/V ["), "missing /V array opener");
+        assert!(contains(&pdf, b"(red)"), "missing red value");
+        assert!(contains(&pdf, b"(green)"), "missing green value");
+        assert!(contains(&pdf, b"(blue)"), "missing blue value");
+        // Default values still emit as a single literal.
+        assert!(contains(&pdf, b"/DV (red)"), "missing /DV single literal");
+    }
+
+    #[test]
+    fn widget_annotation_choice_empty_values_omits_v() {
+        // An empty `values` vector omits `/V` entirely — viewers fall
+        // back to `/DV` or the first option.
+        let choice = WidgetField::Choice(ChoiceField {
+            values: Vec::new(),
+            default_values: Vec::new(),
+            options: vec![("A".into(), "Apple".into())],
+            flags: ChoiceFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "fruit", choice);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/FT /Ch"), "missing /FT /Ch");
+        // Neither /V nor /DV should appear at all.
+        assert!(!contains(&pdf, b"/V ("), "unexpected /V literal");
+        assert!(!contains(&pdf, b"/V ["), "unexpected /V array");
+        assert!(!contains(&pdf, b"/DV ("), "unexpected /DV literal");
+        assert!(!contains(&pdf, b"/DV ["), "unexpected /DV array");
     }
 
     #[test]
