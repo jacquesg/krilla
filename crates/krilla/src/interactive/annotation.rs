@@ -1560,6 +1560,7 @@ pub struct WidgetAnnotation {
     pub(crate) partial_name: String,
     pub(crate) field: WidgetField,
     pub(crate) hidden: bool,
+    pub(crate) tooltip: Option<String>,
 }
 
 impl WidgetAnnotation {
@@ -1577,6 +1578,7 @@ impl WidgetAnnotation {
             partial_name: partial_name.into(),
             field,
             hidden: false,
+            tooltip: None,
         }
     }
 
@@ -1588,6 +1590,21 @@ impl WidgetAnnotation {
     /// fields.
     pub fn with_hidden(mut self, hidden: bool) -> Self {
         self.hidden = hidden;
+        self
+    }
+
+    /// Set the widget's `/TU` alternate field name — the human-readable
+    /// label that PDF readers surface as a tooltip when the pointer
+    /// hovers over the field, and that assistive technology
+    /// (screen readers, voice-control tools) speaks to identify the
+    /// field. Defined by ISO 32000-2 §12.7.4.1 Table 226 (`TU`,
+    /// "Alternate field name").
+    ///
+    /// `/TU` is inheritable across the field hierarchy; krilla
+    /// therefore omits it on radio-group children, which inherit
+    /// the parent's value alongside `/T` and `/FT`.
+    pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
+        self.tooltip = Some(tooltip.into());
         self
     }
 
@@ -1614,6 +1631,9 @@ impl WidgetAnnotation {
         let is_radio_group_child = matches!(&self.field, WidgetField::RadioGroupChild(_));
         if !is_radio_group_child {
             annotation.pair(Name(b"T"), TextStr(&self.partial_name));
+            if let Some(tooltip) = &self.tooltip {
+                annotation.pair(Name(b"TU"), TextStr(tooltip));
+            }
         }
 
         // /DA is mandatory on every variable-text field (and harmless
@@ -2372,6 +2392,38 @@ mod tests {
             contains(&pdf, b"/NeedAppearances true"),
             "missing /NeedAppearances true"
         );
+    }
+
+    #[test]
+    fn widget_annotation_emits_tu_tooltip_when_set() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "email", text)
+            .with_tooltip("E-mail address");
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(
+            contains(&pdf, b"/TU (E-mail address)"),
+            "missing /TU tooltip"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_omits_tu_when_unset() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "email", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(!contains(&pdf, b"/TU"), "/TU emitted when tooltip unset");
     }
 
     #[test]
