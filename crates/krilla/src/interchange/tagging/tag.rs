@@ -24,6 +24,24 @@ impl TagKind {
         self.as_any_mut().location = location;
         self
     }
+
+    /// Get the per-element `/NS` namespace override.
+    pub fn namespace(&self) -> Option<TagNamespace> {
+        self.as_any().namespace
+    }
+
+    /// Set the per-element `/NS` namespace override.
+    pub fn set_namespace(&mut self, namespace: Option<TagNamespace>) {
+        self.as_any_mut().namespace = namespace;
+    }
+
+    /// Override the structure element's `/NS` namespace binding
+    /// (PDF 2.0 only). See [`TagNamespace`] and [`AnyTag::namespace`]
+    /// for the default-binding rules and the values' meanings.
+    pub fn with_namespace(mut self, namespace: Option<TagNamespace>) -> Self {
+        self.as_any_mut().namespace = namespace;
+        self
+    }
 }
 
 /// A specific tag which allows accessing attributes specific to this [`TagKind`].
@@ -87,6 +105,24 @@ impl<T> Tag<T> {
         self.as_any_mut().location = location;
         self
     }
+
+    /// Get the per-element `/NS` namespace override.
+    pub fn namespace(&self) -> Option<TagNamespace> {
+        self.as_any().namespace
+    }
+
+    /// Set the per-element `/NS` namespace override.
+    pub fn set_namespace(&mut self, namespace: Option<TagNamespace>) {
+        self.as_any_mut().namespace = namespace;
+    }
+
+    /// Override the structure element's `/NS` namespace binding
+    /// (PDF 2.0 only). See [`TagNamespace`] and [`AnyTag::namespace`]
+    /// for the default-binding rules and the values' meanings.
+    pub fn with_namespace(mut self, namespace: Option<TagNamespace>) -> Self {
+        self.as_any_mut().namespace = namespace;
+        self
+    }
 }
 
 /// A raw tag, which allows reading all attributes and additionally writing all
@@ -95,6 +131,21 @@ impl<T> Tag<T> {
 pub struct AnyTag {
     /// The location of the tag.
     pub location: Option<Location>,
+    /// Per-element `/NS` namespace override (PDF 2.0 only).
+    ///
+    /// `None` means the structure element binds to its
+    /// default namespace: standard PDF 2.0 structure types
+    /// (`TagKind::Part`, `TagKind::Section`, …) bind to the
+    /// SSN; krilla-defined custom names (`Datetime`, `Terms`,
+    /// `Title`, `Strong`, `Em`, `Hn` for n ≥ 7) bind to the
+    /// krilla namespace. Setting this explicitly overrides
+    /// that default so the same tag kind can be routed into
+    /// either namespace per element.
+    ///
+    /// Ignored when the active PDF version is below 2.0
+    /// (pre-2.0 readers do not honour `/NS` and the PDF 2.0
+    /// namespace model does not exist there).
+    pub namespace: Option<TagNamespace>,
     pub(crate) attrs: OrdinalSet<Attr>,
 }
 
@@ -103,8 +154,34 @@ impl AnyTag {
         Self {
             attrs: OrdinalSet::new(),
             location: None,
+            namespace: None,
         }
     }
+}
+
+/// The PDF 2.0 structure-element namespace a tag binds to, for use
+/// with [`TagKind::with_namespace`] / [`Tag::with_namespace`].
+///
+/// The PDF 2.0 namespace model (ISO 32000-2 §14.8.6) lets a
+/// structure-element name carry meaning relative to a declared
+/// namespace, so the same `Name` can be reused across vocabularies
+/// without collision. krilla declares two namespaces at the
+/// document level and binds every standard / custom tag to one of
+/// them; this enum addresses those two namespaces by name.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum TagNamespace {
+    /// The PDF 2.0 standard structure namespace (SSN), declared by
+    /// `pdf-writer` via `Namespace::pdf_2_ns`. This is the default
+    /// for tag kinds that map to a `StructRole2` (`Part`,
+    /// `Section`, `P`, `Span`, …).
+    Pdf2Ssn,
+    /// The custom krilla namespace
+    /// (`https://github.com/LaurenzV/krilla`), declared at the
+    /// document level. This is the default for tag kinds whose
+    /// names are krilla-defined rather than standard
+    /// (`Datetime`, `Terms`, `Title`, `Strong`, `Em`, `Hn` for
+    /// n ≥ 7 on PDF 1.7).
+    Krilla,
 }
 
 /// An ordered set using ordinal numbers to sort and identify elements.
