@@ -48,6 +48,7 @@ use skrifa::{FontRef, MetadataProvider};
 
 mod annotation;
 mod colour_conversion;
+mod colour_options;
 mod destination;
 mod embed;
 mod font;
@@ -924,6 +925,8 @@ pub fn settings_1() -> SerializeSettings {
         glyph_layout: krilla::GlyphLayout::Optical,
         colour_conversion: ColourConversion::Auto,
         shape_optimisation: krilla::ShapeOptimisation::Auto,
+        rgb_grey_to_devicegray: false,
+        preserve_black: false,
     }
 }
 

@@ -125,6 +125,34 @@ impl Color {
         }
     }
 
+    /// Promote an RGB grey to a Luma colour when
+    /// [`SerializeSettings::rgb_grey_to_devicegray`] is enabled.
+    ///
+    /// Returns `self` unchanged unless the setting is on, the colour is
+    /// `RegularColor::Rgb`, and all three channels are byte-equal — in
+    /// which case the colour is rewritten as `RegularColor::Luma`
+    /// preserving the channel value. Special colours and CMYK paints
+    /// are never promoted.
+    ///
+    /// Called from the content-builder solid-fill / solid-stroke
+    /// dispatch alongside [`Color::project`]; the chain `project then
+    /// maybe_promote_grey_to_luma` means a `ForceRgb` projection that
+    /// produces an `(L, L, L)` triple still promotes to Luma.
+    ///
+    /// [`SerializeSettings::rgb_grey_to_devicegray`]:
+    ///     crate::SerializeSettings::rgb_grey_to_devicegray
+    pub(crate) fn maybe_promote_grey_to_luma(self, sc: &SerializeContext) -> Color {
+        if !sc.serialize_settings().rgb_grey_to_devicegray {
+            return self;
+        }
+        match self {
+            Color::Regular(RegularColor::Rgb(r)) if r.0 == r.1 && r.1 == r.2 => {
+                luma::Color::new(r.0).into()
+            }
+            _ => self,
+        }
+    }
+
     /// Project this colour through the supplied [`ColourConversion`]
     /// policy.
     ///
@@ -290,10 +318,28 @@ pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
 
 impl RegularColor {
     pub(crate) fn color_space(&self, sc: &mut SerializeContext) -> RegularColorSpace {
+        // `preserve_black` short-circuits the per-paint ICC routing
+        // for pure black so it emits in the underlying device space
+        // (DeviceRGB / DeviceCMYK) verbatim, sidestepping the near-
+        // black drift that a CIE-based / fallback CMYK profile would
+        // introduce. Luma is excluded because it has no ICC reroute
+        // hazard for pure black: `DeviceGray` is the only place a
+        // single-channel zero can land. The validator path is left
+        // intact (RGB still triggers `ContainsRgb` under CMYK-only
+        // validators) — `preserve_black` is documented as a non-
+        // validated, print-oriented workflow opt-in.
+        let preserve_black = sc.serialize_settings().preserve_black;
         match self {
             Self::Rgb(r) => {
                 if sc.serialize_settings().validators().requires_cmyk_only() {
                     sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
+                // `preserve_black` emits pure-black RGB verbatim as DeviceRGB,
+                // placed after the validation registration so the validator path
+                // stays intact (pure black still triggers `ContainsRgb` under a
+                // CMYK-only validator).
+                if preserve_black && r.0 == 0 && r.1 == 0 && r.2 == 0 {
+                    return DeviceColorSpace::Rgb.into();
                 }
                 r.color_space(sc.serialize_settings().no_device_cs)
             }
@@ -319,7 +365,7 @@ impl RegularColor {
                     && !sc.serialize_settings().validators().is_pdf_x();
                 luma::color_space(no_device_cs)
             }
-            Self::Cmyk(_) => {
+            Self::Cmyk(c) => {
                 // PDF/X emits DeviceCMYK, which the GTS_PDFX output intent must
                 // characterize: its profile has to be CMYK. A present-but-non-
                 // CMYK output target (e.g. an external RGB profile for X-4p, or a
@@ -331,6 +377,11 @@ impl RegularColor {
                     sc.register_validation_error(ValidationError::OutputIntentColorSpaceMismatch(
                         sc.location,
                     ));
+                }
+                // `preserve_black` emits pure-black CMYK verbatim as DeviceCMYK,
+                // after the validation registration above.
+                if preserve_black && c.0 == 0 && c.1 == 0 && c.2 == 0 && c.3 == 255 {
+                    return DeviceColorSpace::Cmyk.into();
                 }
                 match cmyk::color_space(&sc.serialize_settings()) {
                     None => {
