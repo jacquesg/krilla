@@ -246,7 +246,10 @@ impl Annotation {
 
         // Link annotations only set the /F PRINT flag when they have a visible
         // border (so borderless links don't print). Text, Markup and Widget
-        // annotations are visible page artefacts and should always print.
+        // annotations are visible page artefacts and should always print —
+        // except for `WidgetAnnotation` opted-in via `with_hidden(true)`,
+        // which switches to `/F HIDDEN` so the field carries state without
+        // a visible appearance (HTML `<input type="hidden">`).
         if let AnnotationType::Link(l) = &self.annotation_type {
             // TODO: No need to write the print flag even if it is `None`,
             // only for PDF/A.
@@ -259,6 +262,12 @@ impl Annotation {
             {
                 annotation.flags(AnnotationFlags::PRINT);
             }
+        } else if let AnnotationType::Widget(w) = &self.annotation_type {
+            annotation.flags(if w.hidden {
+                AnnotationFlags::HIDDEN
+            } else {
+                AnnotationFlags::PRINT
+            });
         } else {
             annotation.flags(AnnotationFlags::PRINT);
         }
@@ -1076,6 +1085,7 @@ pub struct WidgetAnnotation {
     pub(crate) rect: Rect,
     pub(crate) partial_name: String,
     pub(crate) field: WidgetField,
+    pub(crate) hidden: bool,
 }
 
 impl WidgetAnnotation {
@@ -1092,7 +1102,19 @@ impl WidgetAnnotation {
             rect,
             partial_name: partial_name.into(),
             field,
+            hidden: false,
         }
+    }
+
+    /// Mark the widget as hidden — the annotation gets `/F 2`
+    /// (`AnnotationFlags::HIDDEN`) so it neither displays nor prints
+    /// nor responds to user interaction, but the field still
+    /// participates in `/AcroForm /Fields` and form submission. Use
+    /// for HTML `<input type="hidden">` and equivalent state-carrying
+    /// fields.
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
+        self
     }
 
     fn serialize_type(
