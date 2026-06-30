@@ -191,6 +191,29 @@ pub struct SerializeSettings {
     /// embedded `/FontFile*` programme to begin with, so this setting
     /// is a no-op for them.
     pub font_embedding: FontEmbedding,
+    /// How glyph positions are emitted into the PDF content stream.
+    ///
+    /// [`GlyphLayout::Optical`] (the default) preserves krilla's
+    /// existing behaviour: every glyph run is written via a `TJ`-style
+    /// positioned-show array (`encode_glyphs_with_individual_positioning`),
+    /// which encodes per-glyph `x_offset` adjustments and reconciles
+    /// caller-supplied advances against the font's intrinsic advances.
+    /// This is the quality mode -- it preserves kerning and any
+    /// per-character placement the shaper produced.
+    ///
+    /// [`GlyphLayout::Metric`] short-circuits the positioned-show path
+    /// and emits glyph runs as a single `Tj` string per consecutive
+    /// run, relying on the font's intrinsic advance widths for
+    /// inter-glyph spacing. The content stream is smaller (no `[ ... ]
+    /// TJ` array with per-glyph numeric adjustments) but kerning and
+    /// any `x_offset` the shaper supplied are discarded. This is the
+    /// speed/size mode -- mirrors PDFreactor's `glyph-layout: metric`.
+    ///
+    /// The setting only governs whether krilla writes a `TJ` array or
+    /// a plain `Tj` string for runs of two or more glyphs. Single-glyph
+    /// runs without an `x_offset` always use `Tj` regardless (this
+    /// predates the setting and is unrelated to it).
+    pub glyph_layout: GlyphLayout,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -223,6 +246,31 @@ pub enum FontEmbedding {
     /// fragile and incompatible with PDF/A and PDF/UA — callers must
     /// audit their validator configuration.
     None,
+}
+
+/// How glyph positions are emitted into the PDF content stream.
+///
+/// See [`SerializeSettings::glyph_layout`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum GlyphLayout {
+    /// Per-glyph individual positioning with kerning preserved.
+    ///
+    /// Glyph runs are written via a `TJ` positioned-show array. Each
+    /// per-glyph `x_offset` and any discrepancy between the caller's
+    /// supplied advance and the font's intrinsic advance is encoded as
+    /// a numeric adjustment in the array. This is the default and
+    /// produces the highest-quality output at the cost of a larger
+    /// content stream.
+    #[default]
+    Optical,
+    /// Advance-width-only glyph emission.
+    ///
+    /// Multi-glyph runs are written as a single `Tj` string and the
+    /// consumer is expected to lay out the glyphs using the font's
+    /// intrinsic advances. Per-glyph `x_offset` adjustments supplied
+    /// by the caller are discarded; the content stream is smaller but
+    /// kerning may degrade.
+    Metric,
 }
 
 /// How text should be emitted into the PDF content stream.
@@ -545,6 +593,7 @@ impl Default for SerializeSettings {
             output_intents: Vec::new(),
             text_rendering: TextRendering::Glyphs,
             font_embedding: FontEmbedding::Subset,
+            glyph_layout: GlyphLayout::Optical,
         }
     }
 }
