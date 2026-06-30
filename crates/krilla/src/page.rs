@@ -40,6 +40,9 @@ pub struct PageSettings {
     trim_box: Option<Rect>,
     /// The actual content boundaries
     art_box: Option<Rect>,
+    /// The number of degrees the page should be rotated clockwise when displayed.
+    /// Must be a multiple of 90.
+    rotate: Option<i32>,
 }
 
 impl PageSettings {
@@ -158,6 +161,22 @@ impl PageSettings {
     pub(crate) fn art_box(&self) -> Option<Rect> {
         self.art_box
     }
+
+    /// Change the page rotation.
+    ///
+    /// The number of degrees the page should be rotated clockwise when
+    /// displayed. Must be a multiple of 90. Common values: 0, 90, 180, 270.
+    ///
+    /// If `None`, no `/Rotate` attribute will be written to the page.
+    pub fn with_rotate(mut self, rotate: Option<i32>) -> PageSettings {
+        self.rotate = rotate;
+        self
+    }
+
+    /// The current rotation.
+    pub(crate) fn rotate(&self) -> Option<i32> {
+        self.rotate
+    }
 }
 
 impl Default for PageSettings {
@@ -174,6 +193,7 @@ impl Default for PageSettings {
             bleed_box: None,
             trim_box: None,
             art_box: None,
+            rotate: None,
         }
     }
 }
@@ -587,6 +607,10 @@ impl InternalPage {
                     sc.location,
                 ));
             }
+        }
+
+        if let Some(rotate) = self.page_settings.rotate() {
+            page.rotate(rotate);
         }
 
         if let Some(struct_parent) = self.struct_parent {
