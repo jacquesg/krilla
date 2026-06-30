@@ -68,6 +68,7 @@ mod svg;
 mod tagging;
 mod text;
 mod validate;
+mod xref;
 
 const REPLACE: Option<&str> = option_env!("REPLACE");
 const STORE: Option<&str> = option_env!("STORE");
@@ -927,6 +928,7 @@ pub fn settings_1() -> SerializeSettings {
         shape_optimisation: krilla::ShapeOptimisation::Auto,
         rgb_grey_to_devicegray: false,
         preserve_black: false,
+        xref_streams: false,
     }
 }
 

@@ -151,6 +151,6 @@ impl Document {
             chunk_container,
         } = self;
 
-        Ok(serializer_context.finish(chunk_container)?.finish())
+        serializer_context.finish(chunk_container)
     }
 }
