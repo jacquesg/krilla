@@ -286,6 +286,16 @@ pub enum ValidationError {
     /// non-`'CMYK'` profile (e.g. an `'4CLR'` DeviceN profile, reserved for the
     /// PDF/X-5n/-6n levels krilla does not implement) is therefore rejected.
     InvalidOutputProfileColorSpace(Option<Location>),
+    /// The document was configured to be encrypted (via
+    /// [`SerializeSettings::encryption`](crate::SerializeSettings::encryption))
+    /// while an archival or print validator that forbids the `/Encrypt`
+    /// dictionary is also active.
+    ///
+    /// PDF/A (ISO 19005, every profile) and PDF/X (ISO 15930, every profile)
+    /// both reject encrypted files because a conforming long-term-preservation
+    /// or print-exchange document must be readable without a password by anyone.
+    /// The two settings are therefore mutually exclusive: pick one.
+    ContainsEncryption,
 }
 
 /// Features that may require a later PDF version than the current one.
@@ -876,6 +886,10 @@ pub enum Archival {
 impl Archival {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // ISO 19005 (every PDF/A revision) forbids the `/Encrypt` dictionary
+            // — a conformant archival document must be openable without a
+            // password by future preservation tooling.
+            (_, ValidationError::ContainsEncryption) => true,
             // PDF/X-specific errors have a uniform verdict across every PDF/A
             // profile: PDF/A normalizes mixed gradient color spaces and never
             // makes use of an external output profile, but it permits RGB,
@@ -1576,6 +1590,9 @@ pub enum Accessibility {
 impl Accessibility {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // ISO 14289 (PDF/UA-1, PDF/UA-2) and WTPDF are silent on encryption
+            // — accessibility conformance is orthogonal to the security handler.
+            (_, ValidationError::ContainsEncryption) => false,
             // PDF/X-specific errors: PDF/UA normalizes mixed gradient color
             // spaces and never makes use of an external output profile, but it
             // permits RGB, annotations, and pages without a TrimBox/ArtBox.
@@ -1866,6 +1883,9 @@ pub enum Prepress {
 impl Prepress {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // ISO 15930 (every PDF/X revision) forbids the `/Encrypt` dictionary
+            // — print-exchange RIPs cannot be assumed to know a password.
+            (_, ValidationError::ContainsEncryption) => true,
             // Forbidden by every PDF/X standard.
             (
                 _,

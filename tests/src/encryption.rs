@@ -146,3 +146,97 @@ fn encryption_off_by_default() {
     let settings = SerializeSettings::default();
     assert!(settings.encryption.is_none());
 }
+
+// --- PDF/A + encryption: mutual exclusion --------------------------
+
+use krilla::configure::{Archival, ConfigurationBuilder, Prepress, ValidationError};
+use krilla::error::KrillaError;
+
+fn build_doc_collect_err(settings: SerializeSettings, title: &str) -> KrillaError {
+    let mut doc = Document::new_with(settings);
+    doc.set_metadata(Metadata::new().title(title.into()));
+    let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
+    let _ = page.surface();
+    page.finish();
+    doc.finish().expect_err("encryption + validator must error")
+}
+
+fn assert_contains_encryption_error(err: KrillaError) {
+    match err {
+        KrillaError::Validation(errors) => {
+            assert!(
+                errors
+                    .iter()
+                    .any(|(e, _)| matches!(e, ValidationError::ContainsEncryption)),
+                "expected ValidationError::ContainsEncryption in {:?}",
+                errors,
+            );
+        }
+        other => panic!("expected Validation error, got {other:?}"),
+    }
+}
+
+#[test]
+fn encryption_plus_pdf_a_archival_validator_errors() {
+    let settings = SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_archival_validator(Archival::A3_B)
+            .finish()
+            .unwrap(),
+        encryption: Some(Encryption::new("u", "o")),
+        ..crate::settings_1()
+    };
+    let err = build_doc_collect_err(settings, "Confidential");
+    assert_contains_encryption_error(err);
+}
+
+#[test]
+fn encryption_plus_pdf_x_validator_errors() {
+    let settings = SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_prepress_validator(Prepress::X4)
+            .finish()
+            .unwrap(),
+        encryption: Some(Encryption::new("u", "o")),
+        ..crate::settings_1()
+    };
+    let err = build_doc_collect_err(settings, "Confidential");
+    assert_contains_encryption_error(err);
+}
+
+#[test]
+fn encryption_plus_pdf_ua_is_allowed() {
+    // ISO 14289 is silent on encryption; the combination must
+    // build successfully without raising ContainsEncryption.
+    use krilla::configure::Accessibility;
+    let settings = SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::UA1)
+            .finish()
+            .unwrap(),
+        encryption: Some(Encryption::new("u", "o")),
+        ..crate::settings_1()
+    };
+    let mut doc = Document::new_with(settings);
+    doc.set_metadata(
+        Metadata::new()
+            .title("Accessible Secret".into())
+            .language("en".into()),
+    );
+    let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
+    let _ = page.surface();
+    page.finish();
+    // UA-1 mandates several other things (tagging, language, etc.)
+    // so the document still errors — but the error must NOT be
+    // ContainsEncryption. We accept any other validation failure
+    // and just assert encryption itself is not flagged.
+    if let Err(KrillaError::Validation(errors)) = doc.finish() {
+        assert!(
+            !errors
+                .iter()
+                .any(|(e, _)| matches!(e, ValidationError::ContainsEncryption)),
+            "PDF/UA must not flag encryption: {:?}",
+            errors,
+        );
+    }
+}
