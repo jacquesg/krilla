@@ -161,6 +161,31 @@ impl ContentBuilder {
         self.active_marked_content = false;
     }
 
+    /// Begin a `/OC` marked-content sequence pointing at the OCG
+    /// dictionary identified by `(name, layer_ref)`.
+    ///
+    /// Emits `/OC /<name> BDC`, registering `<name> → layer_ref` in
+    /// the current page's `/Resources /Properties` dict. The named-
+    /// property route is mandated by ISO 32000-2 §14.6.2, which
+    /// forbids indirect refs from appearing inside a content
+    /// stream's BDC inline property list.
+    ///
+    /// Independent of the structure-tagging marked-content stack
+    /// guarded by `active_marked_content`: PDF allows BDC/EMC pairs
+    /// to nest, and the spec treats `/OC` sequences as concurrent
+    /// to structure spans rather than mutually exclusive.
+    pub(crate) fn start_layer(&mut self, name: &str, layer_ref: pdf_writer::Ref) {
+        self.rd_builder.register_layer(name, layer_ref);
+        self.content
+            .begin_marked_content_with_properties(pdf_writer::Name(b"OC"))
+            .properties_named(pdf_writer::Name(name.as_bytes()));
+    }
+
+    /// End a sequence started with [`Self::start_layer`].
+    pub(crate) fn end_layer(&mut self) {
+        self.content.end_marked_content();
+    }
+
     pub(crate) fn concat_transform(&mut self, transform: &Transform) {
         self.graphics_states.transform(*transform);
     }

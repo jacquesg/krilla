@@ -119,6 +119,24 @@ impl ChunkContainer {
             chunks_byte_len += chunk.len();
         })?;
 
+        // Reserve final renumbered refs for every optional-content
+        // group (`Document::add_layer`) and update the remapper so
+        // that any `/OC <build_ref>` written into a content stream's
+        // BDC property dict gets remapped to the matching `OCG` dict
+        // when the chunk is renumbered. The build-time refs live on
+        // `global_objects.layers`; the renumbered refs are kept here
+        // alongside the original layer descriptors so the catalogue
+        // writer can later reference them directly.
+        let layers_taken = sc.global_objects.layers.take();
+        let layer_final_refs: Vec<(Ref, crate::optional_content::Layer)> = layers_taken
+            .into_iter()
+            .map(|record| {
+                let final_ref = remapped_ref.bump();
+                remapper.insert(record.ref_, final_ref);
+                (final_ref, record.layer)
+            })
+            .collect();
+
         // Reserve an indirect ref for the `/Encrypt` dictionary if
         // the document is to be encrypted. Allocated here — after the
         // chunk refs have all been mapped but before any object is
@@ -232,6 +250,16 @@ impl ChunkContainer {
         let named_destinations = sc.global_objects.named_destinations.take();
         let embedded_files = sc.global_objects.embedded_files.take();
         let widget_fields = sc.global_objects.widget_fields.take();
+
+        // Emit one `/Type /OCG` indirect object per registered layer.
+        // The refs were pre-allocated above so any `/OC <ref>` in a
+        // content stream's BDC property dict resolves correctly after
+        // chunk renumbering.
+        for (ref_, layer) in &layer_final_refs {
+            let mut ocg = pdf.optional_content_group(*ref_);
+            ocg.name(TextStr(&layer.name));
+            ocg.intent(layer.intent.to_pdf_writer());
+        }
 
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
@@ -467,6 +495,46 @@ impl ChunkContainer {
                 fields.finish();
                 acro_form.pair(Name(b"NeedAppearances"), true);
                 acro_form.finish();
+            }
+
+            // /OCProperties (ISO 32000-2 §8.11.4). Required whenever
+            // the document declares at least one optional content
+            // group; `/OCGs` enumerates every registered layer and
+            // `/D` carries the default configuration that drives
+            // initial visibility.
+            if !layer_final_refs.is_empty() {
+                let mut oc = catalog.oc_properties();
+                {
+                    let mut ocgs = oc.groups();
+                    for (ref_, _) in &layer_final_refs {
+                        ocgs.item(*ref_);
+                    }
+                }
+                let mut default = oc.default_config();
+                {
+                    let mut on = default.on();
+                    for (ref_, layer) in &layer_final_refs {
+                        if layer.default_visible {
+                            on.item(*ref_);
+                        }
+                    }
+                }
+                {
+                    let mut off = default.off();
+                    for (ref_, layer) in &layer_final_refs {
+                        if !layer.default_visible {
+                            off.item(*ref_);
+                        }
+                    }
+                }
+                {
+                    let mut order = default.order();
+                    for (ref_, _) in &layer_final_refs {
+                        order.item(*ref_);
+                    }
+                }
+                default.finish();
+                oc.finish();
             }
 
             catalog.finish();

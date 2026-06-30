@@ -116,6 +116,23 @@ impl Document {
         self.serializer_context.set_tag_tree(tag_tree);
     }
 
+    /// Register an optional content group (PDF "layer") with the
+    /// document. The returned [`LayerHandle`](crate::optional_content::LayerHandle)
+    /// can then be passed to
+    /// [`Surface::push_layer`](crate::surface::Surface::push_layer) to
+    /// bracket drawing operations that should be hidden or shown
+    /// together.
+    ///
+    /// krilla allocates the OCG's indirect ref eagerly and writes the
+    /// catalogue's `/OCProperties` dictionary at finalise time; the
+    /// caller does not need to write any further structure.
+    pub fn add_layer(
+        &mut self,
+        layer: crate::optional_content::Layer,
+    ) -> crate::optional_content::LayerHandle {
+        self.serializer_context.add_layer(layer)
+    }
+
     /// Embed a new file in the PDF document.
     ///
     /// Returns `None` if the file couldn't be embedded because a file

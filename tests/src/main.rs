@@ -57,6 +57,7 @@ mod graphic;
 mod image;
 mod mask;
 mod metadata;
+mod optional_content;
 mod outline;
 mod page;
 mod path;
