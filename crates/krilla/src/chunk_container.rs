@@ -205,6 +205,7 @@ impl ChunkContainer {
 
         let named_destinations = sc.global_objects.named_destinations.take();
         let embedded_files = sc.global_objects.embedded_files.take();
+        let widget_fields = sc.global_objects.widget_fields.take();
 
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
@@ -409,6 +410,25 @@ impl ChunkContainer {
                 for _ref in embedded_files.values() {
                     associated_files.item(remapper[_ref]).finish();
                 }
+            }
+
+            // AcroForm dictionary (ISO 32000-2 §12.7.3). Written whenever
+            // the document emitted at least one widget annotation. We do
+            // not currently emit `/AP` appearance streams; setting
+            // `/NeedAppearances true` directs conforming viewers
+            // (Acrobat in particular) to regenerate appearances from
+            // each field's `/V` and `/DA` on first save, which is the
+            // standard fallback for engines that emit field values
+            // without bundled appearances.
+            if !widget_fields.is_empty() {
+                let mut acro_form = catalog.insert(Name(b"AcroForm")).dict();
+                let mut fields = acro_form.insert(Name(b"Fields")).array();
+                for field_ref in &widget_fields {
+                    fields.item(remapper[field_ref]);
+                }
+                fields.finish();
+                acro_form.pair(Name(b"NeedAppearances"), true);
+                acro_form.finish();
             }
 
             catalog.finish();
