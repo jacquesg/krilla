@@ -14,7 +14,7 @@ use crate::configure::{PdfVersion, ValidationError};
 use crate::content::ContentBuilder;
 use crate::error::KrillaResult;
 use crate::geom::{Rect, Size, Transform};
-use crate::interactive::annotation::{Annotation, AnnotationType};
+use crate::interactive::annotation::Annotation;
 use crate::interchange::tagging::{Identifier, PageTagIdentifier};
 use crate::resource::ResourceDictionary;
 use crate::serialize::{PageInfo, SerializeContext};
@@ -426,8 +426,7 @@ impl InternalPage {
 
             for annotation in &self.annotations {
                 if let Some(area) = print_area {
-                    let AnnotationType::Link(link) = &annotation.annotation_type;
-                    let r = link.rect;
+                    let r = annotation.annotation_type.rect();
                     let outside = r.right() <= area.left()
                         || r.left() >= area.right()
                         || r.bottom() <= area.top()
