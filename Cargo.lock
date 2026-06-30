@@ -1381,8 +1381,7 @@ checksum = "487f2ccd1e17ce8c1bfab3a65c89525af41cfad4c8659021a1e9a2aacd73b89b"
 [[package]]
 name = "pdf-writer"
 version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5e456864a7a304047bff84977dc6fb162bd956475d40ba50b2dcecaada7f753"
+source = "git+https://github.com/bloudraadpdf/pdf-writer?rev=3241e28b47c497bb8af9e9e88a0dadefccbb016b#3241e28b47c497bb8af9e9e88a0dadefccbb016b"
 dependencies = [
  "bitflags 2.11.1",
  "itoa",
