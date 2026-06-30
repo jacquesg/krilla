@@ -594,6 +594,8 @@ pub struct TextAnnotation {
     pub(crate) color: Option<Color>,
     pub(crate) icon: TextAnnotationIcon,
     pub(crate) open: bool,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
 }
 
 impl TextAnnotation {
@@ -609,6 +611,8 @@ impl TextAnnotation {
             color: None,
             icon: TextAnnotationIcon::default(),
             open: false,
+            creation_date: None,
+            modification_date: None,
         }
     }
 
@@ -645,6 +649,26 @@ impl TextAnnotation {
         self
     }
 
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2 §7.9.4
+    /// (e.g. `D:20260515120000Z`). The caller is responsible for
+    /// constructing a syntactically valid date string; krilla emits
+    /// the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last modified,
+    /// formatted as a PDF date string per ISO 32000-2 §7.9.4. The
+    /// caller is responsible for constructing a syntactically valid
+    /// date string; krilla emits the value verbatim as a literal
+    /// string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
     fn serialize_type(
         &self,
         _sc: &mut SerializeContext,
@@ -672,6 +696,12 @@ impl TextAnnotation {
         if let Some(color) = &self.color {
             write_color(annotation, color);
         }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
 
         Ok(None)
     }
@@ -726,6 +756,8 @@ pub struct MarkupAnnotation {
     pub(crate) contents: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) color: Option<Color>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
 }
 
 impl MarkupAnnotation {
@@ -778,6 +810,8 @@ impl MarkupAnnotation {
             contents: None,
             title: None,
             color: None,
+            creation_date: None,
+            modification_date: None,
         }
     }
 
@@ -797,6 +831,26 @@ impl MarkupAnnotation {
     /// strike-out / squiggly stroke.
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = Some(color);
+        self
+    }
+
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2 §7.9.4
+    /// (e.g. `D:20260515120000Z`). The caller is responsible for
+    /// constructing a syntactically valid date string; krilla emits
+    /// the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last modified,
+    /// formatted as a PDF date string per ISO 32000-2 §7.9.4. The
+    /// caller is responsible for constructing a syntactically valid
+    /// date string; krilla emits the value verbatim as a literal
+    /// string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
         self
     }
 
@@ -833,6 +887,12 @@ impl MarkupAnnotation {
         if let Some(color) = &self.color {
             write_color(annotation, color);
         }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
 
         Ok(None)
     }
@@ -1547,6 +1607,24 @@ fn append_circle(out: &mut String, cx: f32, cy: f32, r: f32, op: &str) {
     writeln!(out, "{}", op).unwrap();
 }
 
+/// Emit `/CreationDate` and `/M` entries on a Text or Markup
+/// annotation. Both are PDF date strings (ISO 32000-2 §7.9.4) — the
+/// caller supplies a pre-formatted literal (e.g. `D:20260515120000Z`)
+/// and krilla writes it verbatim as a PDF string. Centralised so the
+/// two markup annotation kinds share the same emission shape.
+fn write_annotation_dates(
+    annotation: &mut pdf_writer::writers::Annotation,
+    creation_date: Option<&str>,
+    modification_date: Option<&str>,
+) {
+    if let Some(date) = creation_date {
+        annotation.pair(Name(b"CreationDate"), Str(date.as_bytes()));
+    }
+    if let Some(date) = modification_date {
+        annotation.pair(Name(b"M"), Str(date.as_bytes()));
+    }
+}
+
 /// Emit a `/C` colour entry on an annotation using the regular-colour
 /// projection. Centralised so Link, Text and Markup share the same
 /// device-space handling.
@@ -1660,6 +1738,63 @@ mod tests {
     #[should_panic(expected = "markup annotations require a non-empty quad_points array")]
     fn markup_annotation_empty_quad_points_panics() {
         let _ = MarkupAnnotation::new(MarkupSubtype::Highlight, Vec::new());
+    }
+
+    #[test]
+    fn text_annotation_emits_creation_and_modification_dates() {
+        let text = TextAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap())
+            .with_creation_date("D:20260515120000Z")
+            .with_modification_date("D:20260516153000Z")
+            .with_icon(TextAnnotationIcon::Help);
+
+        let pdf = finish_with(Annotation::new_text(text, Some("dated".into())));
+
+        // Per the task spec, /Name is the required Text-subtype entry
+        // when an icon is set.
+        assert!(contains(&pdf, b"/Subtype /Text"), "missing /Subtype /Text");
+        assert!(contains(&pdf, b"/Name /Help"), "missing /Name /Help");
+        assert!(
+            contains(&pdf, b"/CreationDate (D:20260515120000Z)"),
+            "missing /CreationDate"
+        );
+        assert!(
+            contains(&pdf, b"/M (D:20260516153000Z)"),
+            "missing /M modification date"
+        );
+    }
+
+    #[test]
+    fn markup_annotation_each_subtype_emits_quadpoints() {
+        // ISO 32000-2 §12.5.6.10: every markup subtype
+        // (Highlight/Underline/Squiggly/StrikeOut) requires /QuadPoints.
+        let make = |subtype| {
+            let quad = Quadrilateral([
+                Point::from_xy(0.0, 10.0),
+                Point::from_xy(20.0, 10.0),
+                Point::from_xy(20.0, 0.0),
+                Point::from_xy(0.0, 0.0),
+            ]);
+            let markup = MarkupAnnotation::new(subtype, vec![quad])
+                .with_creation_date("D:20260515120000Z");
+            finish_with(Annotation::new_markup(markup, Some("alt".into())))
+        };
+
+        for subtype in [
+            MarkupSubtype::Highlight,
+            MarkupSubtype::Underline,
+            MarkupSubtype::Strikeout,
+            MarkupSubtype::Squiggly,
+        ] {
+            let pdf = make(subtype);
+            assert!(
+                contains(&pdf, b"/QuadPoints"),
+                "missing /QuadPoints for {subtype:?}"
+            );
+            assert!(
+                contains(&pdf, b"/CreationDate (D:20260515120000Z)"),
+                "missing /CreationDate for {subtype:?}"
+            );
+        }
     }
 
     #[test]
