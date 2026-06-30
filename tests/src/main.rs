@@ -51,6 +51,7 @@ mod colour_conversion;
 mod colour_options;
 mod destination;
 mod embed;
+mod encryption;
 mod font;
 mod graphic;
 mod image;
@@ -928,6 +929,7 @@ pub fn settings_1() -> SerializeSettings {
         shape_optimisation: krilla::ShapeOptimisation::Auto,
         rgb_grey_to_devicegray: false,
         preserve_black: false,
+        encryption: None,
         xref_streams: false,
     }
 }

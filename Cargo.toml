@@ -36,7 +36,7 @@ md-5 = "0.10.6"
 oxipng = "10.1.0"
 parley = "0.8.0"
 paste = "1.0.15"
-pdf-writer = { version = "0.15.0" }
+pdf-writer = { version = "0.15.0", features = ["encryption"] }
 pretty_assertions = "1.4.1"
 proc-macro2 = "1.0.86"
 quote = "1.0.37"
