@@ -61,6 +61,7 @@ mod path;
 mod pattern;
 mod pdf;
 mod separation;
+mod shape_optimisation;
 mod stream;
 mod svg;
 mod tagging;
@@ -922,6 +923,7 @@ pub fn settings_1() -> SerializeSettings {
         font_embedding: krilla::FontEmbedding::Subset,
         glyph_layout: krilla::GlyphLayout::Optical,
         colour_conversion: ColourConversion::Auto,
+        shape_optimisation: krilla::ShapeOptimisation::Auto,
     }
 }
 
