@@ -1123,23 +1123,54 @@ impl RadioGroupChild {
 
 /// Flag bits for an AcroForm text field (`/FT /Tx`).
 ///
-/// The general flags `READ_ONLY` and `REQUIRED` are shared with the
-/// other field types; the multi-line / password / file-select / comb
-/// bits are text-specific. See ISO 32000-2 §12.7.4.3, Table 230.
+/// The general flags `READ_ONLY`, `REQUIRED` and `NO_EXPORT` are shared
+/// with the other field types; the multi-line / password / file-select
+/// / no-scroll / comb / rich-text / do-not-spell-check bits are
+/// text-specific. See ISO 32000-2 §12.7.4.3, Table 230.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct TextFieldFlags {
     /// Set bit 1 (`/Ff` 1): the field is read-only.
     pub read_only: bool,
+    /// Set bit 2 (`/Ff` 2): the field is required at submission.
+    pub required: bool,
+    /// Set bit 3 (`/Ff` 4): the field is excluded from submission.
+    pub no_export: bool,
     /// Set bit 13 (4096): multi-line text input.
     pub multiline: bool,
     /// Set bit 14 (8192): password — characters not echoed.
     pub password: bool,
+    /// Set bit 21 (1 << 20): the field stores a filename to be
+    /// submitted as a file (PDF 1.4+).
+    pub file_select: bool,
+    /// Set bit 23 (1 << 22): the field is excluded from spell-checking.
+    pub do_not_spell_check: bool,
+    /// Set bit 24 (1 << 23): the field is not scrollable. PDF 1.4+.
+    pub do_not_scroll: bool,
+    /// Set bit 25 (1 << 24): the field is automatically divided into
+    /// equally-spaced character positions (comb). Requires `MaxLen` and
+    /// none of `Multiline`, `Password`, `FileSelect`. PDF 1.5+.
+    pub comb: bool,
+    /// Set bit 26 (1 << 25): the field value is treated as rich text.
+    /// PDF 1.5+.
+    pub rich_text: bool,
 }
 
 impl TextFieldFlags {
     /// Set the read-only flag (bit 1).
     pub fn with_read_only(mut self, value: bool) -> Self {
         self.read_only = value;
+        self
+    }
+
+    /// Set the required flag (bit 2).
+    pub fn with_required(mut self, value: bool) -> Self {
+        self.required = value;
+        self
+    }
+
+    /// Set the no-export flag (bit 3).
+    pub fn with_no_export(mut self, value: bool) -> Self {
+        self.no_export = value;
         self
     }
 
@@ -1155,16 +1186,68 @@ impl TextFieldFlags {
         self
     }
 
+    /// Set the file-select flag (bit 21).
+    pub fn with_file_select(mut self, value: bool) -> Self {
+        self.file_select = value;
+        self
+    }
+
+    /// Set the do-not-spell-check flag (bit 23).
+    pub fn with_do_not_spell_check(mut self, value: bool) -> Self {
+        self.do_not_spell_check = value;
+        self
+    }
+
+    /// Set the do-not-scroll flag (bit 24).
+    pub fn with_do_not_scroll(mut self, value: bool) -> Self {
+        self.do_not_scroll = value;
+        self
+    }
+
+    /// Set the comb flag (bit 25). Requires `MaxLen` and none of
+    /// `Multiline`, `Password`, `FileSelect`. PDF 1.5+.
+    pub fn with_comb(mut self, value: bool) -> Self {
+        self.comb = value;
+        self
+    }
+
+    /// Set the rich-text flag (bit 26). PDF 1.5+.
+    pub fn with_rich_text(mut self, value: bool) -> Self {
+        self.rich_text = value;
+        self
+    }
+
     fn to_bits(self) -> u32 {
         let mut flags = FieldFlags::empty();
         if self.read_only {
             flags |= FieldFlags::READ_ONLY;
+        }
+        if self.required {
+            flags |= FieldFlags::REQUIRED;
+        }
+        if self.no_export {
+            flags |= FieldFlags::NO_EXPORT;
         }
         if self.multiline {
             flags |= FieldFlags::MULTILINE;
         }
         if self.password {
             flags |= FieldFlags::PASSWORD;
+        }
+        if self.file_select {
+            flags |= FieldFlags::FILE_SELECT;
+        }
+        if self.do_not_spell_check {
+            flags |= FieldFlags::DO_NOT_SPELL_CHECK;
+        }
+        if self.do_not_scroll {
+            flags |= FieldFlags::DO_NOT_SCROLL;
+        }
+        if self.comb {
+            flags |= FieldFlags::COMB;
+        }
+        if self.rich_text {
+            flags |= FieldFlags::RICH_TEXT;
         }
         flags.bits()
     }
@@ -1176,11 +1259,17 @@ impl TextFieldFlags {
 /// configure the sub-kind. They are mutually exclusive at the spec
 /// level: a checkbox sets neither, a radio sets `radio` (bit 16) and
 /// optionally `radios_in_unison` (bit 26), a pushbutton sets
-/// `pushbutton` (bit 17). See ISO 32000-2 §12.7.4.2, Table 229.
+/// `pushbutton` (bit 17). The general `required` / `no_export` bits
+/// (bits 2 / 3) are shared with the other field types.
+/// See ISO 32000-2 §12.7.4.2, Table 229.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ButtonFieldFlags {
     /// Set bit 1 (`/Ff` 1): the field is read-only.
     pub read_only: bool,
+    /// Set bit 2 (`/Ff` 2): the field is required at submission.
+    pub required: bool,
+    /// Set bit 3 (`/Ff` 4): the field is excluded from submission.
+    pub no_export: bool,
     /// Set bit 16 (32768): the field is a radio button group.
     pub radio: bool,
     /// Set bit 17 (65536): the field is a pushbutton.
@@ -1194,6 +1283,18 @@ impl ButtonFieldFlags {
     /// Set the read-only flag (bit 1).
     pub fn with_read_only(mut self, value: bool) -> Self {
         self.read_only = value;
+        self
+    }
+
+    /// Set the required flag (bit 2).
+    pub fn with_required(mut self, value: bool) -> Self {
+        self.required = value;
+        self
+    }
+
+    /// Set the no-export flag (bit 3).
+    pub fn with_no_export(mut self, value: bool) -> Self {
+        self.no_export = value;
         self
     }
 
@@ -1220,6 +1321,12 @@ impl ButtonFieldFlags {
         if self.read_only {
             flags |= FieldFlags::READ_ONLY;
         }
+        if self.required {
+            flags |= FieldFlags::REQUIRED;
+        }
+        if self.no_export {
+            flags |= FieldFlags::NO_EXPORT;
+        }
         if self.radio {
             flags |= FieldFlags::RADIO;
         }
@@ -1237,22 +1344,43 @@ impl ButtonFieldFlags {
 ///
 /// The combo flag distinguishes a drop-down (combo) from a list box.
 /// `MULTI_SELECT` is permissible but moegoe currently emits only
-/// single-select fields; the API is provided for completeness.
+/// single-select fields; the API is provided for completeness. The
+/// general `required` / `no_export` / `do_not_spell_check` bits
+/// (bits 2 / 3 / 23) are shared with the other field types.
 /// See ISO 32000-2 §12.7.4.4, Table 232.
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
 pub struct ChoiceFieldFlags {
     /// Set bit 1 (`/Ff` 1): the field is read-only.
     pub read_only: bool,
+    /// Set bit 2 (`/Ff` 2): the field is required at submission.
+    pub required: bool,
+    /// Set bit 3 (`/Ff` 4): the field is excluded from submission.
+    pub no_export: bool,
     /// Set bit 18 (131072): combo box (drop-down) instead of list box.
     pub combo: bool,
     /// Set bit 22 (2097152): multi-select.
     pub multi_select: bool,
+    /// Set bit 23 (1 << 22): the field is excluded from spell-checking.
+    /// Only meaningful for combo boxes with an edit control.
+    pub do_not_spell_check: bool,
 }
 
 impl ChoiceFieldFlags {
     /// Set the read-only flag (bit 1).
     pub fn with_read_only(mut self, value: bool) -> Self {
         self.read_only = value;
+        self
+    }
+
+    /// Set the required flag (bit 2).
+    pub fn with_required(mut self, value: bool) -> Self {
+        self.required = value;
+        self
+    }
+
+    /// Set the no-export flag (bit 3).
+    pub fn with_no_export(mut self, value: bool) -> Self {
+        self.no_export = value;
         self
     }
 
@@ -1268,16 +1396,32 @@ impl ChoiceFieldFlags {
         self
     }
 
+    /// Set the do-not-spell-check flag (bit 23). Only meaningful for
+    /// combo boxes with an edit control.
+    pub fn with_do_not_spell_check(mut self, value: bool) -> Self {
+        self.do_not_spell_check = value;
+        self
+    }
+
     fn to_bits(self) -> u32 {
         let mut flags = FieldFlags::empty();
         if self.read_only {
             flags |= FieldFlags::READ_ONLY;
+        }
+        if self.required {
+            flags |= FieldFlags::REQUIRED;
+        }
+        if self.no_export {
+            flags |= FieldFlags::NO_EXPORT;
         }
         if self.combo {
             flags |= FieldFlags::COMBO;
         }
         if self.multi_select {
             flags |= FieldFlags::MULTI_SELECT;
+        }
+        if self.do_not_spell_check {
+            flags |= FieldFlags::DO_NOT_SPELL_CHECK;
         }
         flags.bits()
     }
@@ -2239,6 +2383,186 @@ mod tests {
 
         // Read-only = bit 1 = 1
         assert!(contains(&pdf, b"/Ff 1"), "missing read-only /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_text_required_sets_flag_bit_2() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_required(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "req", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Required = bit 2 = 2
+        assert!(contains(&pdf, b"/Ff 2"), "missing required /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_text_no_export_sets_flag_bit_3() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_no_export(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "nx", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // NoExport = bit 3 = 4
+        assert!(contains(&pdf, b"/Ff 4"), "missing no-export /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_text_file_select_sets_flag_bit_21() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_file_select(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "upload", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // FileSelect = bit 21 = 1048576
+        assert!(
+            contains(&pdf, b"/Ff 1048576"),
+            "missing file-select /Ff bit"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_text_do_not_spell_check_sets_flag_bit_23() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_do_not_spell_check(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "nsc", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // DoNotSpellCheck = bit 23 = 4194304
+        assert!(
+            contains(&pdf, b"/Ff 4194304"),
+            "missing do-not-spell-check /Ff bit"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_text_do_not_scroll_sets_flag_bit_24() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_do_not_scroll(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "noscroll", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // DoNotScroll = bit 24 = 8388608
+        assert!(
+            contains(&pdf, b"/Ff 8388608"),
+            "missing do-not-scroll /Ff bit"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_text_comb_sets_flag_bit_25() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: Some(8),
+            flags: TextFieldFlags::default().with_comb(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "comb", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Comb = bit 25 = 16777216
+        assert!(contains(&pdf, b"/Ff 16777216"), "missing comb /Ff bit");
+        assert!(contains(&pdf, b"/MaxLen 8"), "missing /MaxLen for comb");
+    }
+
+    #[test]
+    fn widget_annotation_text_rich_text_sets_flag_bit_26() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default().with_rich_text(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "rt", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // RichText = bit 26 = 33554432
+        assert!(
+            contains(&pdf, b"/Ff 33554432"),
+            "missing rich-text /Ff bit"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_button_required_sets_flag_bit_2() {
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::Checkbox,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_required(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "agree", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/Ff 2"), "missing required /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_button_no_export_sets_flag_bit_3() {
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::Checkbox,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_no_export(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "agree", button);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        assert!(contains(&pdf, b"/Ff 4"), "missing no-export /Ff bit");
+    }
+
+    #[test]
+    fn widget_annotation_choice_required_sets_flag_bit_2() {
+        let choice = WidgetField::Choice(ChoiceField {
+            values: Vec::new(),
+            default_values: Vec::new(),
+            options: vec![("US".into(), "United States".into())],
+            flags: ChoiceFieldFlags::default()
+                .with_combo(true)
+                .with_required(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "country", choice);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Combo (bit 18 = 131072) + Required (bit 2 = 2) = 131074
+        assert!(contains(&pdf, b"/Ff 131074"), "missing required+combo /Ff");
+    }
+
+    #[test]
+    fn widget_annotation_choice_no_export_sets_flag_bit_3() {
+        let choice = WidgetField::Choice(ChoiceField {
+            values: Vec::new(),
+            default_values: Vec::new(),
+            options: vec![("US".into(), "United States".into())],
+            flags: ChoiceFieldFlags::default()
+                .with_combo(true)
+                .with_no_export(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "country", choice);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // Combo (131072) + NoExport (4) = 131076
+        assert!(contains(&pdf, b"/Ff 131076"), "missing no-export+combo /Ff");
     }
 
     #[test]
