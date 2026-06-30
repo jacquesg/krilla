@@ -688,6 +688,237 @@ fn push_text_rendering_nests_with_other_push_instructions() {
     let _pdf = document.finish().unwrap();
 }
 
+/// Helper for the `TextRendering::Invisible` tests: substring scan over
+/// the (uncompressed) PDF bytes.
+#[cfg(test)]
+fn pdf_contains(pdf: &[u8], needle: &[u8]) -> bool {
+    pdf.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `TextRendering::Invisible` must emit the PDF text-rendering-mode
+/// operator `3 Tr` for the glyph run, AND the glyph showing operator
+/// (`Tj` / `TJ`) so consumers can still extract the text. This is the
+/// load-bearing assertion for moegoe's F27 R6b ActualText overlay:
+/// invisible mode is useless if either side is missing.
+///
+/// `pdf-writer` emits operators with single-space separation and a
+/// trailing newline, so the exact byte sequences are `3 Tr\n`, `] TJ\n`
+/// (or `) Tj\n`), `BT\n`, and `ET\n`. See `pdf-writer::Operation::drop`
+/// for the formatting contract.
+#[test]
+fn text_rendering_invisible_emits_tr3_and_glyph_show() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        text_rendering: TextRendering::Invisible,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        Font::new(NOTO_SANS.clone(), 0).unwrap(),
+        32.0,
+        "Hi",
+        // `outlined: false` — invisible mode must override.
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    // `3 Tr` is the load-bearing operator. `TextRenderingMode::to_int()`
+    // formats as an integer, so the exact bytes are `3 Tr\n`.
+    assert!(
+        pdf_contains(&pdf, b"3 Tr\n"),
+        "invisible mode must emit `3 Tr` (text rendering mode 3)",
+    );
+    // Glyph showing operator must still be present — invisible mode
+    // is text-extraction-preserving by design. `pdf-writer` formats
+    // both `Tj` and `TJ` with a leading space.
+    let has_tj = pdf_contains(&pdf, b" Tj\n") || pdf_contains(&pdf, b" TJ\n");
+    assert!(
+        has_tj,
+        "invisible mode must still emit a glyph-showing operator \
+         (`Tj` or `TJ`) so text remains extractable",
+    );
+    // And the text-block markers, since the glyphs go through the
+    // normal `BT`/`ET` framing.
+    assert!(
+        pdf_contains(&pdf, b"BT\n"),
+        "invisible mode must still open a `BT` text block",
+    );
+    assert!(
+        pdf_contains(&pdf, b"ET\n"),
+        "invisible mode must close the text block with `ET`",
+    );
+}
+
+/// `TextRendering::Invisible` must not emit any fill- or stroke-colour
+/// setting operator (`rg` / `RG` / `k` / `K` / `sc` / `SC` / `scn` /
+/// `SCN`) for the invisible glyph run. The whole point of mode 3 is to
+/// skip painting; emitting a colour change is a leak that hurts blend
+/// modes and overprint state.
+///
+/// The control case is a fill-coloured visible run (we explicitly set a
+/// non-default red fill so krilla emits the `rg` operator), proving the
+/// scan would detect colour-set ops if they were emitted. We then
+/// render the same string in invisible mode under the same fill and
+/// assert no colour-set operator survives.
+#[test]
+fn text_rendering_invisible_skips_fill_and_stroke_colour() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    fn render(setting: TextRendering) -> Vec<u8> {
+        let settings = SerializeSettings {
+            pretty: true,
+            compress_content_streams: false,
+            text_rendering: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        // Set a non-default red fill so the visible-mode control
+        // emits an `rg` operator we can detect.
+        surface.set_fill(Some(red_fill(1.0)));
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    // Glyph mode with a red fill must emit an `rg` operator — the
+    // control that proves the scan below would catch any colour-set
+    // operator emitted by invisible mode.
+    let glyphs_pdf = render(TextRendering::Glyphs);
+    assert!(
+        pdf_contains(&glyphs_pdf, b" rg\n"),
+        "control: visible-glyph mode with a red fill must emit an \
+         `rg` operator (sanity check for the scan below)",
+    );
+
+    let invisible_pdf = render(TextRendering::Invisible);
+    // The eight PDF colour-set operators that would tell a consumer
+    // to change paint state. Invisible mode must emit none of them.
+    let banned: &[&[u8]] = &[
+        b" rg\n", b" RG\n", b" k\n", b" K\n", b" sc\n", b" SC\n",
+        b" scn\n", b" SCN\n",
+    ];
+    for op in banned {
+        assert!(
+            !pdf_contains(&invisible_pdf, op),
+            "invisible mode must not emit colour-set operator {:?}",
+            std::str::from_utf8(op).unwrap_or("?"),
+        );
+    }
+    // Defence-in-depth: `3 Tr` must still be emitted so consumers
+    // know not to paint anyway.
+    assert!(
+        pdf_contains(&invisible_pdf, b"3 Tr\n"),
+        "invisible mode must still emit `3 Tr` even when a fill is \
+         set on the surface",
+    );
+}
+
+/// `Surface::push_text_rendering(Invisible)` must nest: the push range
+/// emits `3 Tr` and produces no painted marks, but glyphs drawn before
+/// the push and after the pop must remain in the document-level glyph
+/// mode (which paints with the active fill).
+#[test]
+fn push_text_rendering_invisible_scopes_to_push_range() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        // Default to glyph mode so the surrounding draws are visible.
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    // Outer fill: red. We use a non-default colour so the outer
+    // glyph-mode draws emit an `rg` operator we can assert on.
+    surface.set_fill(Some(red_fill(1.0)));
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    // Outer draw: default glyph mode with the red fill.
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        font.clone(),
+        32.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    // Inner draw: invisible.
+    surface.push_text_rendering(TextRendering::Invisible);
+    surface.draw_text(
+        Point::from_xy(50.0, 90.0),
+        font.clone(),
+        32.0,
+        "Inv",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    // After the pop the state must restore: outer draw is glyph mode
+    // again. `document.finish()` would panic if the push were
+    // unbalanced.
+    surface.draw_text(
+        Point::from_xy(50.0, 130.0),
+        font,
+        32.0,
+        "By",
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    // The invisible push range must have emitted `3 Tr`.
+    assert!(
+        pdf_contains(&pdf, b"3 Tr\n"),
+        "push_text_rendering(Invisible) range must emit `3 Tr`",
+    );
+    // The outer draws must still paint with red — an `rg` operator
+    // must be present somewhere in the PDF.
+    assert!(
+        pdf_contains(&pdf, b" rg\n"),
+        "outer (default-glyph-mode) draws must emit a fill-colour \
+         operator (`rg`)",
+    );
+    // The outer draws must also restore visible mode — `0 Tr` must
+    // appear (krilla resets the rendering mode at the start of each
+    // glyph run).
+    assert!(
+        pdf_contains(&pdf, b"0 Tr\n"),
+        "after the invisible push is popped, subsequent glyph runs \
+         must restore `0 Tr` (visible fill)",
+    );
+    // Sanity: glyph-showing operators are still emitted (text-
+    // extraction works for both the visible and invisible runs).
+    let has_tj = pdf_contains(&pdf, b" Tj\n") || pdf_contains(&pdf, b" TJ\n");
+    assert!(
+        has_tj,
+        "both visible and invisible glyphs must produce a glyph-\
+         showing operator (`Tj` or `TJ`)",
+    );
+}
+
 /// Render the same string under each [`FontEmbedding`] mode and verify
 /// the embedded font programme behaves as documented:
 ///
