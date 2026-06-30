@@ -176,6 +176,20 @@ impl From<WidgetAnnotation> for Annotation {
 }
 
 impl Annotation {
+    /// If this annotation is a [`WidgetField::RadioGroupChild`],
+    /// return the indirect reference of its parent group dict.
+    /// `InternalPage::serialize` uses this hook to populate the
+    /// parent's `/Kids` array in annotation-insertion order.
+    pub(crate) fn radio_group_parent_ref(&self) -> Option<Ref> {
+        match &self.annotation_type {
+            AnnotationType::Widget(w) => match &w.field {
+                WidgetField::RadioGroupChild(child) => Some(child.parent_ref),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     pub(crate) fn serialize(
         &self,
         sc: &mut SerializeContext,
@@ -293,14 +307,23 @@ impl Annotation {
 
         annotation.finish();
 
-        // AcroForm catalogue wiring (ISO 32000-2 §12.7.3): every widget
-        // annotation's indirect reference participates in the catalogue's
-        // `/AcroForm /Fields` array. We register the ref *after* the
-        // annotation chunk has been emitted; `ChunkContainer::finish`
-        // remaps the ref through the same remapper used for every other
-        // indirect object and writes the array entry.
-        if is_widget {
-            sc.register_widget_field(root_ref);
+        // AcroForm catalogue wiring (ISO 32000-2 §12.7.3): every
+        // terminal widget annotation's indirect reference participates
+        // in the catalogue's `/AcroForm /Fields` array. We register
+        // the ref *after* the annotation chunk has been emitted;
+        // `ChunkContainer::finish` remaps the ref through the same
+        // remapper used for every other indirect object and writes
+        // the array entry.
+        //
+        // Radio-group children are *not* terminal fields — they are
+        // referenced from their parent's `/Kids` and reached via tree
+        // traversal. The parent dict goes into `/AcroForm /Fields`
+        // instead (emitted by `InternalPage::serialize` when consuming
+        // queued `RadioGroupPayload`s).
+        if let AnnotationType::Widget(w) = &self.annotation_type {
+            if !matches!(w.field, WidgetField::RadioGroupChild(_)) {
+                sc.register_widget_field(root_ref);
+            }
         }
 
         // Emit any Form XObjects produced by widget appearance generation
@@ -964,14 +987,138 @@ pub struct ChoiceField {
     pub flags: ChoiceFieldFlags,
 }
 
+/// A single child widget of a [`RadioGroupField`] — one HTML
+/// `<input type="radio">` element. Each child contributes a widget
+/// annotation to its page; the field-tree wiring (parent dict, `/T`,
+/// `/V`, `/Ff`) lives on the parent and is emitted alongside the
+/// catalogue's `/AcroForm /Fields` array.
+#[derive(Clone, Debug)]
+pub struct RadioChild {
+    /// Rectangle of the child widget annotation in user-space (page)
+    /// coordinates.
+    pub rect: Rect,
+    /// Export value — the PDF name written into the child's `/AS`
+    /// when this child is the selected member of the group. The
+    /// parent's `/V` carries the same name for the currently-selected
+    /// child.
+    pub export_value: String,
+}
+
+/// A non-terminal AcroForm radio-button field (ISO 32000-2 §12.7.5.2.3).
+///
+/// HTML `<input type="radio">` elements that share a `name` are
+/// mutually exclusive: at most one is checked. The PDF encoding is a
+/// single non-terminal `/Btn` field with the Radio flag (`/Ff` bit 16)
+/// set, whose `/Kids` are the per-radio widget annotations on the
+/// page. The parent dict carries `/T` (field name), `/V` (selected
+/// export value or `/Off`) and `/DV` (default selection); each child
+/// carries `/AS` (its export value when selected or `/Off`) and
+/// `/Parent`. Only the parent dict's indirect reference participates
+/// in `/AcroForm /Fields`; children are reached via tree traversal.
+///
+/// Use [`crate::page::Page::add_radio_group`] to attach a group to a
+/// page — that entry point allocates the parent ref, builds the
+/// per-child widget annotations and queues the parent dict for
+/// catalogue emission.
+#[derive(Clone, Debug)]
+pub struct RadioGroupField {
+    /// Field name — written into the parent's `/T`. Matches the HTML
+    /// `name` attribute shared by every radio in the group.
+    pub name: String,
+    /// Per-radio child widgets. Order is preserved; the resulting
+    /// `/Kids` array follows the same order.
+    pub children: Vec<RadioChild>,
+    /// Export value of the currently-selected child, or `None` when
+    /// no radio is checked (the parent's `/V` falls back to `/Off`).
+    pub selected_export: Option<String>,
+    /// Default selection used by form reset and written into `/DV`.
+    /// `None` emits `/DV /Off`.
+    pub default_selected_export: Option<String>,
+    /// Per-field flag bits — see [`ButtonFieldFlags`]. The Radio flag
+    /// (bit 16) is forced on by the catalogue emitter; the embedder
+    /// may set [`ButtonFieldFlags::radios_in_unison`] or
+    /// [`ButtonFieldFlags::read_only`] as appropriate.
+    pub flags: ButtonFieldFlags,
+}
+
+impl RadioGroupField {
+    /// Build a radio group with the given name and children. By
+    /// default no child is selected and the Radio flag is set; mutate
+    /// [`Self::selected_export`], [`Self::default_selected_export`]
+    /// and [`Self::flags`] directly to refine the field.
+    pub fn new(name: impl Into<String>, children: Vec<RadioChild>) -> Self {
+        Self {
+            name: name.into(),
+            children,
+            selected_export: None,
+            default_selected_export: None,
+            flags: ButtonFieldFlags::default().with_radio(true),
+        }
+    }
+
+    /// Set the currently-selected child's export value (becomes `/V`).
+    pub fn with_selected(mut self, selected: Option<String>) -> Self {
+        self.selected_export = selected;
+        self
+    }
+
+    /// Set the default-selected child's export value (becomes `/DV`).
+    pub fn with_default_selected(mut self, default_selected: Option<String>) -> Self {
+        self.default_selected_export = default_selected;
+        self
+    }
+
+    /// Set the RadiosInUnison flag (bit 26 — radios sharing an export
+    /// value toggle together). Off by default per ISO 32000-2 Table
+    /// 226 default behaviour.
+    pub fn with_in_unison(mut self, value: bool) -> Self {
+        self.flags = self.flags.with_radios_in_unison(value);
+        self
+    }
+}
+
 /// The field-type-specific payload of a [`WidgetAnnotation`].
 pub enum WidgetField {
     /// `/Tx` text field.
     Text(TextField),
-    /// `/Btn` button field (checkbox, radio, pushbutton).
+    /// `/Btn` button field (checkbox, radio, pushbutton). Single
+    /// ungrouped radios continue to use this variant with
+    /// [`ButtonKind::Radio`]; grouped radios go through
+    /// [`RadioGroupField`] and emit as
+    /// [`WidgetField::RadioGroupChild`] internally.
     Button(ButtonField),
     /// `/Ch` choice field (combo / list box).
     Choice(ChoiceField),
+    /// One member of a [`RadioGroupField`] — a child widget annotation
+    /// that points at its parent group dict via `/Parent`. Constructed
+    /// by [`crate::page::Page::add_radio_group`]; callers do not build
+    /// this variant directly.
+    RadioGroupChild(RadioGroupChild),
+}
+
+/// One radio-group child widget — the field-tree dispatch payload for
+/// [`WidgetField::RadioGroupChild`]. Constructed by
+/// [`crate::page::Page::add_radio_group`].
+pub struct RadioGroupChild {
+    /// Indirect reference of the parent group dict, allocated before
+    /// the children are serialised so each child can carry `/Parent`.
+    pub(crate) parent_ref: Ref,
+    /// Export value emitted as `/AS /<export_value>` when selected,
+    /// otherwise `/AS /Off`.
+    pub(crate) export_value: String,
+    /// Whether this child is the currently-selected member of the
+    /// group — drives `/AS` between the export-value name and `/Off`.
+    pub(crate) is_selected: bool,
+}
+
+impl RadioGroupChild {
+    pub(crate) fn new(parent_ref: Ref, export_value: String, is_selected: bool) -> Self {
+        Self {
+            parent_ref,
+            export_value,
+            is_selected,
+        }
+    }
 }
 
 /// Flag bits for an AcroForm text field (`/FT /Tx`).
@@ -1068,7 +1215,7 @@ impl ButtonFieldFlags {
         self
     }
 
-    fn to_bits(self) -> u32 {
+    pub(crate) fn to_bits(self) -> u32 {
         let mut flags = FieldFlags::empty();
         if self.read_only {
             flags |= FieldFlags::READ_ONLY;
@@ -1206,8 +1353,14 @@ impl WidgetAnnotation {
 
         // /T is required on every terminal field; /FT identifies the
         // field type. The values pulled out of `WidgetField` populate
-        // /V, /DV, /MaxLen, /Opt and /Ff.
-        annotation.pair(Name(b"T"), TextStr(&self.partial_name));
+        // /V, /DV, /MaxLen, /Opt and /Ff. Radio-group children inherit
+        // all of these from the parent (ISO 32000-2 §12.7.5.2.3) and
+        // therefore omit /T, /FT, /Ff and /V entirely — the per-arm
+        // serialisation below decides whether to emit them.
+        let is_radio_group_child = matches!(&self.field, WidgetField::RadioGroupChild(_));
+        if !is_radio_group_child {
+            annotation.pair(Name(b"T"), TextStr(&self.partial_name));
+        }
 
         // /DA is mandatory on every variable-text field (and harmless
         // elsewhere). A minimal default appearance — Helvetica 10pt
@@ -1351,6 +1504,45 @@ impl WidgetAnnotation {
                     }
                 }
             }
+            WidgetField::RadioGroupChild(child) => {
+                // Child widgets of a non-terminal radio-group field carry
+                // /Parent + /AS only — they inherit /FT, /Ff, /T, /V from
+                // the parent (ISO 32000-2 §12.7.5.2.3). No /T, no /FT,
+                // no /Ff, no /V on a child: that is what makes the group
+                // a single mutually-exclusive field.
+                annotation.pair(Name(b"Parent"), child.parent_ref);
+                let state_bytes: Vec<u8> = if child.is_selected {
+                    child.export_value.as_bytes().to_vec()
+                } else {
+                    b"Off".to_vec()
+                };
+                annotation.pair(Name(b"AS"), Name(&state_bytes));
+                let on_ref = sc.new_ref();
+                let off_ref = sc.new_ref();
+                write_ap_on_off_with_state(
+                    annotation,
+                    &child.export_value,
+                    on_ref,
+                    off_ref,
+                );
+                job = AppearanceJob {
+                    helv_ref,
+                    on: AppearanceStream {
+                        xobject_ref: on_ref,
+                        bbox_w,
+                        bbox_h,
+                        content: build_radio_on_content(bbox_w, bbox_h),
+                        uses_helvetica: false,
+                    },
+                    off: Some(AppearanceStream {
+                        xobject_ref: off_ref,
+                        bbox_w,
+                        bbox_h,
+                        content: build_radio_off_content(bbox_w, bbox_h),
+                        uses_helvetica: false,
+                    }),
+                };
+            }
             WidgetField::Choice(choice) => {
                 annotation.pair(Name(b"FT"), Name(b"Ch"));
                 annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
@@ -1442,6 +1634,24 @@ fn write_ap_on_off(annotation: &mut pdf_writer::writers::Annotation, on_ref: Ref
     let mut ap = annotation.insert(Name(b"AP")).dict();
     let mut n = ap.insert(Name(b"N")).dict();
     n.pair(Name(b"Yes"), on_ref);
+    n.pair(Name(b"Off"), off_ref);
+    n.finish();
+    ap.finish();
+}
+
+/// Write `/AP << /N << /<export> <on_ref> /Off <off_ref> >> >>` into a
+/// radio-group child widget annotation. The "on" sub-state name must
+/// match the child's `/AS` when selected so viewers can flip
+/// appearance based on the parent's `/V`.
+fn write_ap_on_off_with_state(
+    annotation: &mut pdf_writer::writers::Annotation,
+    on_state: &str,
+    on_ref: Ref,
+    off_ref: Ref,
+) {
+    let mut ap = annotation.insert(Name(b"AP")).dict();
+    let mut n = ap.insert(Name(b"N")).dict();
+    n.pair(Name(on_state.as_bytes()), on_ref);
     n.pair(Name(b"Off"), off_ref);
     n.finish();
     ap.finish();
@@ -2052,5 +2262,181 @@ mod tests {
         page.finish();
         let pdf = document.finish().expect("document serialisation should succeed");
         assert!(!contains(&pdf, b"/AcroForm"));
+    }
+
+    fn three_radio_children() -> Vec<RadioChild> {
+        vec![
+            RadioChild {
+                rect: Rect::from_xywh(10.0, 10.0, 12.0, 12.0).unwrap(),
+                export_value: "yes".into(),
+            },
+            RadioChild {
+                rect: Rect::from_xywh(40.0, 10.0, 12.0, 12.0).unwrap(),
+                export_value: "no".into(),
+            },
+            RadioChild {
+                rect: Rect::from_xywh(70.0, 10.0, 12.0, 12.0).unwrap(),
+                export_value: "maybe".into(),
+            },
+        ]
+    }
+
+    fn finish_with_radio_group(group: RadioGroupField) -> Vec<u8> {
+        let settings = crate::SerializeSettings {
+            pretty: true,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        page.add_radio_group(group);
+        page.finish();
+        document.finish().expect("document serialisation should succeed")
+    }
+
+    #[test]
+    fn widget_annotation_radio_group_emits_parent_with_kids() {
+        // Three radios sharing a name, "yes" selected. The parent
+        // dict carries /T (group_name), /V /yes, /Kids of length 3;
+        // every child carries /Parent and /AS.
+        let group = RadioGroupField::new("group_name", three_radio_children())
+            .with_selected(Some("yes".into()));
+        let pdf = finish_with_radio_group(group);
+
+        assert!(contains(&pdf, b"/T (group_name)"), "missing parent /T");
+        assert!(contains(&pdf, b"/V /yes"), "missing parent /V /yes");
+        assert!(contains(&pdf, b"/Kids ["), "missing /Kids array opener");
+        // Three child refs in the radio-group's `/Kids` array. The
+        // PDF also contains a Pages-tree dictionary with its own
+        // `/Kids` (listing the document's pages), so we cannot rely
+        // on a naive "first `/Kids [`" match. We anchor on the group
+        // parent dict via its `/T (group_name)` entry and scan for
+        // the `/Kids` that follows.
+        let parent_anchor = pdf
+            .windows(b"/T (group_name)".len())
+            .position(|w| w == b"/T (group_name)")
+            .expect("missing /T (group_name) anchor");
+        let after_parent = &pdf[parent_anchor..];
+        let kids_offset = after_parent
+            .windows(b"/Kids [".len())
+            .position(|w| w == b"/Kids [")
+            .expect("missing /Kids [ after parent /T");
+        let after_kids = &after_parent[kids_offset..];
+        let close = after_kids
+            .iter()
+            .position(|&b| b == b']')
+            .expect("missing /Kids array closer");
+        let kids_body = &after_kids[..close];
+        let kid_ref_count = kids_body
+            .windows(b" 0 R".len())
+            .filter(|w| w == b" 0 R")
+            .count();
+        assert_eq!(
+            kid_ref_count, 3,
+            "expected 3 /Kids entries, got {kid_ref_count}; body={:?}",
+            std::str::from_utf8(kids_body).unwrap_or("<non-utf8>"),
+        );
+
+        // Every child widget annotation carries /Parent and /AS. The
+        // PDF contains three `/Subtype /Widget` annotations and a
+        // page-tree `/Parent` entry on the page dictionary itself —
+        // counting `/Subtype /Widget` is the cleanest way to assert
+        // child cardinality without colliding with the page's own
+        // parent pointer.
+        let widget_count = pdf
+            .windows(b"/Subtype /Widget".len())
+            .filter(|w| w == b"/Subtype /Widget")
+            .count();
+        assert_eq!(
+            widget_count, 3,
+            "expected 3 child widget annotations, got {widget_count}",
+        );
+        assert!(contains(&pdf, b"/AS /yes"), "missing /AS /yes on selected child");
+        // Two unselected children fall back to /Off.
+        let off_as_count = pdf
+            .windows(b"/AS /Off".len())
+            .filter(|w| w == b"/AS /Off")
+            .count();
+        assert_eq!(off_as_count, 2, "expected 2 /AS /Off entries, got {off_as_count}");
+    }
+
+    #[test]
+    fn widget_annotation_radio_group_no_selection_uses_off() {
+        // No child checked. Parent's /V is /Off and every child's
+        // /AS is /Off.
+        let group = RadioGroupField::new("preference", three_radio_children());
+        let pdf = finish_with_radio_group(group);
+
+        assert!(contains(&pdf, b"/V /Off"), "missing parent /V /Off");
+        let off_as_count = pdf
+            .windows(b"/AS /Off".len())
+            .filter(|w| w == b"/AS /Off")
+            .count();
+        assert_eq!(
+            off_as_count, 3,
+            "expected every child to fall back to /AS /Off; got {off_as_count}",
+        );
+        // None of the children should emit /AS /<export>.
+        assert!(!contains(&pdf, b"/AS /yes"));
+        assert!(!contains(&pdf, b"/AS /no"));
+        assert!(!contains(&pdf, b"/AS /maybe"));
+    }
+
+    #[test]
+    fn widget_annotation_radio_group_only_parent_in_fields() {
+        // The /AcroForm /Fields array must contain the parent ref
+        // exactly once and NO child refs. The parent ref is allocated
+        // before the children, so it has the lowest numbered ref in
+        // the group; the four refs that follow are the three children
+        // and (lazily) the Helvetica font.
+        let group = RadioGroupField::new("group", three_radio_children())
+            .with_selected(Some("no".into()));
+        let pdf = finish_with_radio_group(group);
+
+        // Locate the /Fields array.
+        let fields_pos = pdf
+            .windows(b"/Fields [".len())
+            .position(|w| w == b"/Fields [")
+            .expect("missing /Fields [");
+        let after = &pdf[fields_pos..];
+        let close = after
+            .iter()
+            .position(|&b| b == b']')
+            .expect("missing /Fields array closer");
+        let fields_body = &after[..close];
+        let fields_ref_count = fields_body
+            .windows(b" R".len())
+            .filter(|w| w == b" R")
+            .count();
+        assert_eq!(
+            fields_ref_count, 1,
+            "/AcroForm /Fields must contain exactly one ref (the radio-group parent), got {fields_ref_count}",
+        );
+    }
+
+    #[test]
+    fn widget_annotation_radio_group_ff_radio_bit_set() {
+        // The parent /Ff integer must have bit 15 (0x8000 = 32768)
+        // set and bit 16 (0x10000 = 65536, Pushbutton) clear.
+        let group = RadioGroupField::new("g", three_radio_children())
+            .with_selected(Some("yes".into()));
+        let pdf = finish_with_radio_group(group);
+
+        // The parent dict is the only one carrying /T (group_name)
+        // and /Ff together; the children have neither. So /Ff 32768
+        // is unambiguous.
+        assert!(
+            contains(&pdf, b"/Ff 32768"),
+            "expected /Ff 32768 (Radio flag only), got missing entry",
+        );
+        // Pushbutton (bit 17 = 65536) and combinations of both must
+        // not appear on the parent.
+        assert!(
+            !contains(&pdf, b"/Ff 65536"),
+            "pushbutton flag must not be set on a radio group",
+        );
+        assert!(
+            !contains(&pdf, b"/Ff 98304"),
+            "pushbutton+radio combination must not be set on a radio group",
+        );
     }
 }

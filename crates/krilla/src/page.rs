@@ -6,7 +6,7 @@ use std::ops::DerefMut;
 
 use pdf_writer::types::TabOrder;
 use pdf_writer::writers::NumberTree;
-use pdf_writer::{Chunk, Finish, Ref, TextStr};
+use pdf_writer::{Chunk, Finish, Name, Ref, TextStr};
 
 use crate::chunk_container::ChunkContainer;
 use crate::configure::validate::VersionedFeature;
@@ -14,7 +14,9 @@ use crate::configure::{PdfVersion, ValidationError};
 use crate::content::ContentBuilder;
 use crate::error::KrillaResult;
 use crate::geom::{Rect, Size, Transform};
-use crate::interactive::annotation::Annotation;
+use crate::interactive::annotation::{
+    Annotation, RadioGroupChild, RadioGroupField, WidgetAnnotation, WidgetField,
+};
 use crate::interchange::tagging::{Identifier, PageTagIdentifier};
 use crate::resource::ResourceDictionary;
 use crate::serialize::{PageInfo, SerializeContext};
@@ -215,6 +217,24 @@ pub struct Page<'a> {
     page_stream: Stream,
     num_mcids: i32,
     annotations: Vec<Annotation>,
+    radio_groups: Vec<RadioGroupPayload>,
+}
+
+/// Internal record produced by [`Page::add_radio_group`] — the
+/// pre-allocated parent ref together with the field metadata needed
+/// to emit the parent `Btn` dict during page serialisation. Child
+/// widget annotations are pushed onto `Page::annotations` and carry
+/// the same `parent_ref` via [`WidgetField::RadioGroupChild`].
+pub(crate) struct RadioGroupPayload {
+    pub(crate) parent_ref: Ref,
+    pub(crate) name: String,
+    pub(crate) selected_export: Option<String>,
+    pub(crate) default_selected_export: Option<String>,
+    pub(crate) ff_bits: u32,
+    /// Indirect refs of the child widget annotations in `/Kids` order.
+    /// Populated by [`InternalPage::serialize`] once each child has
+    /// been allocated its annotation ref.
+    pub(crate) kid_refs: Vec<Ref>,
 }
 
 impl<'a> Page<'a> {
@@ -232,6 +252,7 @@ impl<'a> Page<'a> {
             num_mcids: 0,
             page_stream: Stream::empty(),
             annotations: vec![],
+            radio_groups: vec![],
         }
     }
 
@@ -242,6 +263,63 @@ impl<'a> Page<'a> {
     /// Add an annotation to the page.
     pub fn add_annotation(&mut self, annotation: Annotation) {
         self.annotations.push(annotation);
+    }
+
+    /// Attach a mutually-exclusive radio-button group (ISO 32000-2
+    /// §12.7.5.2.3) to the page.
+    ///
+    /// HTML `<input type="radio">` elements that share a `name` form a
+    /// single AcroForm field with a non-terminal `/Btn` parent and one
+    /// child widget annotation per radio. krilla pre-allocates the
+    /// parent's indirect reference, pushes each child onto the page's
+    /// annotation list, and queues the parent dict for emission
+    /// alongside the catalogue's `/AcroForm /Fields` array. The
+    /// children appear in the page's `/Annots`; the parent is reached
+    /// via `/Kids` traversal.
+    ///
+    /// Each child carries `/AS /<export>` when selected or `/AS /Off`
+    /// otherwise; the parent's `/V` names the selected child (or
+    /// `/Off` when no radio is checked). The Radio flag (`/Ff` bit
+    /// 16) is forced on; the embedder controls `RadiosInUnison`
+    /// (bit 26) and `ReadOnly` (bit 1) via
+    /// [`RadioGroupField::flags`].
+    pub fn add_radio_group(&mut self, group: RadioGroupField) {
+        let parent_ref = self.sc.new_ref();
+        // The Radio flag must always be set on a radio-group parent;
+        // we OR it in regardless of how the caller configured `flags`
+        // so a bare `ButtonFieldFlags::default()` still produces a
+        // conforming field.
+        let mut flags = group.flags;
+        flags = flags.with_radio(true);
+        let ff_bits = flags.to_bits();
+        for child in group.children {
+            let selected = group
+                .selected_export
+                .as_deref()
+                .is_some_and(|sel| sel == child.export_value);
+            let widget = WidgetAnnotation::new(
+                child.rect,
+                // Children have no /T of their own. We still pass a
+                // partial name through the constructor for symmetry,
+                // but `WidgetAnnotation::serialize_type` skips /T for
+                // radio-group children.
+                String::new(),
+                WidgetField::RadioGroupChild(RadioGroupChild::new(
+                    parent_ref,
+                    child.export_value,
+                    selected,
+                )),
+            );
+            self.annotations.push(Annotation::new_widget(widget, None));
+        }
+        self.radio_groups.push(RadioGroupPayload {
+            parent_ref,
+            name: group.name,
+            selected_export: group.selected_export,
+            default_selected_export: group.default_selected_export,
+            ff_bits,
+            kid_refs: Vec::new(),
+        });
     }
 
     /// Add a tagged annotation to the page.
@@ -295,11 +373,46 @@ pub(crate) fn page_root_transform(height: f32) -> Transform {
     Transform::from_row(1.0, 0.0, 0.0, -1.0, 0.0, height)
 }
 
+/// Emit a non-terminal `/Btn` radio-group parent dict into `chunk`
+/// per ISO 32000-2 §12.7.5.2.3.
+///
+/// The parent dict carries `/FT /Btn`, `/T <name>`, `/Ff <flags>`,
+/// `/V /<selected_export | Off>`, `/DV /<default_export | Off>` and
+/// `/Kids [<child refs>]`. No `/Rect`: the parent is not itself a
+/// page annotation. Children are reached via tree traversal of
+/// `/Kids` and carry `/Parent` pointing back here.
+fn emit_radio_group_parent(chunk: &mut Chunk, group: &RadioGroupPayload) {
+    let mut field = chunk.indirect(group.parent_ref).dict();
+    field.pair(Name(b"FT"), Name(b"Btn"));
+    field.pair(Name(b"T"), TextStr(&group.name));
+    field.pair(Name(b"Ff"), group.ff_bits as i32);
+
+    let selected_bytes: Vec<u8> = match group.selected_export.as_deref() {
+        Some(name) => name.as_bytes().to_vec(),
+        None => b"Off".to_vec(),
+    };
+    field.pair(Name(b"V"), Name(&selected_bytes));
+
+    let default_bytes: Vec<u8> = match group.default_selected_export.as_deref() {
+        Some(name) => name.as_bytes().to_vec(),
+        None => b"Off".to_vec(),
+    };
+    field.pair(Name(b"DV"), Name(&default_bytes));
+
+    let mut kids = field.insert(Name(b"Kids")).array();
+    for kid in &group.kid_refs {
+        kids.item(*kid);
+    }
+    kids.finish();
+    field.finish();
+}
+
 impl Drop for Page<'_> {
     fn drop(&mut self) {
         // Since we cannot take ownership in `drop`, just make use `mem::take` to pick
         // what we need.
         let annotations = std::mem::take(&mut self.annotations);
+        let radio_groups = std::mem::take(&mut self.radio_groups);
         let page_settings = std::mem::take(&mut self.page_settings);
 
         let struct_parent = self
@@ -311,6 +424,7 @@ impl Drop for Page<'_> {
             stream,
             self.sc,
             annotations,
+            radio_groups,
             struct_parent,
             page_settings,
             self.page_index,
@@ -355,6 +469,7 @@ pub(crate) struct InternalPage {
     pub struct_parent: Option<i32>,
     pub bbox: Rect,
     pub annotations: Vec<Annotation>,
+    pub radio_groups: Vec<RadioGroupPayload>,
 }
 
 impl InternalPage {
@@ -362,6 +477,7 @@ impl InternalPage {
         mut stream: Stream,
         sc: &mut SerializeContext,
         annotations: Vec<Annotation>,
+        radio_groups: Vec<RadioGroupPayload>,
         struct_parent: Option<i32>,
         page_settings: PageSettings,
         page_index: usize,
@@ -394,6 +510,7 @@ impl InternalPage {
             struct_parent,
             bbox: stream.bbox,
             annotations,
+            radio_groups,
             page_settings,
             page_index,
         }
@@ -406,6 +523,7 @@ impl InternalPage {
         root_ref: Ref,
     ) -> KrillaResult<()> {
         let mut annotation_refs = vec![];
+        let mut radio_groups = self.radio_groups;
 
         if !self.annotations.is_empty() {
             // PDF/X-3/-4/-4p: annotations must lie wholly outside the print area
@@ -447,7 +565,30 @@ impl InternalPage {
                     self.page_settings.surface_size().height(),
                 )?;
                 annotation_refs.push((annot_ref, OnceCell::new()));
+
+                // Match radio-group child annotations back to their
+                // parent payload so the parent's `/Kids` array can be
+                // populated in insertion order.
+                if let Some(parent_ref) = annotation.radio_group_parent_ref() {
+                    if let Some(group) = radio_groups
+                        .iter_mut()
+                        .find(|g| g.parent_ref == parent_ref)
+                    {
+                        group.kid_refs.push(annot_ref);
+                    }
+                }
             }
+        }
+
+        // Emit one non-terminal `Btn` dict per radio group (ISO 32000-2
+        // §12.7.5.2.3). The parent dict carries `/T`, `/V`, `/DV`,
+        // `/Ff` (Radio flag) and `/Kids`; no `/Rect` because the
+        // parent is not itself a page annotation. The parent ref is
+        // registered with the document catalogue so it appears in
+        // `/AcroForm /Fields` exactly once.
+        for group in &radio_groups {
+            emit_radio_group_parent(&mut chunk_container.non_stream.pages, group);
+            sc.register_widget_field(group.parent_ref);
         }
 
         let chunk = &mut chunk_container.non_stream.pages;
