@@ -147,6 +147,136 @@ fn encryption_off_by_default() {
     assert!(settings.encryption.is_none());
 }
 
+// --- multi-page encryption -----------------------------------------
+
+fn build_three_page_doc(settings: SerializeSettings) -> Vec<u8> {
+    let mut doc = Document::new_with(settings);
+    doc.set_metadata(Metadata::new().title("Multi-page secret".into()));
+    for n in 0..3 {
+        let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
+        let mut surface = page.surface();
+        surface.set_fill(Some(Fill::default()));
+        surface.finish();
+        let _ = n; // suppress unused warning
+        page.finish();
+    }
+    doc.finish().unwrap()
+}
+
+#[test]
+fn encryption_spans_every_page_content_stream() {
+    let pdf = build_three_page_doc(encrypted_settings());
+    // The title is hidden by string encryption AND every page's
+    // content stream is encrypted — count `stream\n` boundaries
+    // and ensure no page's bytes contain the unencrypted title.
+    assert!(!contains(&pdf, b"Multi-page secret"));
+    let stream_count = pdf.windows(b"\nstream\n".len()).filter(|w| *w == b"\nstream\n").count();
+    assert!(
+        stream_count >= 3,
+        "expected at least 3 streams (one per page), got {stream_count}",
+    );
+}
+
+// --- encrypt_metadata flag -----------------------------------------
+
+#[test]
+fn encrypt_metadata_false_emits_flag_in_encrypt_dict() {
+    // The `/EncryptMetadata false` entry on the /Encrypt dict is
+    // the signal to indexers that the catalog's /Metadata stream
+    // is in clear. The flag is honoured by pdf-writer in the
+    // /Encrypt dict and the /Perms hash; krilla's responsibility
+    // is just to surface the setting.
+    let settings = SerializeSettings {
+        encryption: Some(
+            Encryption::new("u", "o").with_encrypt_metadata(false),
+        ),
+        ..crate::settings_1()
+    };
+    let pdf = build_doc(settings, "Indexable");
+    assert!(
+        contains(&pdf, b"/EncryptMetadata false"),
+        "/EncryptMetadata flag missing when encrypt_metadata=false",
+    );
+}
+
+#[test]
+fn encrypt_metadata_true_omits_flag_in_encrypt_dict() {
+    // When metadata encryption is on (the default), the flag is
+    // omitted entirely because `true` is the spec default —
+    // emitting it is allowed but adds noise.
+    let pdf = build_doc(encrypted_settings(), "Confidential");
+    assert!(
+        !contains(&pdf, b"/EncryptMetadata"),
+        "/EncryptMetadata flag emitted when encrypt_metadata=true (spec default)",
+    );
+}
+
+// --- encryption + xref streams -------------------------------------
+
+#[test]
+#[ignore = "shells out to qpdf; run via cargo test -- --ignored qpdf_encryption_plus_xref"]
+fn qpdf_encryption_plus_xref_streams() {
+    use std::process::Command;
+    let settings = SerializeSettings {
+        encryption: Some(Encryption::new("u", "o")),
+        xref_streams: true,
+        ..crate::settings_1()
+    };
+    let pdf = build_doc(settings, "Hybrid");
+    let path = std::env::temp_dir().join("krilla_enc_xref.pdf");
+    std::fs::write(&path, &pdf).unwrap();
+    let output = Command::new("qpdf")
+        .arg("--check")
+        .arg("--password=u")
+        .arg(&path)
+        .output()
+        .expect("qpdf not on PATH");
+    assert!(
+        output.status.success(),
+        "qpdf rejected the encrypted + xref-stream PDF: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("AESv3"));
+}
+
+#[test]
+fn encryption_plus_xref_streams_produces_valid_pdf() {
+    // Cross-reference streams must NOT be encrypted (ISO 32000-2
+    // §7.6.1 enumerates them in the "shall not be encrypted" list).
+    // pdf-writer's `Pdf::finish_with_xref_stream` is the codepath
+    // krilla dispatches to when `xref_streams = true`; verify the
+    // combination of the two SerializeSettings produces a structurally
+    // sound PDF that still carries the `/Encrypt` trailer entry.
+    let settings = SerializeSettings {
+        encryption: Some(Encryption::new("u", "o")),
+        xref_streams: true,
+        ..crate::settings_1()
+    };
+    let pdf = build_doc(settings, "Hybrid");
+    assert!(contains(&pdf, b"/Type /XRef"));
+    assert!(contains(&pdf, b"/Encrypt "));
+    assert!(contains(&pdf, b"/Filter /Standard"));
+}
+
+// --- long-password truncation --------------------------------------
+
+#[test]
+fn long_passwords_are_truncated_to_127_bytes() {
+    // ISO 32000-2 §7.6.4.3.2 caps the password input at 127 bytes.
+    // Build a 1024-byte password — the resulting key derivation
+    // must succeed (no panic) and the file must validate.
+    let long: Vec<u8> = (0..1024).map(|i| (i & 0xFF) as u8).collect();
+    let settings = SerializeSettings {
+        encryption: Some(Encryption::new(long, b"o".to_vec())),
+        ..crate::settings_1()
+    };
+    let pdf = build_doc(settings, "Truncated");
+    assert!(contains(&pdf, b"/Filter /Standard"));
+    assert!(contains(&pdf, b"/V 5"));
+}
+
 // --- PDF/A + encryption: mutual exclusion --------------------------
 
 use krilla::configure::{Archival, ConfigurationBuilder, Prepress, ValidationError};

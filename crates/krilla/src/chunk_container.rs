@@ -97,7 +97,10 @@ impl ChunkContainer {
         }
     }
 
-    pub(crate) fn finish(self, sc: &mut SerializeContext) -> KrillaResult<Pdf> {
+    pub(crate) fn finish(
+        self,
+        sc: &mut SerializeContext,
+    ) -> KrillaResult<(Pdf, Option<Ref>)> {
         let mut remapped_ref = Ref::new(1);
         let mut remapper = HashMap::new();
 
@@ -147,6 +150,18 @@ impl ChunkContainer {
             .encryption
             .as_ref()
             .map(|_| remapped_ref.bump());
+
+        // Reserve the indirect ref for the cross-reference stream
+        // (`/Type /XRef`) when `xref_streams` is enabled. Allocated
+        // from the SAME final-numbering counter as everything else
+        // emitted into the PDF so it can't collide with chunk refs,
+        // layer refs, the encrypt ref or downstream metadata refs.
+        // pdf-writer's `Pdf::finish_with_xref_stream` consumes it on
+        // the way out.
+        let xref_stream_ref = sc
+            .serialize_settings()
+            .xref_streams
+            .then(|| remapped_ref.bump());
 
         // Chunk length is not an exact number because the length might change as we renumber,
         // so we add a bit of a padding by multiplying with 1.1. The 200 is additional padding
@@ -550,7 +565,7 @@ impl ChunkContainer {
             catalog.finish();
         }
 
-        Ok(pdf)
+        Ok((pdf, xref_stream_ref))
     }
 }
 

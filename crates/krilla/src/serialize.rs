@@ -1418,8 +1418,12 @@ impl SerializeContext {
         // and when serializing the parent tree map we need to know the refs of the annotations
         self.serialize_tag_tree(&mut chunk_container)?;
 
-        // Create the final PDF.
-        let pdf = chunk_container.finish(&mut self)?;
+        // Create the final PDF. The companion `xref_stream_ref` is
+        // pre-allocated alongside the other final-numbering refs in
+        // `ChunkContainer::finish`; this finalises whether the trailer
+        // is written as a `xref` table (default) or as a `/Type /XRef`
+        // stream (when `xref_streams` is enabled).
+        let (pdf, xref_stream_ref) = chunk_container.finish(&mut self)?;
         self.register_limits(pdf.limits());
 
         self.check_validator_limits();
@@ -1445,15 +1449,6 @@ impl SerializeContext {
 
         // Just a sanity check that we've actually processed all items.
         self.global_objects.assert_all_taken();
-
-        // Choose the cross-reference layout. `xref_streams` is opt-in;
-        // when set we allocate one extra indirect ref for the xref
-        // stream itself (its `/Length`, filter chain and field-width
-        // dict live in that object). The ref MUST come from
-        // `SerializeContext::new_ref` so the numbering stays
-        // collision-free with everything already written.
-        let xref_stream_ref =
-            if self.serialize_settings.xref_streams { Some(self.new_ref()) } else { None };
 
         Ok(match xref_stream_ref {
             Some(r) => pdf.finish_with_xref_stream(r),
