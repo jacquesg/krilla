@@ -1059,7 +1059,7 @@ fn validate_wtpdf_full_example(document: &mut Document) {
 
 #[test]
 fn validate_wtpdf_missing_tagging() {
-    let mut document = Document::new_with(settings_44());
+    let document = Document::new_with(settings_44());
     let errs = validation_errors(document.finish());
     assert!(errs.contains(&ValidationError::MissingTagging));
 }
