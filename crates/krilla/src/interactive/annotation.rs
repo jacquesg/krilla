@@ -431,10 +431,42 @@ pub enum Target {
     Action(Action),
 }
 
+/// `/BS << /S … >>` style code for a link-annotation border
+/// (ISO 32000-2 §12.5.4 Table 165).
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum LinkBorderStyle {
+    /// `/S /S` — solid line.
+    Solid,
+    /// `/S /D` — dashed line; krilla emits the default `[3 3]` dash
+    /// pattern alongside.
+    Dashed,
+    /// `/S /U` — single underline line on the bottom edge.
+    Underline,
+    /// `/S /I` — inset (depressed) line.
+    Inset,
+    /// `/S /B` — bevelled (raised) line.
+    Beveled,
+}
+
+impl LinkBorderStyle {
+    /// Project onto the pdf-writer enum used by the `/BS /S` writer.
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::BorderType {
+        use pdf_writer::types::BorderType;
+        match self {
+            Self::Solid => BorderType::Solid,
+            Self::Dashed => BorderType::Dashed,
+            Self::Underline => BorderType::Underline,
+            Self::Inset => BorderType::Inset,
+            Self::Beveled => BorderType::Beveled,
+        }
+    }
+}
+
 /// Border of a link annotation.
 pub struct LinkBorder {
     pub(crate) width: f32,
     pub(crate) color: Color,
+    pub(crate) style: Option<LinkBorderStyle>,
 }
 
 impl LinkBorder {
@@ -443,7 +475,17 @@ impl LinkBorder {
     /// `width`: The width of the border in pt.
     /// `color`: The color of the border.
     pub fn new(width: f32, color: Color) -> Self {
-        Self { width, color }
+        Self { width, color, style: None }
+    }
+
+    /// Set the `/BS << /S … >>` style code. When set, the resulting
+    /// `/Link` annotation carries a full `/BS` sub-dictionary
+    /// (`/Type /Border /W <width> /S <style> [/D <dashes>]`) per
+    /// ISO 32000-2 §12.5.4. When unset, only the legacy `/Border`
+    /// array is emitted.
+    pub fn with_style(mut self, style: LinkBorderStyle) -> Self {
+        self.style = Some(style);
+        self
     }
 }
 
@@ -541,6 +583,20 @@ impl LinkAnnotation {
 
         if let Some(border) = &self.border {
             write_color(annotation, &border.color);
+            // ISO 32000-2 §12.5.4 — `/BS << /Type /Border /W /S [/D]
+            // >>`. PDF 1.6+ viewers prefer the `/BS` sub-dictionary
+            // over the legacy `/Border` array; krilla emits both so
+            // older readers continue to see the border width.
+            if let Some(style) = border.style {
+                let mut bs = annotation.border_style();
+                bs.width(border.width).style(style.to_pdf());
+                // Dashed borders need a `/D` pattern array (default
+                // `[3 3]`); other styles ignore the entry.
+                if matches!(style, LinkBorderStyle::Dashed) {
+                    bs.dashes([3.0_f32, 3.0_f32]);
+                }
+                bs.finish();
+            }
         }
 
         if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf16 {
