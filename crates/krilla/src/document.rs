@@ -116,6 +116,27 @@ impl Document {
         self.serializer_context.set_tag_tree(tag_tree);
     }
 
+    /// Register an external structure-element namespace (e.g.
+    /// MathML, HTML 4, PDF Math) by URI. Returns a stable
+    /// [`NamespaceHandle`](crate::tagging::NamespaceHandle) that
+    /// can be passed through
+    /// [`TagNamespace::Custom`](crate::tagging::TagNamespace::Custom)
+    /// to bind a structure element to the namespace.
+    ///
+    /// PDF 2.0 (ISO 32000-2 §14.8.6) only — krilla allocates the
+    /// indirect ref eagerly and writes the corresponding
+    /// `Namespace` dict at finalise time. Pre-2.0 documents
+    /// silently discard the registration (no `/Namespaces` array
+    /// exists on those versions). Repeated calls with the same
+    /// URI are idempotent — the same handle is returned and the
+    /// on-disk PDF carries at most one `Namespace` dict per URI.
+    pub fn register_namespace(
+        &mut self,
+        uri: impl Into<String>,
+    ) -> crate::tagging::NamespaceHandle {
+        self.serializer_context.register_namespace(uri)
+    }
+
     /// Register an optional content group (PDF "layer") with the
     /// document. The returned [`LayerHandle`](crate::optional_content::LayerHandle)
     /// can then be passed to

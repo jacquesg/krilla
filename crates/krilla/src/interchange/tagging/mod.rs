@@ -680,6 +680,7 @@ fn resolve_ns_override(sc: &SerializeContext, ns: Option<TagNamespace>) -> Optio
     ns.map(|ns| match ns {
         TagNamespace::Pdf2Ssn => sc.pdf2_ns.ssn_ref,
         TagNamespace::Krilla => sc.pdf2_ns.krilla_ref,
+        TagNamespace::Custom(handle) => sc.custom_namespace_ref(handle),
     })
 }
 
