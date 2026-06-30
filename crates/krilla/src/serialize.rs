@@ -665,6 +665,47 @@ impl SerializeContext {
         self.cur_ref.bump()
     }
 
+    /// Indirect ref of the document-level Type1 Helvetica font dict
+    /// used for AcroForm widget appearance streams (ISO 32000-2 §12.7.4).
+    ///
+    /// Lazily allocates the ref and emits the font dict into
+    /// `chunk_container.fonts` on first call; subsequent calls return
+    /// the same ref. Standard-14 Type1 (`/BaseFont /Helvetica`) with
+    /// `WinAnsiEncoding` so widget appearance content streams can draw
+    /// Latin-1 byte strings via `Tj`.
+    ///
+    /// The font dict is materialised at the end of serialisation by
+    /// [`SerializeContext::flush_standard_helvetica`] when at least one
+    /// caller requested it. Here we only allocate the ref so widget
+    /// appearance streams can reference it before any chunk is emitted.
+    pub(crate) fn standard_helvetica_ref(&mut self) -> Ref {
+        if let Some(ref_) = self.global_objects.standard_helvetica_font {
+            return ref_;
+        }
+        let font_ref = self.cur_ref.bump();
+        self.global_objects.standard_helvetica_font = Some(font_ref);
+        font_ref
+    }
+
+    /// Emit the document-level Type1 Helvetica font dict into
+    /// `chunk_container.fonts` if any caller requested its ref via
+    /// [`Self::standard_helvetica_ref`]. Idempotent; called once at the
+    /// end of `serialize_fonts`.
+    fn flush_standard_helvetica(&mut self, chunk_container: &mut ChunkContainer) {
+        let Some(font_ref) = self.global_objects.standard_helvetica_font else {
+            return;
+        };
+        let mut chunk = Chunk::new();
+        chunk
+            .indirect(font_ref)
+            .dict()
+            .pair(Name(b"Type"), Name(b"Font"))
+            .pair(Name(b"Subtype"), Name(b"Type1"))
+            .pair(Name(b"BaseFont"), Name(b"Helvetica"))
+            .pair(Name(b"Encoding"), Name(b"WinAnsiEncoding"));
+        chunk_container.streams.fonts.push(chunk);
+    }
+
     pub(crate) fn serialize_settings(&self) -> Arc<SerializeSettings> {
         self.serialize_settings.clone()
     }
@@ -753,6 +794,9 @@ impl SerializeContext {
         self.serialize_outline(&mut chunk_container);
         self.serialize_fonts(&mut chunk_container)?;
         self.serialize_pages(&mut chunk_container)?;
+        // Widget appearance streams allocate the standard Helvetica ref
+        // during page serialisation; emit its font dict once afterwards.
+        self.flush_standard_helvetica(&mut chunk_container);
         self.serialize_page_tree(&mut chunk_container);
         #[cfg(feature = "pdf")]
         self.serialize_embedded_pdfs(&mut chunk_container)?;
@@ -1512,6 +1556,13 @@ pub(crate) struct GlobalObjects {
     /// the document catalogue's `/AcroForm /Fields` array (ISO 32000-2
     /// §12.7.3).
     pub(crate) widget_fields: MaybeTaken<Vec<Ref>>,
+    /// Indirect ref of the document-level Type1 Helvetica font dict
+    /// used by AcroForm widget appearance streams. `None` until the
+    /// first widget appearance stream requests it via
+    /// [`SerializeContext::standard_helvetica_ref`]; serialised into
+    /// [`ChunkContainer::fonts`] at the moment of allocation, so no
+    /// take-once semantics are needed.
+    pub(crate) standard_helvetica_font: Option<Ref>,
     /// A map from fonts to font container.
     font_map: MaybeTaken<IndexMap<Font, Rc<RefCell<FontContainer>>>>,
     /// All XYZ destinations used in the document. The reason we need to store them
