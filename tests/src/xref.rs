@@ -2,11 +2,19 @@
 //! `/Type /XRef` stream) and trailer `/Size` balance.
 
 use krilla::configure::{ConfigurationBuilder, PdfVersion};
+use krilla::geom::{Point, Size};
+use krilla::metadata::Metadata;
+use krilla::num::NormalizedF32;
+use krilla::optional_content::Layer;
 use krilla::page::PageSettings;
+use krilla::paint::{Fill, LinearGradient, SpreadMethod, Stop};
 use krilla::tagging::{Tag, TagGroup, TagTree};
-use krilla::{Document, SerializeSettings};
+use krilla::text::{Font, TextDirection};
+use krilla::{Document, FontEmbedding, SerializeSettings};
 
-use crate::{settings_1, settings_17, settings_25};
+use crate::{
+    load_png_image, settings_1, settings_17, settings_25, stops_with_2_solid_1, NOTO_SANS,
+};
 
 fn build_one_page_pdf(settings: SerializeSettings) -> Vec<u8> {
     let mut doc = Document::new_with(settings);
@@ -204,4 +212,205 @@ fn trailer_size_balanced_pdf_17_explicit_pdf17() {
     };
     let pdf = build_one_page_pdf(settings);
     assert_trailer_balanced(&pdf, "PDF 1.7 explicit");
+}
+
+/// Build a PDF that draws text using a CID (Type0) font with default
+/// `FontEmbedding::Subset`. The default-subset path never emits
+/// `cid_to_gid_ref` (only the `Full`+TrueType path does), so a naive
+/// unconditional `sc.new_ref()` for that slot produces a leaked object.
+#[test]
+fn trailer_size_balanced_cid_font_subset() {
+    let mut doc = Document::new_with(settings_1());
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    surface.draw_text(
+        Point::from_xy(10.0, 100.0),
+        font,
+        16.0,
+        "Hello",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "CID font Subset embedding");
+}
+
+/// Same as above but with `FontEmbedding::None`. In this mode both
+/// `data_ref` and `cid_to_gid_ref` are allocated but neither is ever
+/// emitted, so two leaked objects appear unless the allocation is
+/// guarded.
+#[test]
+fn trailer_size_balanced_cid_font_no_embedding() {
+    let settings = SerializeSettings {
+        font_embedding: FontEmbedding::None,
+        ..settings_1()
+    };
+    let mut doc = Document::new_with(settings);
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    surface.draw_text(
+        Point::from_xy(10.0, 100.0),
+        font,
+        16.0,
+        "Hello",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "CID font no embedding");
+}
+
+/// PDF 2.0 deprecates the CIDSet stream, so `cid_set_ref` is allocated
+/// at the top of `CidFont::serialize` but its emission is gated behind
+/// `!pdf_version.deprecates_cid_set()`. Under PDF 2.0 the slot leaks
+/// unless allocation is also gated.
+#[test]
+fn trailer_size_balanced_cid_font_pdf20() {
+    let mut doc = Document::new_with(settings_25());
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    surface.draw_text(
+        Point::from_xy(10.0, 100.0),
+        font,
+        16.0,
+        "Hello",
+        false,
+        TextDirection::Auto,
+    );
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "CID font PDF 2.0 (deprecated CIDSet)");
+}
+
+/// Opaque RGB image: no alpha channel, so `soft_mask_id` is `None` and
+/// no extra ref is allocated. Confirm balance is preserved in the
+/// straightforward path.
+#[test]
+fn trailer_size_balanced_image_opaque() {
+    let mut doc = Document::new_with(settings_1());
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let image = load_png_image("rgb8.png");
+    let (w, h) = image.size();
+    surface.draw_image(image, Size::from_wh(w as f32, h as f32).unwrap());
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "opaque image");
+}
+
+/// RGBA image: has an alpha channel, so `Image::serialize` allocates a
+/// `soft_mask_id` ref via `sc.new_ref()`. That ref must be emitted as
+/// the `/SMask` XObject stream or trailer balance breaks.
+#[test]
+fn trailer_size_balanced_image_with_alpha() {
+    let mut doc = Document::new_with(settings_1());
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let image = load_png_image("rgba8.png");
+    let (w, h) = image.size();
+    surface.draw_image(image, Size::from_wh(w as f32, h as f32).unwrap());
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "RGBA image (soft-mask path)");
+}
+
+/// OCG layer: `Document::add_layer` bumps a ref eagerly. Confirm the
+/// chunk_container always emits a `/Type /OCG` dict for every
+/// registered layer regardless of whether `Surface::push_layer` was
+/// ever called.
+#[test]
+fn trailer_size_balanced_ocg_layer_registered_but_unused() {
+    let mut doc = Document::new_with(settings_1());
+    // Register a layer but never push it onto a surface.
+    let _handle = doc.add_layer(Layer::new("Unused"));
+
+    doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "OCG layer registered but never pushed");
+}
+
+/// PDF 2.0 with only deprecated-field metadata (producer, no
+/// creation_date): under PDF 2.0 the deprecated fields are not
+/// written to the Info dict, so `serialize_document_info` must not
+/// bump a ref that it will then leave unwritten. Before the fix,
+/// `LazyCell` was created after an unconditional `ref_.bump()`;
+/// the cell was never forced for this path, leaking one ref into
+/// `remapped_ref` and producing a free-entry gap that — while
+/// not observed by lopdf due to pdf-writer's free-list fill —
+/// is a latent correctness defect.
+#[test]
+fn trailer_size_balanced_pdf20_deprecated_metadata_no_creation_date() {
+    let mut doc = Document::new_with(settings_25());
+
+    // `producer` is a deprecated field in PDF 2.0 — it will not be
+    // written to the Info dict. `creation_date` is left `None` so no
+    // other Info-dict field forces emission either.
+    doc.set_metadata(Metadata::new().producer("test-producer".to_string()));
+
+    doc.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "PDF 2.0 deprecated-only metadata (no creation_date)");
+}
+
+/// Linear gradient (two stops): exercises the shading-function path
+/// which allocates a `root_ref` per call. Confirms balance is
+/// preserved across the shading serialisation chain.
+#[test]
+fn trailer_size_balanced_linear_gradient() {
+    let mut doc = Document::new_with(settings_1());
+    let mut page = doc.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    let mut surface = page.surface();
+
+    let gradient = LinearGradient {
+        x1: 0.0,
+        y1: 0.0,
+        x2: 200.0,
+        y2: 0.0,
+        transform: Default::default(),
+        spread_method: SpreadMethod::Pad,
+        stops: stops_with_2_solid_1(),
+        anti_alias: false,
+    };
+
+    use krilla::geom::{Path, PathBuilder};
+    let mut pb = PathBuilder::new();
+    pb.move_to(0.0, 0.0);
+    pb.line_to(200.0, 0.0);
+    pb.line_to(200.0, 200.0);
+    pb.line_to(0.0, 200.0);
+    pb.close();
+    let path = pb.finish().unwrap();
+
+    surface.set_fill(Some(Fill {
+        paint: gradient.into(),
+        opacity: NormalizedF32::ONE,
+        rule: Default::default(),
+    }));
+    surface.draw_path(&path);
+
+    surface.finish();
+    page.finish();
+    let pdf = doc.finish().unwrap();
+    assert_trailer_balanced(&pdf, "linear gradient");
 }
