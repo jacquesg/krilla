@@ -615,8 +615,7 @@ impl<'a> Surface<'a> {
     /// [`Surface::pop`]; the unbalanced-push panic in
     /// [`Surface::finish`] catches mismatches at end-of-surface.
     pub fn push_text_rendering(&mut self, mode: crate::serialize::TextRendering) {
-        self.push_instructions
-            .push(PushInstruction::TextRendering);
+        self.push_instructions.push(PushInstruction::TextRendering);
         self.text_rendering_stack.push(mode);
     }
 

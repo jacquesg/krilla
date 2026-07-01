@@ -2278,7 +2278,10 @@ mod tests {
             Archival::A4F,
             Archival::A4E,
         ] {
-            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+            assert!(
+                !profile.prohibits(&err),
+                "{profile:?} unexpectedly forbids DeviceN"
+            );
         }
     }
 
@@ -2294,7 +2297,10 @@ mod tests {
             Prepress::X6,
             Prepress::X6P,
         ] {
-            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+            assert!(
+                !profile.prohibits(&err),
+                "{profile:?} unexpectedly forbids DeviceN"
+            );
         }
     }
 
@@ -2304,7 +2310,10 @@ mod tests {
     fn pdf_ua_admits_devicen() {
         let err = ValidationError::ContainsDeviceN(None);
         for profile in [Accessibility::UA1, Accessibility::UA2, Accessibility::WTPDF] {
-            assert!(!profile.prohibits(&err), "{profile:?} unexpectedly forbids DeviceN");
+            assert!(
+                !profile.prohibits(&err),
+                "{profile:?} unexpectedly forbids DeviceN"
+            );
         }
     }
 }

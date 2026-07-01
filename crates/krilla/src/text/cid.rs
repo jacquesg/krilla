@@ -268,8 +268,7 @@ impl CIDFont {
         let full_data;
         let (font_stream, num_glyphs, global_bbox) = match effective_embedding {
             FontEmbedding::Subset => {
-                let (subsetted, global_bbox) =
-                    subset_font(self.font.clone(), glyph_remapper)?;
+                let (subsetted, global_bbox) = subset_font(self.font.clone(), glyph_remapper)?;
                 let num_glyphs = subsetted.num_glyphs();
                 subsetted_data = subsetted.font_data().0;
 
@@ -288,8 +287,7 @@ impl CIDFont {
                         data = cff.as_bytes();
                     }
 
-                    FilterStreamBuilder::new_from_binary_data(data)
-                        .finish(&sc.serialize_settings())
+                    FilterStreamBuilder::new_from_binary_data(data).finish(&sc.serialize_settings())
                 };
                 (Some(stream), num_glyphs, global_bbox)
             }
@@ -297,10 +295,8 @@ impl CIDFont {
                 // CFF is filtered out above; we are guaranteed Type2 here.
                 debug_assert!(is_glyf);
                 full_data = self.font.font_data().0;
-                let stream = FilterStreamBuilder::new_from_binary_data(
-                    full_data.as_ref().as_ref(),
-                )
-                .finish(&sc.serialize_settings());
+                let stream = FilterStreamBuilder::new_from_binary_data(full_data.as_ref().as_ref())
+                    .finish(&sc.serialize_settings());
                 let num_glyphs = self.glyph_remapper.num_gids() as u32;
                 let global_bbox = self.font.bbox();
                 (Some(stream), num_glyphs, global_bbox)

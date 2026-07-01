@@ -503,9 +503,7 @@ impl Color {
             ColourConversion::ForceRgb => match self {
                 Color::Regular(RegularColor::Rgb(_)) => self,
                 Color::Regular(RegularColor::Cmyk(c)) => cmyk_to_rgb(c).into(),
-                Color::Regular(RegularColor::Luma(l)) => {
-                    rgb::Color::new(l.0, l.0, l.0).into()
-                }
+                Color::Regular(RegularColor::Luma(l)) => rgb::Color::new(l.0, l.0, l.0).into(),
                 // `IccBased` is a wide-gamut path that the projection
                 // helpers (which work in u8) cannot honour without
                 // discarding the very precision the caller asked us to
@@ -521,11 +519,9 @@ impl Color {
                 Color::Regular(RegularColor::CalRgb { .. })
                 | Color::Regular(RegularColor::CalGray { .. })
                 | Color::Regular(RegularColor::Lab { .. }) => self,
-                Color::Special(SpecialColor::Separation(spot)) => {
-                    separation_to_regular(&spot)
-                        .into_color()
-                        .project(ColourConversion::ForceRgb)
-                }
+                Color::Special(SpecialColor::Separation(spot)) => separation_to_regular(&spot)
+                    .into_color()
+                    .project(ColourConversion::ForceRgb),
                 // Stage A DeviceN projection: fall back to the
                 // alternate process colour. A proper blend over N
                 // tints requires multi-channel arithmetic that Stage A
@@ -550,11 +546,9 @@ impl Color {
                 Color::Regular(RegularColor::CalRgb { .. })
                 | Color::Regular(RegularColor::CalGray { .. })
                 | Color::Regular(RegularColor::Lab { .. }) => self,
-                Color::Special(SpecialColor::Separation(spot)) => {
-                    separation_to_regular(&spot)
-                        .into_color()
-                        .project(ColourConversion::ForceCmyk)
-                }
+                Color::Special(SpecialColor::Separation(spot)) => separation_to_regular(&spot)
+                    .into_color()
+                    .project(ColourConversion::ForceCmyk),
                 Color::Special(SpecialColor::DeviceN(c)) => c
                     .space
                     .alternate
@@ -569,11 +563,9 @@ impl Color {
                 Color::Regular(RegularColor::CalRgb { .. })
                 | Color::Regular(RegularColor::CalGray { .. })
                 | Color::Regular(RegularColor::Lab { .. }) => self,
-                Color::Special(SpecialColor::Separation(spot)) => {
-                    separation_to_regular(&spot)
-                        .into_color()
-                        .project(ColourConversion::ForceGrey)
-                }
+                Color::Special(SpecialColor::Separation(spot)) => separation_to_regular(&spot)
+                    .into_color()
+                    .project(ColourConversion::ForceGrey),
                 Color::Special(SpecialColor::DeviceN(c)) => c
                     .space
                     .alternate
@@ -734,9 +726,7 @@ pub(crate) fn separation_to_regular(spot: &separation::Color) -> RegularColor {
             unit_to_u8(u8_to_unit(c.3) * tint),
         )
         .into(),
-        RegularColor::Luma(c) => {
-            luma::Color::new(unit_to_u8(u8_to_unit(c.0) * tint)).into()
-        }
+        RegularColor::Luma(c) => luma::Color::new(unit_to_u8(u8_to_unit(c.0) * tint)).into(),
         // Separation fallback cannot legally be an ICC-based wide-gamut
         // colour: PDF 32000-2 §8.6.6.4 requires the alternate space to
         // be a process colour (DeviceGray / DeviceRGB / DeviceCMYK / a
@@ -1983,10 +1973,7 @@ mod tests {
             vec!["PANTONE 185 C".to_string(), "PANTONE 286 C".to_string()],
             cmyk::Color::new(0, 0, 0, 0).into(),
             devicen::TintTransform::Linear {
-                per_colorant_components: vec![
-                    vec![0.0, 1.0, 1.0, 0.0],
-                    vec![1.0, 1.0, 0.0, 0.0],
-                ],
+                per_colorant_components: vec![vec![0.0, 1.0, 1.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]],
             },
         );
         assert!(space.is_some());
@@ -2059,10 +2046,7 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
             cmyk::Color::new(0, 0, 0, 0).into(),
             devicen::TintTransform::Linear {
-                per_colorant_components: vec![
-                    vec![1.0, 0.0, 0.0, 0.0],
-                    vec![0.0, 1.0, 0.0, 0.0],
-                ],
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
             },
         )
         .expect("space should construct");
@@ -2094,16 +2078,11 @@ mod tests {
             vec!["A".to_string(), "B".to_string()],
             cmyk::Color::new(0, 0, 0, 0).into(),
             devicen::TintTransform::Linear {
-                per_colorant_components: vec![
-                    vec![1.0, 0.0, 0.0, 0.0],
-                    vec![0.0, 1.0, 0.0, 0.0],
-                ],
+                per_colorant_components: vec![vec![1.0, 0.0, 0.0, 0.0], vec![0.0, 1.0, 0.0, 0.0]],
             },
         )
         .unwrap();
-        let dn: Color = devicen::Color::new(vec![0.25, 0.75], space)
-            .unwrap()
-            .into();
+        let dn: Color = devicen::Color::new(vec![0.25, 0.75], space).unwrap().into();
         let components = dn.to_pdf_color();
         assert_eq!(components.len(), 2);
         assert!((components[0] - 0.25).abs() < f32::EPSILON);
@@ -2167,8 +2146,7 @@ mod tests {
             ..Default::default()
         };
         let mut document = Document::new_with(settings);
-        let mut page =
-            document.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
+        let mut page = document.start_page_with(PageSettings::from_wh(100.0, 100.0).unwrap());
         let mut surface = page.surface();
         surface.set_fill(Some(fill));
 
@@ -2200,8 +2178,7 @@ mod tests {
             gamma: Some([2.2, 2.2, 2.2]),
             matrix: None,
         };
-        let color: Color =
-            RegularColor::cal_rgb(params, [0.5, 0.25, 0.75]).into();
+        let color: Color = RegularColor::cal_rgb(params, [0.5, 0.25, 0.75]).into();
         let pdf = finish_with_fill(Fill {
             paint: color.into(),
             opacity: NormalizedF32::ONE,

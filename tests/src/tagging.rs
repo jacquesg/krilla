@@ -14,8 +14,7 @@ use krilla::tagging::{
     SpanTag, TagGroup, TagTree,
 };
 use krilla::tagging::{
-    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace,
-    WritingMode,
+    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace, WritingMode,
 };
 use krilla::text::{Font, TextDirection};
 use krilla::{Document, SerializeSettings};
@@ -23,8 +22,8 @@ use krilla_macros::snapshot;
 use krilla_svg::{SurfaceExt, SvgSettings};
 
 use crate::{
-    green_fill, load_png_image, loc, rect_to_path, red_stroke, settings_1, settings_25,
-    NOTO_SANS, SVGS_PATH,
+    green_fill, load_png_image, loc, rect_to_path, red_stroke, settings_1, settings_25, NOTO_SANS,
+    SVGS_PATH,
 };
 
 pub trait SurfaceTaggingExt {
@@ -873,7 +872,9 @@ fn namespace_override_changes_pdf_20_bytes() {
         let mut document = Document::new_with(pretty(settings_25()));
         document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
         let mut tag_tree = TagTree::new();
-        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        tag_tree.push(TagGroup::new(
+            Tag::P.with_namespace(Some(TagNamespace::Krilla)),
+        ));
         document.set_tag_tree(tag_tree);
         document.finish().unwrap()
     };
@@ -913,7 +914,9 @@ fn namespace_override_ignored_on_pdf_17() {
         let mut document = Document::new_with(pretty(settings_1()));
         document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
         let mut tag_tree = TagTree::new();
-        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        tag_tree.push(TagGroup::new(
+            Tag::P.with_namespace(Some(TagNamespace::Krilla)),
+        ));
         document.set_tag_tree(tag_tree);
         document.finish().unwrap()
     };
@@ -960,7 +963,10 @@ fn register_namespace_is_idempotent() {
     let h1 = document.register_namespace(MATHML_URI);
     let h2 = document.register_namespace(MATHML_URI);
     let h3 = document.register_namespace(HTML4_URI);
-    assert_eq!(h1, h2, "registering the same URI twice must return the same handle");
+    assert_eq!(
+        h1, h2,
+        "registering the same URI twice must return the same handle"
+    );
     assert_ne!(h1, h3, "distinct URIs must return distinct handles");
 
     document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());

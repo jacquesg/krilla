@@ -3859,12 +3859,7 @@ impl WidgetAnnotation {
                 annotation.pair(Name(b"AS"), Name(&state_bytes));
                 let on_ref = sc.new_ref();
                 let off_ref = sc.new_ref();
-                write_ap_on_off_with_state(
-                    annotation,
-                    &child.export_value,
-                    on_ref,
-                    off_ref,
-                );
+                write_ap_on_off_with_state(annotation, &child.export_value, on_ref, off_ref);
                 job = AppearanceJob {
                     helv_ref,
                     on: AppearanceStream {
@@ -4179,11 +4174,7 @@ fn write_mk_icon_fit(mk: &mut pdf_writer::Dict, icon_fit: &IconFit) {
 /// representation suitable for an unannotated number array; the
 /// embedder is expected to author a device-space border / background
 /// when this matters.
-fn write_mk_colour_entry(
-    mk: &mut pdf_writer::Dict,
-    key: Name<'static>,
-    colour: &Color,
-) {
+fn write_mk_colour_entry(mk: &mut pdf_writer::Dict, key: Name<'static>, colour: &Color) {
     let mut array = mk.insert(key).array();
     match colour {
         Color::Regular(regular) => match regular {
@@ -4555,9 +4546,9 @@ fn write_color(annotation: &mut pdf_writer::writers::Annotation, color: &Color) 
 mod tests {
     use super::*;
     use crate::color::rgb;
-    use crate::interactive::action::JavaScriptAction;
     use crate::document::Document;
     use crate::geom::Point;
+    use crate::interactive::action::JavaScriptAction;
     use crate::page::PageSettings;
 
     fn finish_with(annotation: Annotation) -> Vec<u8> {
@@ -4569,7 +4560,9 @@ mod tests {
         let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.add_annotation(annotation);
         page.finish();
-        document.finish().expect("document serialisation should succeed")
+        document
+            .finish()
+            .expect("document serialisation should succeed")
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -4636,10 +4629,22 @@ mod tests {
             finish_with(Annotation::new_markup(markup, Some("alt".into())))
         };
 
-        assert!(contains(&make(MarkupSubtype::Highlight), b"/Subtype /Highlight"));
-        assert!(contains(&make(MarkupSubtype::Underline), b"/Subtype /Underline"));
-        assert!(contains(&make(MarkupSubtype::Strikeout), b"/Subtype /StrikeOut"));
-        assert!(contains(&make(MarkupSubtype::Squiggly), b"/Subtype /Squiggly"));
+        assert!(contains(
+            &make(MarkupSubtype::Highlight),
+            b"/Subtype /Highlight"
+        ));
+        assert!(contains(
+            &make(MarkupSubtype::Underline),
+            b"/Subtype /Underline"
+        ));
+        assert!(contains(
+            &make(MarkupSubtype::Strikeout),
+            b"/Subtype /StrikeOut"
+        ));
+        assert!(contains(
+            &make(MarkupSubtype::Squiggly),
+            b"/Subtype /Squiggly"
+        ));
     }
 
     #[test]
@@ -4682,8 +4687,8 @@ mod tests {
                 Point::from_xy(20.0, 0.0),
                 Point::from_xy(0.0, 0.0),
             ]);
-            let markup = MarkupAnnotation::new(subtype, vec![quad])
-                .with_creation_date("D:20260515120000Z");
+            let markup =
+                MarkupAnnotation::new(subtype, vec![quad]).with_creation_date("D:20260515120000Z");
             finish_with(Annotation::new_markup(markup, Some("alt".into())))
         };
 
@@ -4709,7 +4714,10 @@ mod tests {
     fn text_annotation_from_trait_wraps_without_alt() {
         let text = TextAnnotation::new(Rect::from_xywh(0.0, 0.0, 5.0, 5.0).unwrap());
         let annotation: Annotation = text.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Text(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Text(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -4723,7 +4731,10 @@ mod tests {
         ]);
         let markup = MarkupAnnotation::new(MarkupSubtype::Underline, vec![quad]);
         let annotation: Annotation = markup.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Markup(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Markup(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -4739,7 +4750,10 @@ mod tests {
 
         let pdf = finish_with(Annotation::new_stamp(stamp, Some("confidential".into())));
 
-        assert!(contains(&pdf, b"/Subtype /Stamp"), "missing /Subtype /Stamp");
+        assert!(
+            contains(&pdf, b"/Subtype /Stamp"),
+            "missing /Subtype /Stamp"
+        );
         assert!(
             contains(&pdf, b"/Name /Confidential"),
             "missing /Name /Confidential"
@@ -4755,7 +4769,10 @@ mod tests {
             StampIcon::default(),
         );
         let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
-        assert!(contains(&pdf, b"/Name /Draft"), "default icon should be Draft");
+        assert!(
+            contains(&pdf, b"/Name /Draft"),
+            "default icon should be Draft"
+        );
     }
 
     #[test]
@@ -4801,10 +4818,16 @@ mod tests {
 
         let pdf = finish_with(Annotation::new_sound(sound, Some("audio".into())));
 
-        assert!(contains(&pdf, b"/Subtype /Sound"), "missing /Subtype /Sound");
+        assert!(
+            contains(&pdf, b"/Subtype /Sound"),
+            "missing /Subtype /Sound"
+        );
         assert!(contains(&pdf, b"/Name /Speaker"), "missing /Name /Speaker");
         // Sound stream dict entries.
-        assert!(contains(&pdf, b"/Type /Sound"), "missing /Type /Sound on stream");
+        assert!(
+            contains(&pdf, b"/Type /Sound"),
+            "missing /Type /Sound on stream"
+        );
         assert!(contains(&pdf, b"/R 44100"), "missing /R sample rate");
         assert!(contains(&pdf, b"/C 2"), "missing /C channels");
         assert!(contains(&pdf, b"/B 16"), "missing /B bits/sample");
@@ -4858,7 +4881,10 @@ mod tests {
 
         let pdf = finish_with(Annotation::new_movie(movie, Some("video".into())));
 
-        assert!(contains(&pdf, b"/Subtype /Movie"), "missing /Subtype /Movie");
+        assert!(
+            contains(&pdf, b"/Subtype /Movie"),
+            "missing /Subtype /Movie"
+        );
         assert!(contains(&pdf, b"/Movie <<"), "missing /Movie dict");
         assert!(contains(&pdf, b"(intro.mov)"), "missing /F file path");
         assert!(contains(&pdf, b"/Poster true"), "missing /Poster true");
@@ -4867,10 +4893,8 @@ mod tests {
 
     #[test]
     fn movie_annotation_poster_off_by_default() {
-        let movie = MovieAnnotation::new(
-            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
-            "clip.mov",
-        );
+        let movie =
+            MovieAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(), "clip.mov");
         let pdf = finish_with(Annotation::new_movie(movie, Some("clip".into())));
         assert!(
             !contains(&pdf, b"/Poster"),
@@ -4886,7 +4910,10 @@ mod tests {
 
         let pdf = finish_with(Annotation::new_screen(screen, Some("rendition".into())));
 
-        assert!(contains(&pdf, b"/Subtype /Screen"), "missing /Subtype /Screen");
+        assert!(
+            contains(&pdf, b"/Subtype /Screen"),
+            "missing /Subtype /Screen"
+        );
         assert!(contains(&pdf, b"(MainScreen)"), "missing screen /T");
     }
 
@@ -4902,18 +4929,22 @@ mod tests {
             8,
         );
         let annotation: Annotation = sound.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Sound(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Sound(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
     #[test]
     fn movie_annotation_from_trait_wraps_without_alt() {
-        let movie = MovieAnnotation::new(
-            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
-            "clip.mov",
-        );
+        let movie =
+            MovieAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(), "clip.mov");
         let annotation: Annotation = movie.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Movie(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Movie(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -4921,7 +4952,10 @@ mod tests {
     fn screen_annotation_from_trait_wraps_without_alt() {
         let screen = ScreenAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
         let annotation: Annotation = screen.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Screen(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Screen(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -4932,7 +4966,10 @@ mod tests {
             StampIcon::Approved,
         );
         let annotation: Annotation = stamp.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Stamp(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Stamp(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -4951,7 +4988,10 @@ mod tests {
         let widget = WidgetAnnotation::new(widget_rect(), "username", text);
         let pdf = finish_with(Annotation::new_widget(widget, None));
 
-        assert!(contains(&pdf, b"/Subtype /Widget"), "missing /Subtype /Widget");
+        assert!(
+            contains(&pdf, b"/Subtype /Widget"),
+            "missing /Subtype /Widget"
+        );
         assert!(contains(&pdf, b"/FT /Tx"), "missing /FT /Tx");
         assert!(contains(&pdf, b"/T (username)"), "missing partial name /T");
         assert!(contains(&pdf, b"/V (alice)"), "missing field value /V");
@@ -4970,8 +5010,8 @@ mod tests {
             max_length: None,
             flags: TextFieldFlags::default(),
         });
-        let widget = WidgetAnnotation::new(widget_rect(), "email", text)
-            .with_tooltip("E-mail address");
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "email", text).with_tooltip("E-mail address");
         let pdf = finish_with(Annotation::new_widget(widget, None));
 
         assert!(
@@ -5108,7 +5148,10 @@ mod tests {
         assert!(contains(&pdf, b"(US)"), "missing US export");
         // Single value still emits /V as a string literal, not an array.
         assert!(contains(&pdf, b"/V (US)"), "missing single-value /V");
-        assert!(!contains(&pdf, b"/V ["), "single value must not emit /V array");
+        assert!(
+            !contains(&pdf, b"/V ["),
+            "single value must not emit /V array"
+        );
     }
 
     #[test]
@@ -5132,7 +5175,10 @@ mod tests {
 
         assert!(contains(&pdf, b"/FT /Ch"), "missing /FT /Ch");
         // MultiSelect = bit 22 = 2097152
-        assert!(contains(&pdf, b"/Ff 2097152"), "missing multi-select /Ff bit");
+        assert!(
+            contains(&pdf, b"/Ff 2097152"),
+            "missing multi-select /Ff bit"
+        );
         // /V is an array, not a string literal — the byte sequence is
         // `/V [(red)(green)(blue)]` (pdf-writer inserts no separator
         // between adjacent string literals).
@@ -5292,10 +5338,7 @@ mod tests {
         let pdf = finish_with(Annotation::new_widget(widget, None));
 
         // RichText = bit 26 = 33554432
-        assert!(
-            contains(&pdf, b"/Ff 33554432"),
-            "missing rich-text /Ff bit"
-        );
+        assert!(contains(&pdf, b"/Ff 33554432"), "missing rich-text /Ff bit");
     }
 
     #[test]
@@ -5370,7 +5413,10 @@ mod tests {
         });
         let widget = WidgetAnnotation::new(widget_rect(), "f", text);
         let annotation: Annotation = widget.into();
-        assert!(matches!(annotation.annotation_type, AnnotationType::Widget(_)));
+        assert!(matches!(
+            annotation.annotation_type,
+            AnnotationType::Widget(_)
+        ));
         assert!(annotation.alt.is_none());
     }
 
@@ -5388,7 +5434,10 @@ mod tests {
     fn widget_annotation_no_actions_omits_aa_dict() {
         let widget = empty_text_widget("plain");
         let pdf = finish_with(Annotation::new_widget(widget, None));
-        assert!(!contains(&pdf, b"/AA"), "/AA emitted on widget with no actions");
+        assert!(
+            !contains(&pdf, b"/AA"),
+            "/AA emitted on widget with no actions"
+        );
     }
 
     #[test]
@@ -5400,10 +5449,7 @@ mod tests {
         assert!(contains(&pdf, b"/AA"), "missing /AA dict");
         assert!(contains(&pdf, b"/K <<"), "missing /AA /K key");
         assert!(contains(&pdf, b"/S /JavaScript"), "missing /S /JavaScript");
-        assert!(
-            contains(&pdf, b"AFDate_KeystrokeEx"),
-            "missing JS body"
-        );
+        assert!(contains(&pdf, b"AFDate_KeystrokeEx"), "missing JS body");
     }
 
     #[test]
@@ -5450,9 +5496,7 @@ mod tests {
     #[test]
     fn widget_annotation_calculate_action_emits_aa_c_javascript() {
         let widget = empty_text_widget("vat").with_calculate_action(Action::JavaScript(
-            JavaScriptAction::new(
-                "event.value = this.getField(\"subtotal\").value * 0.20;",
-            ),
+            JavaScriptAction::new("event.value = this.getField(\"subtotal\").value * 0.20;"),
         ));
         let pdf = finish_with(Annotation::new_widget(widget, None));
         assert!(contains(&pdf, b"/AA"), "missing /AA dict");
@@ -5512,7 +5556,10 @@ mod tests {
         // No /AA on radio children — they have no setter wired
         // through `add_radio_group`, but the suppression branch should
         // still leave the document free of /AA dicts.
-        assert!(!contains(&pdf, b"/AA"), "/AA leaked onto radio-group children");
+        assert!(
+            !contains(&pdf, b"/AA"),
+            "/AA leaked onto radio-group children"
+        );
     }
 
     #[test]
@@ -5520,7 +5567,9 @@ mod tests {
         let mut document = Document::new();
         let page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.finish();
-        let pdf = document.finish().expect("document serialisation should succeed");
+        let pdf = document
+            .finish()
+            .expect("document serialisation should succeed");
         assert!(!contains(&pdf, b"/AcroForm"));
     }
 
@@ -5550,7 +5599,9 @@ mod tests {
         let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.add_radio_group(group);
         page.finish();
-        document.finish().expect("document serialisation should succeed")
+        document
+            .finish()
+            .expect("document serialisation should succeed")
     }
 
     #[test]
@@ -5591,7 +5642,8 @@ mod tests {
             .filter(|w| w == b" 0 R")
             .count();
         assert_eq!(
-            kid_ref_count, 3,
+            kid_ref_count,
+            3,
             "expected 3 /Kids entries, got {kid_ref_count}; body={:?}",
             std::str::from_utf8(kids_body).unwrap_or("<non-utf8>"),
         );
@@ -5610,13 +5662,19 @@ mod tests {
             widget_count, 3,
             "expected 3 child widget annotations, got {widget_count}",
         );
-        assert!(contains(&pdf, b"/AS /yes"), "missing /AS /yes on selected child");
+        assert!(
+            contains(&pdf, b"/AS /yes"),
+            "missing /AS /yes on selected child"
+        );
         // Two unselected children fall back to /Off.
         let off_as_count = pdf
             .windows(b"/AS /Off".len())
             .filter(|w| w == b"/AS /Off")
             .count();
-        assert_eq!(off_as_count, 2, "expected 2 /AS /Off entries, got {off_as_count}");
+        assert_eq!(
+            off_as_count, 2,
+            "expected 2 /AS /Off entries, got {off_as_count}"
+        );
     }
 
     #[test]
@@ -5648,8 +5706,8 @@ mod tests {
         // before the children, so it has the lowest numbered ref in
         // the group; the four refs that follow are the three children
         // and (lazily) the Helvetica font.
-        let group = RadioGroupField::new("group", three_radio_children())
-            .with_selected(Some("no".into()));
+        let group =
+            RadioGroupField::new("group", three_radio_children()).with_selected(Some("no".into()));
         let pdf = finish_with_radio_group(group);
 
         // Locate the /Fields array.
@@ -5677,8 +5735,8 @@ mod tests {
     fn widget_annotation_radio_group_ff_radio_bit_set() {
         // The parent /Ff integer must have bit 15 (0x8000 = 32768)
         // set and bit 16 (0x10000 = 65536, Pushbutton) clear.
-        let group = RadioGroupField::new("g", three_radio_children())
-            .with_selected(Some("yes".into()));
+        let group =
+            RadioGroupField::new("g", three_radio_children()).with_selected(Some("yes".into()));
         let pdf = finish_with_radio_group(group);
 
         // The parent dict is the only one carrying /T (group_name)
@@ -5713,8 +5771,8 @@ mod tests {
             max_length: None,
             flags: TextFieldFlags::default(),
         });
-        let widget = WidgetAnnotation::new(widget_rect(), "field", text)
-            .with_appearance_characteristics(mk);
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "field", text).with_appearance_characteristics(mk);
         finish_with(Annotation::new_widget(widget, None))
     }
 
@@ -5979,8 +6037,8 @@ mod tests {
             rollover_icon: Some(image),
             ..Default::default()
         };
-        let widget = WidgetAnnotation::new(widget_rect(), "btn", button)
-            .with_appearance_characteristics(mk);
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "btn", button).with_appearance_characteristics(mk);
         let pdf = finish_with(Annotation::new_widget(widget, None));
         assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
         // /RI <n> 0 R — the indirect reference token.
@@ -6021,8 +6079,8 @@ mod tests {
             alternate_icon: Some(image),
             ..Default::default()
         };
-        let widget = WidgetAnnotation::new(widget_rect(), "btn", button)
-            .with_appearance_characteristics(mk);
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "btn", button).with_appearance_characteristics(mk);
         let pdf = finish_with(Annotation::new_widget(widget, None));
         let mk_pos = pdf
             .windows(b"/MK <<".len())
@@ -6094,10 +6152,7 @@ mod tests {
     /// `>>` token to avoid pulling in the rest of the annotation
     /// dictionary.
     fn mk_dictionary_slice(pdf: &[u8]) -> String {
-        let Some(start) = pdf
-            .windows(b"/MK <<".len())
-            .position(|w| w == b"/MK <<")
-        else {
+        let Some(start) = pdf.windows(b"/MK <<".len()).position(|w| w == b"/MK <<") else {
             return "<no /MK dict>".to_string();
         };
         let tail = &pdf[start..];
@@ -6149,7 +6204,10 @@ mod tests {
             )),
         );
         let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
-        assert!(!contains(&pdf, b"/H /"), "unexpected /H entry on link without highlight");
+        assert!(
+            !contains(&pdf, b"/H /"),
+            "unexpected /H entry on link without highlight"
+        );
     }
 
     #[test]
@@ -6226,13 +6284,16 @@ mod tests {
             caption: "Go".into(),
             flags: ButtonFieldFlags::default().with_pushbutton(true),
         });
-        let widget = WidgetAnnotation::new(widget_rect(), "submit", button)
-            .with_icon_appearance(image);
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "submit", button).with_icon_appearance(image);
         let pdf = finish_with(Annotation::new_widget(widget, None));
 
         // /MK dict carries both /CA caption and /I icon ref.
         assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
-        assert!(contains(&pdf, b"/CA (Go)"), "missing /CA caption inside /MK");
+        assert!(
+            contains(&pdf, b"/CA (Go)"),
+            "missing /CA caption inside /MK"
+        );
         // /I <n> 0 R — the indirect reference token. We assert the
         // `/I ` substring followed by digits + ` 0 R`.
         let mk_pos = pdf
@@ -6378,8 +6439,7 @@ mod tests {
             ..Default::default()
         };
         let mut document = Document::new_with(settings);
-        let mut page =
-            document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.add_annotation(Annotation::new_file_attachment(a1, Some("alt".into())));
         page.add_annotation(Annotation::new_file_attachment(a2, Some("alt".into())));
         page.finish();
@@ -6389,10 +6449,7 @@ mod tests {
 
         // Print the PDF (for debug) and inspect.
         if std::env::var_os("KRILLA_DUMP_PDF").is_some() {
-            eprintln!(
-                "PDF bytes: {}",
-                String::from_utf8_lossy(&pdf)
-            );
+            eprintln!("PDF bytes: {}", String::from_utf8_lossy(&pdf));
         }
 
         // The FileSpec dict is registered through `register_cacheable`,
@@ -6456,10 +6513,7 @@ mod tests {
         let link = LinkAnnotation::new(
             Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
             Target::Destination(crate::interactive::destination::Destination::Xyz(
-                crate::interactive::destination::XyzDestination::new(
-                    0,
-                    Point::from_xy(0.0, 0.0),
-                ),
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
             )),
         )
         .with_border(
@@ -6487,10 +6541,7 @@ mod tests {
         let link = LinkAnnotation::new(
             Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
             Target::Destination(crate::interactive::destination::Destination::Xyz(
-                crate::interactive::destination::XyzDestination::new(
-                    0,
-                    Point::from_xy(0.0, 0.0),
-                ),
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
             )),
         )
         .with_border(
@@ -6513,10 +6564,7 @@ mod tests {
         let link = LinkAnnotation::new(
             Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
             Target::Destination(crate::interactive::destination::Destination::Xyz(
-                crate::interactive::destination::XyzDestination::new(
-                    0,
-                    Point::from_xy(0.0, 0.0),
-                ),
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
             )),
         )
         .with_border(

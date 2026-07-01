@@ -1,5 +1,6 @@
 pub mod blend;
 pub mod color;
+pub(crate) mod devicen;
 pub mod graphic;
 pub(crate) mod graphics_state;
 pub mod icc;
@@ -8,7 +9,6 @@ pub mod image;
 pub mod mask;
 pub mod overprint;
 pub mod paint;
-pub(crate) mod devicen;
 pub(crate) mod separation;
 pub(crate) mod shading_function;
 pub(crate) mod shading_pattern;

@@ -91,9 +91,7 @@ fn assert_no_operator(haystack: &[u8], op: &str) {
                 .map(|prefix| prefix.ends_with(' ') || prefix.is_empty())
                 .unwrap_or(false)
         {
-            panic!(
-                "operator `{op}` unexpectedly emitted on line `{trimmed}` in content stream"
-            );
+            panic!("operator `{op}` unexpectedly emitted on line `{trimmed}` in content stream");
         }
     }
 }
@@ -108,7 +106,10 @@ fn force_rgb_from_rgb_emits_rg() {
         rgb::Color::new(255, 0, 0).into(),
     );
     let line = fill_operator_line(&pdf, "rg");
-    assert!(line.starts_with("1 0 0"), "expected `1 0 0 rg`, got `{line}`");
+    assert!(
+        line.starts_with("1 0 0"),
+        "expected `1 0 0 rg`, got `{line}`"
+    );
 }
 
 #[test]
@@ -119,7 +120,10 @@ fn force_rgb_from_cmyk_emits_rg() {
         cmyk::Color::new(0, 255, 255, 0).into(),
     );
     let line = fill_operator_line(&pdf, "rg");
-    assert!(line.starts_with("1 0 0"), "expected `1 0 0 rg`, got `{line}`");
+    assert!(
+        line.starts_with("1 0 0"),
+        "expected `1 0 0 rg`, got `{line}`"
+    );
     // The CMYK source must NOT survive — no `k` operator.
     assert_no_operator(&pdf, "k");
 }
@@ -129,10 +133,7 @@ fn force_rgb_from_luma_emits_rg() {
     // L = 128 -> RGB (128, 128, 128) -> 128/255 ~= 0.5020 (rounded
     // by the PDF writer; we just assert the operator + that all
     // three channels are equal).
-    let pdf = render_filled_rect(
-        ColourConversion::ForceRgb,
-        luma::Color::new(128).into(),
-    );
+    let pdf = render_filled_rect(ColourConversion::ForceRgb, luma::Color::new(128).into());
     let line = fill_operator_line(&pdf, "rg");
     let parts: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(parts.len(), 4, "expected `r g b rg`, got `{line}`");
@@ -173,10 +174,7 @@ fn force_cmyk_from_cmyk_emits_k() {
 fn force_cmyk_from_luma_emits_k_pure_black() {
     // L = 128 -> K = 1 - 128/255 ~= 0.498. Channel-wise the
     // emitted CMYK is (0, 0, 0, k).
-    let pdf = render_filled_rect(
-        ColourConversion::ForceCmyk,
-        luma::Color::new(128).into(),
-    );
+    let pdf = render_filled_rect(ColourConversion::ForceCmyk, luma::Color::new(128).into());
     let line = fill_operator_line(&pdf, "k");
     let parts: Vec<&str> = line.split_whitespace().collect();
     assert_eq!(parts.len(), 5, "expected `c m y k k`, got `{line}`");
@@ -212,10 +210,7 @@ fn force_grey_from_cmyk_emits_g() {
 
 #[test]
 fn force_grey_from_luma_emits_g() {
-    let pdf = render_filled_rect(
-        ColourConversion::ForceGrey,
-        luma::Color::new(128).into(),
-    );
+    let pdf = render_filled_rect(ColourConversion::ForceGrey, luma::Color::new(128).into());
     fill_operator_line(&pdf, "g");
 }
 
@@ -224,10 +219,7 @@ fn force_grey_from_luma_emits_g() {
 #[test]
 fn auto_policy_is_pass_through_rgb() {
     // Without projection an RGB source must emit `rg`.
-    let pdf = render_filled_rect(
-        ColourConversion::Auto,
-        rgb::Color::new(255, 0, 0).into(),
-    );
+    let pdf = render_filled_rect(ColourConversion::Auto, rgb::Color::new(255, 0, 0).into());
     fill_operator_line(&pdf, "rg");
     assert_no_operator(&pdf, "k");
     assert_no_operator(&pdf, "g");

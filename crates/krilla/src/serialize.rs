@@ -17,10 +17,10 @@ use crate::configure::{Configuration, PdfVersion, ValidationError, Validators};
 use crate::error::{KrillaError, KrillaResult, LimitError};
 use crate::geom::Size;
 use crate::graphics::color::{rgb, ColorSpace, ColourConversion};
+use crate::graphics::devicen::DeviceNColorSpace;
 use crate::graphics::icc::{GenericICCProfile, ICCBasedColorSpace, ICCColorSpace, ICCProfile};
 #[cfg(feature = "raster-images")]
 use crate::graphics::image::Image;
-use crate::graphics::devicen::DeviceNColorSpace;
 use crate::graphics::separation::SeparationColorSpace;
 use crate::interactive::destination::{NamedDestination, XyzDestination};
 use crate::interchange::embed::EmbeddedFile;
@@ -1341,10 +1341,7 @@ impl SerializeContext {
     /// Panics if the handle does not correspond to a layer registered
     /// on this document (which can only happen if the handle was
     /// fabricated by hand or originated on a different `Document`).
-    pub(crate) fn layer_ref(
-        &self,
-        handle: crate::optional_content::LayerHandle,
-    ) -> Ref {
+    pub(crate) fn layer_ref(&self, handle: crate::optional_content::LayerHandle) -> Ref {
         self.global_objects
             .layers
             .get(handle.0 as usize)
@@ -2473,8 +2470,7 @@ pub(crate) struct GlobalObjects {
     /// catalogue's `/AF` array partitioning: `EmbedLocation::Before`
     /// entries are emitted ahead of `EmbedLocation::After` entries,
     /// preserving alphabetical order within each partition.
-    pub(crate) embedded_files:
-        MaybeTaken<BTreeMap<String, (Ref, crate::embed::EmbedLocation)>>,
+    pub(crate) embedded_files: MaybeTaken<BTreeMap<String, (Ref, crate::embed::EmbedLocation)>>,
     /// A list of custom headings numbers used in the document.
     pub(crate) custom_heading_roles: BTreeSet<NonZeroU16>,
     /// Optional content groups (layers) registered via

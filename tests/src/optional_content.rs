@@ -195,14 +195,8 @@ fn layer_used_on_one_page_omitted_from_other_pages_properties() {
     // dicts; both must exist, each must reference exactly one of
     // the two layer names. The pretty-printed bytes are
     // deterministic given pretty=true in settings_1.
-    let l0_count = pdf
-        .windows(b"/L0".len())
-        .filter(|w| *w == b"/L0")
-        .count();
-    let l1_count = pdf
-        .windows(b"/L1".len())
-        .filter(|w| *w == b"/L1")
-        .count();
+    let l0_count = pdf.windows(b"/L0".len()).filter(|w| *w == b"/L0").count();
+    let l1_count = pdf.windows(b"/L1".len()).filter(|w| *w == b"/L1").count();
     // Each layer reference appears in: the content-stream BDC marker
     // AND the page's /Properties entry. So exactly 2 occurrences of
     // each per layer. A larger count means one page is over-
@@ -235,10 +229,7 @@ fn same_layer_used_on_multiple_pages_appears_in_each_page_properties() {
     }
 
     let pdf = doc.finish().unwrap();
-    let l0_count = pdf
-        .windows(b"/L0".len())
-        .filter(|w| *w == b"/L0")
-        .count();
+    let l0_count = pdf.windows(b"/L0".len()).filter(|w| *w == b"/L0").count();
     assert_eq!(
         l0_count, 4,
         "/L0 appears {l0_count} times; expected 4 (2 BDCs + 2 /Properties entries)",
@@ -312,10 +303,7 @@ fn layer_used_inside_form_xobject_registers_on_form_resources() {
     //    (we don't expect this — the page surface never called
     //    push_layer directly, so the page's /Properties stays
     //    empty for L0 — but a count >= 2 is the correctness gate).
-    let l0_count = pdf
-        .windows(b"/L0".len())
-        .filter(|w| *w == b"/L0")
-        .count();
+    let l0_count = pdf.windows(b"/L0".len()).filter(|w| *w == b"/L0").count();
     assert!(
         l0_count >= 2,
         "/L0 appears only {l0_count} times; expected at least 2 (Form XObject BDC + /Properties)",
@@ -343,9 +331,7 @@ fn layers_plus_encryption_emit_both_subsystems() {
         ..crate::settings_1()
     };
     let mut doc = Document::new_with(settings);
-    doc.set_metadata(
-        krilla::metadata::Metadata::new().title("Layered Secret".into()),
-    );
+    doc.set_metadata(krilla::metadata::Metadata::new().title("Layered Secret".into()));
     let layer = doc.add_layer(Layer::new("OverlayName"));
 
     let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
@@ -357,15 +343,15 @@ fn layers_plus_encryption_emit_both_subsystems() {
     let pdf = doc.finish().unwrap();
 
     // Encryption survived.
-    assert!(contains(&pdf, b"/Encrypt "), "/Encrypt missing from trailer");
+    assert!(
+        contains(&pdf, b"/Encrypt "),
+        "/Encrypt missing from trailer"
+    );
     assert!(
         contains(&pdf, b"/Filter /Standard"),
         "/Encrypt dict missing from PDF body",
     );
-    assert!(
-        contains(&pdf, b"/CFM /AESV3"),
-        "AESV3 crypt filter missing",
-    );
+    assert!(contains(&pdf, b"/CFM /AESV3"), "AESV3 crypt filter missing",);
 
     // Layers survived.
     assert!(
@@ -407,9 +393,7 @@ fn qpdf_layers_plus_encryption() {
         ..crate::settings_1()
     };
     let mut doc = Document::new_with(settings);
-    doc.set_metadata(
-        krilla::metadata::Metadata::new().title("Layered Secret".into()),
-    );
+    doc.set_metadata(krilla::metadata::Metadata::new().title("Layered Secret".into()));
     let layer = doc.add_layer(Layer::new("OverlayName"));
     let mut page = doc.start_page_with(PageSettings::from_wh(72.0, 72.0).unwrap());
     let mut surface = page.surface();
@@ -463,9 +447,15 @@ fn default_visible_true_lands_in_on_array() {
     // are renumbered per pdf-writer's chunk pass, so check that
     // the bytes between `/ON [` and `]` differ from those between
     // `/OFF [` and `]`.
-    let on_start = pdf.windows(b"/ON [".len()).position(|w| w == b"/ON [").unwrap();
+    let on_start = pdf
+        .windows(b"/ON [".len())
+        .position(|w| w == b"/ON [")
+        .unwrap();
     let on_end = on_start + pdf[on_start..].iter().position(|&b| b == b']').unwrap();
-    let off_start = pdf.windows(b"/OFF [".len()).position(|w| w == b"/OFF [").unwrap();
+    let off_start = pdf
+        .windows(b"/OFF [".len())
+        .position(|w| w == b"/OFF [")
+        .unwrap();
     let off_end = off_start + pdf[off_start..].iter().position(|&b| b == b']').unwrap();
     let on_slice = &pdf[on_start..=on_end];
     let off_slice = &pdf[off_start..=off_end];

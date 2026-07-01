@@ -67,7 +67,8 @@ mod tests {
         let pdf = document.finish().unwrap();
         let pdf_str = std::str::from_utf8(&pdf).unwrap_or_else(|_| "");
         assert!(
-            pdf.windows(b"/PrintField".len()).any(|w| w == b"/PrintField"),
+            pdf.windows(b"/PrintField".len())
+                .any(|w| w == b"/PrintField"),
             "expected /PrintField after set_id. PDF dump:\n{pdf_str}"
         );
         assert!(
@@ -112,7 +113,8 @@ mod tests {
         let pdf = document.finish().unwrap();
         let pdf_str = std::str::from_utf8(&pdf).unwrap_or_else(|_| "");
         assert!(
-            pdf.windows(b"/PrintField".len()).any(|w| w == b"/PrintField"),
+            pdf.windows(b"/PrintField".len())
+                .any(|w| w == b"/PrintField"),
             "expected /PrintField attribute-owner marker. PDF dump:\n{pdf_str}"
         );
         assert!(
@@ -125,7 +127,10 @@ mod tests {
         );
         let has_checked = pdf.windows(b"/checked".len()).any(|w| w == b"/checked")
             || pdf.windows(b"/Checked".len()).any(|w| w == b"/Checked");
-        assert!(has_checked, "expected /checked (or PDF 2.0 /Checked) attribute");
+        assert!(
+            has_checked,
+            "expected /checked (or PDF 2.0 /Checked) attribute"
+        );
         assert!(
             pdf.windows(b"/Desc".len()).any(|w| w == b"/Desc"),
             "expected /Desc attribute on the /PrintField dict"

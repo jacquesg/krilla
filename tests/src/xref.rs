@@ -116,10 +116,7 @@ fn count_indirect_objects(pdf: &[u8]) -> usize {
             let mut cursor = &pdf[..*idx];
             // Strip the generation digits.
             let gen_end = cursor.len();
-            while cursor
-                .last()
-                .is_some_and(|b| b.is_ascii_digit())
-            {
+            while cursor.last().is_some_and(|b| b.is_ascii_digit()) {
                 cursor = &cursor[..cursor.len() - 1];
             }
             if gen_end == cursor.len() || !cursor.last().is_some_and(|b| *b == b' ') {
@@ -128,10 +125,7 @@ fn count_indirect_objects(pdf: &[u8]) -> usize {
             cursor = &cursor[..cursor.len() - 1];
             // Strip the id digits.
             let id_end = cursor.len();
-            while cursor
-                .last()
-                .is_some_and(|b| b.is_ascii_digit())
-            {
+            while cursor.last().is_some_and(|b| b.is_ascii_digit()) {
                 cursor = &cursor[..cursor.len() - 1];
             }
             if id_end == cursor.len() {
@@ -143,8 +137,8 @@ fn count_indirect_objects(pdf: &[u8]) -> usize {
 }
 
 fn assert_trailer_balanced(pdf: &[u8], label: &str) {
-    let size = parse_trailer_size(pdf)
-        .unwrap_or_else(|| panic!("{label}: could not parse trailer /Size"));
+    let size =
+        parse_trailer_size(pdf).unwrap_or_else(|| panic!("{label}: could not parse trailer /Size"));
     let objects = count_indirect_objects(pdf);
     // trailer.Size = max_object_id + 1; the count of emitted objects
     // is exactly max_object_id (because ids are dense from 1 up). The

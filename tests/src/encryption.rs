@@ -170,7 +170,10 @@ fn encryption_spans_every_page_content_stream() {
     // content stream is encrypted — count `stream\n` boundaries
     // and ensure no page's bytes contain the unencrypted title.
     assert!(!contains(&pdf, b"Multi-page secret"));
-    let stream_count = pdf.windows(b"\nstream\n".len()).filter(|w| *w == b"\nstream\n").count();
+    let stream_count = pdf
+        .windows(b"\nstream\n".len())
+        .filter(|w| *w == b"\nstream\n")
+        .count();
     assert!(
         stream_count >= 3,
         "expected at least 3 streams (one per page), got {stream_count}",
@@ -187,9 +190,7 @@ fn encrypt_metadata_false_emits_flag_in_encrypt_dict() {
     // /Encrypt dict and the /Perms hash; krilla's responsibility
     // is just to surface the setting.
     let settings = SerializeSettings {
-        encryption: Some(
-            Encryption::new("u", "o").with_encrypt_metadata(false),
-        ),
+        encryption: Some(Encryption::new("u", "o").with_encrypt_metadata(false)),
         ..crate::settings_1()
     };
     let pdf = build_doc(settings, "Indexable");

@@ -4430,8 +4430,7 @@ fn validate_x6_rejects_external_output_profile() {
 fn custom_output_intent_rejects_invalid_input() {
     use krilla::icc::ICCProfile;
     use krilla::{
-        CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype,
-        OutputIntentProfile,
+        CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, OutputIntentProfile,
     };
 
     let profile_bytes =

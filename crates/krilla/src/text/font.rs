@@ -406,8 +406,7 @@ mod tests {
     /// Embedded COLR/CPAL test font from the workspace assets — has a
     /// CPAL table with multiple palettes, which is what the palette
     /// support needs to exercise.
-    const COLR_TEST_FONT: &[u8] =
-        include_bytes!("../../../../assets/fonts/colr_test_glyphs.ttf");
+    const COLR_TEST_FONT: &[u8] = include_bytes!("../../../../assets/fonts/colr_test_glyphs.ttf");
 
     fn test_font_data() -> Data {
         Data::from(COLR_TEST_FONT.to_vec())

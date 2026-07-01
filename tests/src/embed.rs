@@ -236,7 +236,7 @@ fn embed_location_before_then_after_partitions_af() {
     assert_eq!(
         order,
         vec![
-            "image.svg".to_string(), // Before partition (alone)
+            "image.svg".to_string(),  // Before partition (alone)
             "emojis.txt".to_string(), // After partition, alphabetical
             "rgb8.png".to_string(),
         ],
@@ -282,10 +282,7 @@ fn embed_location_default_is_before() {
 #[test]
 fn embed_location_field_round_trips_through_builder() {
     let f = file_1().with_embed_location(krilla::embed::EmbedLocation::After);
-    assert_eq!(
-        f.embed_location(),
-        krilla::embed::EmbedLocation::After,
-    );
+    assert_eq!(f.embed_location(), krilla::embed::EmbedLocation::After,);
 }
 
 #[test]

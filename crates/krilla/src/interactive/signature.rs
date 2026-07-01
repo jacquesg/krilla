@@ -317,11 +317,7 @@ pub(crate) fn patch_signature(
             )
         })?;
     let contents_key_pos = search_start + contents_key_rel;
-    let contents_open = skip_whitespace_to(
-        &buffer,
-        contents_key_pos + b"/Contents".len(),
-        b'(',
-    )?;
+    let contents_open = skip_whitespace_to(&buffer, contents_key_pos + b"/Contents".len(), b'(')?;
     let contents_close = contents_open + 1 + signature.placeholder_size_bytes * 2;
     if buffer.get(contents_close) != Some(&b')') {
         return Err(KrillaError::DigitalSignature(
@@ -345,12 +341,18 @@ pub(crate) fn patch_signature(
 
     // Rewrite the three `/ByteRange` placeholder slots in place.
     // Real values are left-padded with `0`s to BYTE_RANGE_FIELD_WIDTH.
-    write_decimal_padded(&mut buffer[slot_offsets[0]..slot_offsets[0] + BYTE_RANGE_FIELD_WIDTH], a);
+    write_decimal_padded(
+        &mut buffer[slot_offsets[0]..slot_offsets[0] + BYTE_RANGE_FIELD_WIDTH],
+        a,
+    );
     write_decimal_padded(
         &mut buffer[slot_offsets[1]..slot_offsets[1] + BYTE_RANGE_FIELD_WIDTH],
         b - a,
     );
-    write_decimal_padded(&mut buffer[slot_offsets[2]..slot_offsets[2] + BYTE_RANGE_FIELD_WIDTH], c);
+    write_decimal_padded(
+        &mut buffer[slot_offsets[2]..slot_offsets[2] + BYTE_RANGE_FIELD_WIDTH],
+        c,
+    );
 
     // Replace the literal-string placeholder with a hex-string of
     // the same total byte width: `(` becomes `<`, `)` becomes `>`,
@@ -395,11 +397,7 @@ fn skip_whitespace(buf: &[u8], mut idx: usize) -> usize {
 /// Advance past whitespace, then assert the next byte is `expect`,
 /// returning the index of `expect`. Fails with a diagnostic
 /// message identifying the surrounding context.
-fn skip_whitespace_to(
-    buf: &[u8],
-    start: usize,
-    expect: u8,
-) -> KrillaResult<usize> {
+fn skip_whitespace_to(buf: &[u8], start: usize, expect: u8) -> KrillaResult<usize> {
     use crate::error::KrillaError;
     let idx = skip_whitespace(buf, start);
     if buf.get(idx) != Some(&expect) {

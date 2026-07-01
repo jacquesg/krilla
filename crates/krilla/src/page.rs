@@ -608,9 +608,8 @@ impl InternalPage {
                 // parent payload so the parent's `/Kids` array can be
                 // populated in insertion order.
                 if let Some(parent_ref) = annotation.radio_group_parent_ref() {
-                    if let Some(group) = radio_groups
-                        .iter_mut()
-                        .find(|g| g.parent_ref == parent_ref)
+                    if let Some(group) =
+                        radio_groups.iter_mut().find(|g| g.parent_ref == parent_ref)
                     {
                         group.kid_refs.push(annot_ref);
                     }

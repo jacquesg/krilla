@@ -167,7 +167,8 @@ fn icc_based_same_profile_deduplicates_resource() {
     // Exactly one `/ICCBased` entry across the document.
     let count = text.matches("/ICCBased").count();
     assert_eq!(
-        count, 1,
+        count,
+        1,
         "two paints sharing one profile must produce exactly one /ICCBased \
          resource (got {count}); PDF:\n{}",
         text.chars().take(1500).collect::<String>()

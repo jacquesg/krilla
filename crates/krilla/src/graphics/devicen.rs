@@ -38,8 +38,7 @@ impl Cacheable for DeviceNColorSpace {
         // Register the alternate colour space (same dispatch as
         // Separation's writer uses).
         let alternate_cs = self.space.alternate().clone().color_space(sc);
-        let alternate_cs_resource =
-            sc.register_colorspace(chunk_container, alternate_cs.into());
+        let alternate_cs_resource = sc.register_colorspace(chunk_container, alternate_cs.into());
 
         let num_alt_components =
             crate::color::devicen::alternate_channel_count(self.space.alternate());
@@ -83,8 +82,11 @@ impl Cacheable for DeviceNColorSpace {
             // 2.0 admit Type 4 and accept this output unchanged.
             sc.register_validation_error(ValidationError::ContainsPostScript(sc.location));
 
-            let ops =
-                build_linear_postscript(colorant_count, num_alt_components, per_colorant_components);
+            let ops = build_linear_postscript(
+                colorant_count,
+                num_alt_components,
+                per_colorant_components,
+            );
             let chunk = &mut chunk_container.non_stream.color_spaces;
             let encoded = PostScriptOp::encode(&ops);
             let mut function = chunk.post_script_function(tint_transform_ref, encoded.as_slice());
@@ -198,19 +200,14 @@ mod tests {
         let ops = build_linear_postscript(1, 3, &[vec![1.0, 0.5, 0.0]]);
         // Should contain at least one Mul and end with a pop of the
         // single tint.
-        assert!(ops
-            .iter()
-            .any(|op| matches!(op, PostScriptOp::Mul)));
+        assert!(ops.iter().any(|op| matches!(op, PostScriptOp::Mul)));
         assert!(matches!(ops.last(), Some(PostScriptOp::Pop)));
     }
 
     #[test]
     fn linear_postscript_two_colorant_cmyk_alt() {
         // 2 colorants, alt = CMYK (4 channels) — expect 4 sums.
-        let per_colorant = vec![
-            vec![0.0, 1.0, 1.0, 0.0],
-            vec![1.0, 1.0, 0.0, 0.0],
-        ];
+        let per_colorant = vec![vec![0.0, 1.0, 1.0, 0.0], vec![1.0, 1.0, 0.0, 0.0]];
         let ops = build_linear_postscript(2, 4, &per_colorant);
         let add_count = ops
             .iter()

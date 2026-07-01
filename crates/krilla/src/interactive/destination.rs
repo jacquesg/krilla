@@ -463,8 +463,7 @@ mod tests {
             ..Default::default()
         };
         let mut document = Document::new_with(settings);
-        let mut page =
-            document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.add_annotation(
             LinkAnnotation::new(
                 Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
@@ -477,7 +476,9 @@ mod tests {
             .into(),
         );
         drop(page);
-        document.finish().expect("document serialisation should succeed")
+        document
+            .finish()
+            .expect("document serialisation should succeed")
     }
 
     fn contains(haystack: &[u8], needle: &[u8]) -> bool {
@@ -548,14 +549,11 @@ mod tests {
             ..Default::default()
         };
         let mut document = Document::new_with(settings);
-        let mut page =
-            document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
         page.add_annotation(
             LinkAnnotation::new(
                 Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
-                Target::Destination(
-                    XyzDestination::new(0, Point::from_xy(10.0, 20.0)).into(),
-                ),
+                Target::Destination(XyzDestination::new(0, Point::from_xy(10.0, 20.0)).into()),
             )
             .into(),
         );
@@ -566,5 +564,4 @@ mod tests {
             "default XyzDestination must keep emitting /XYZ when no FitMode is set"
         );
     }
-
 }

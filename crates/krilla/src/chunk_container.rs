@@ -150,10 +150,7 @@ impl ChunkContainer {
         }
     }
 
-    pub(crate) fn finish(
-        self,
-        sc: &mut SerializeContext,
-    ) -> KrillaResult<(Pdf, Option<Ref>)> {
+    pub(crate) fn finish(self, sc: &mut SerializeContext) -> KrillaResult<(Pdf, Option<Ref>)> {
         let mut remapped_ref = Ref::new(1);
         let mut remapper = HashMap::new();
 
@@ -265,10 +262,8 @@ impl ChunkContainer {
         // by `Pdf::encrypt` itself), the trailer `/ID` strings, and —
         // when the caller disables `encrypt_metadata` — the metadata
         // stream remain in clear per ISO 32000-2 §7.6.
-        if let (Some(ref_), Some(enc)) = (
-            encrypt_ref,
-            sc.serialize_settings().encryption.as_ref(),
-        ) {
+        if let (Some(ref_), Some(enc)) = (encrypt_ref, sc.serialize_settings().encryption.as_ref())
+        {
             // ISO 19005 (PDF/A) and ISO 15930 (PDF/X) both ban
             // `/Encrypt`. Surface that mismatch through the standard
             // validation-error channel — the file is still encrypted
@@ -486,13 +481,14 @@ impl ChunkContainer {
             // but is still emitted faithfully so the validator's own
             // post-emit check surfaces the violation.
             let vp_struct = metadata.viewer_preferences.clone();
-            let effective_display_doc_title = vp_struct
-                .display_doc_title
-                .or(if validator_requires_display_doc_title {
-                    Some(true)
-                } else {
-                    None
-                });
+            let effective_display_doc_title =
+                vp_struct
+                    .display_doc_title
+                    .or(if validator_requires_display_doc_title {
+                        Some(true)
+                    } else {
+                        None
+                    });
 
             let needs_viewer_prefs = effective_display_doc_title.is_some()
                 || text_direction.is_some()
@@ -552,10 +548,7 @@ impl ChunkContainer {
                 // omitted so the viewer falls back to "all pages".
                 if let Some(ref ranges) = vp_struct.print_page_range {
                     if !ranges.is_empty() {
-                        let mut arr = vp
-                            .deref_mut()
-                            .insert(Name(b"PrintPageRange"))
-                            .array();
+                        let mut arr = vp.deref_mut().insert(Name(b"PrintPageRange")).array();
                         for &(from, to) in ranges {
                             arr.item(from as i32);
                             arr.item(to as i32);
@@ -642,10 +635,7 @@ impl ChunkContainer {
                             PageInfo::Krilla { ref_, .. } => *ref_,
                             PageInfo::Pdf { ref_, .. } => *ref_,
                         };
-                        let mut array = catalog
-                            .deref_mut()
-                            .insert(Name(b"OpenAction"))
-                            .array();
+                        let mut array = catalog.deref_mut().insert(Name(b"OpenAction")).array();
                         array.item(page_ref);
                         match zoom {
                             OpenZoom::Xyz(zoom) => {
@@ -684,10 +674,7 @@ impl ChunkContainer {
                         // per ISO 32000-2 §12.6.4.9 Table 200. pdf-writer
                         // does not expose a Named ActionType today so
                         // the dictionary is written directly.
-                        let mut dict = catalog
-                            .deref_mut()
-                            .insert(Name(b"OpenAction"))
-                            .dict();
+                        let mut dict = catalog.deref_mut().insert(Name(b"OpenAction")).dict();
                         dict.pair(Name(b"Type"), Name(b"Action"));
                         dict.pair(Name(b"S"), Name(b"Named"));
                         dict.pair(Name(b"N"), named.to_name());
@@ -699,10 +686,7 @@ impl ChunkContainer {
                         // emitted verbatim via `TextStr`, matching the
                         // `Action::JavaScript` widget-annotation path
                         // in `interactive/action.rs`.
-                        let mut dict = catalog
-                            .deref_mut()
-                            .insert(Name(b"OpenAction"))
-                            .dict();
+                        let mut dict = catalog.deref_mut().insert(Name(b"OpenAction")).dict();
                         dict.pair(Name(b"Type"), Name(b"Action"));
                         dict.pair(Name(b"S"), Name(b"JavaScript"));
                         dict.pair(Name(b"JS"), TextStr(script.as_str()));
@@ -937,10 +921,7 @@ impl ChunkContainer {
                 // — matching the original `Some(metadata)` guard.
                 let metadata = &metadata;
                 if !metadata.piece_info.is_empty() {
-                    let mut pi = catalog
-                        .deref_mut()
-                        .insert(Name(b"PieceInfo"))
-                        .dict();
+                    let mut pi = catalog.deref_mut().insert(Name(b"PieceInfo")).dict();
                     for (app, entry) in &metadata.piece_info {
                         let mut sub = pi.insert(Name(app.as_bytes())).dict();
                         sub.pair(
@@ -963,10 +944,7 @@ impl ChunkContainer {
                 // by the author.
                 if let Some(legal) = metadata.legal_content.as_ref() {
                     if !legal.is_empty() {
-                        let mut lc = catalog
-                            .deref_mut()
-                            .insert(Name(b"LegalContent"))
-                            .dict();
+                        let mut lc = catalog.deref_mut().insert(Name(b"LegalContent")).dict();
                         if let Some(v) = legal.javascript_actions {
                             lc.pair(Name(b"JavaScriptActions"), v);
                         }
@@ -1046,11 +1024,7 @@ impl ChunkContainer {
                 remapped_sig_ref,
             )?;
         } else if let Some(standalone_ref) = standalone_sig_ref {
-            Self::write_signature_dict(
-                self.signature_settings.as_ref(),
-                &mut pdf,
-                standalone_ref,
-            )?;
+            Self::write_signature_dict(self.signature_settings.as_ref(), &mut pdf, standalone_ref)?;
         }
 
         Ok((pdf, xref_stream_ref))
@@ -1125,7 +1099,10 @@ impl ChunkContainer {
         // Now emit the real `/Sig` dictionary.
         let mut sig_dict = pdf.indirect(sig_ref).dict();
         sig_dict.pair(pdf_writer::Name(b"Type"), pdf_writer::Name(b"Sig"));
-        sig_dict.pair(pdf_writer::Name(b"Filter"), pdf_writer::Name(b"Adobe.PPKLite"));
+        sig_dict.pair(
+            pdf_writer::Name(b"Filter"),
+            pdf_writer::Name(b"Adobe.PPKLite"),
+        );
         sig_dict.pair(
             pdf_writer::Name(b"SubFilter"),
             pdf_writer::Name(settings.sub_filter.as_pdf_name()),
@@ -1190,23 +1167,38 @@ fn parse_pdf_date(s: &str) -> Option<pdf_writer::Date> {
     let year: u16 = body.get(0..4)?.parse().ok()?;
     let mut date = pdf_writer::Date::new(year);
     let mut cursor = 4;
-    if let Some(month) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+    if let Some(month) = body
+        .get(cursor..cursor + 2)
+        .and_then(|s| s.parse::<u8>().ok())
+    {
         date = date.month(month);
         cursor += 2;
     }
-    if let Some(day) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+    if let Some(day) = body
+        .get(cursor..cursor + 2)
+        .and_then(|s| s.parse::<u8>().ok())
+    {
         date = date.day(day);
         cursor += 2;
     }
-    if let Some(hour) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+    if let Some(hour) = body
+        .get(cursor..cursor + 2)
+        .and_then(|s| s.parse::<u8>().ok())
+    {
         date = date.hour(hour);
         cursor += 2;
     }
-    if let Some(minute) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+    if let Some(minute) = body
+        .get(cursor..cursor + 2)
+        .and_then(|s| s.parse::<u8>().ok())
+    {
         date = date.minute(minute);
         cursor += 2;
     }
-    if let Some(second) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+    if let Some(second) = body
+        .get(cursor..cursor + 2)
+        .and_then(|s| s.parse::<u8>().ok())
+    {
         date = date.second(second);
         cursor += 2;
     }
@@ -1218,8 +1210,9 @@ fn parse_pdf_date(s: &str) -> Option<pdf_writer::Date> {
             b'+' | b'-' => {
                 let sign: i8 = if *tz_byte == b'-' { -1 } else { 1 };
                 cursor += 1;
-                if let Some(hour) =
-                    body.get(cursor..cursor + 2).and_then(|s| s.parse::<i8>().ok())
+                if let Some(hour) = body
+                    .get(cursor..cursor + 2)
+                    .and_then(|s| s.parse::<i8>().ok())
                 {
                     date = date.utc_offset_hour(sign * hour);
                     cursor += 2;
@@ -1227,8 +1220,9 @@ fn parse_pdf_date(s: &str) -> Option<pdf_writer::Date> {
                     if body.as_bytes().get(cursor) == Some(&b'\'') {
                         cursor += 1;
                     }
-                    if let Some(minute) =
-                        body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok())
+                    if let Some(minute) = body
+                        .get(cursor..cursor + 2)
+                        .and_then(|s| s.parse::<u8>().ok())
                     {
                         date = date.utc_offset_minute(minute);
                     }

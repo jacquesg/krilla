@@ -629,22 +629,34 @@ fn push_text_rendering_scopes_vector_emission_to_push_range() {
     // Glyph mode must still be active for the outer draws: at least one
     // `BT` text-block opener must survive.
     assert!(
-        contains_op(&pdf, b"
+        contains_op(
+            &pdf, b"
 BT
-") || contains_op(&pdf, b" BT
-"),
+"
+        ) || contains_op(
+            &pdf, b" BT
+"
+        ),
         "outer (default-glyph-mode) draws must emit a `BT` text-block operator",
     );
     // The push range must have produced fill / moveto path operators
     // for the outlined glyphs.
-    let has_moveto = contains_op(&pdf, b" m
-") || contains_op(&pdf, b"
+    let has_moveto = contains_op(
+        &pdf, b" m
+",
+    ) || contains_op(
+        &pdf, b"
 m
-");
-    let has_fill = contains_op(&pdf, b" f
-") || contains_op(&pdf, b"
+",
+    );
+    let has_fill = contains_op(
+        &pdf, b" f
+",
+    ) || contains_op(
+        &pdf, b"
 f
-");
+",
+    );
     assert!(
         has_moveto && has_fill,
         "push_text_rendering(Vector) range must emit path operators          (`m` and `f`); moveto={has_moveto} fill={has_fill}",
@@ -813,8 +825,7 @@ fn text_rendering_invisible_skips_fill_and_stroke_colour() {
     // The eight PDF colour-set operators that would tell a consumer
     // to change paint state. Invisible mode must emit none of them.
     let banned: &[&[u8]] = &[
-        b" rg\n", b" RG\n", b" k\n", b" K\n", b" sc\n", b" SC\n",
-        b" scn\n", b" SCN\n",
+        b" rg\n", b" RG\n", b" k\n", b" K\n", b" sc\n", b" SC\n", b" scn\n", b" SCN\n",
     ];
     for op in banned {
         assert!(

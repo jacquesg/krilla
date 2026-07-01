@@ -45,7 +45,11 @@ pub(crate) fn render(
         // LTR runs the two orders coincide, so the redundant marked content
         // is skipped (it would otherwise override a consumer's position-based
         // extraction needlessly).
-        let visual_text: String = span.positioned_glyphs.iter().map(|glyph| glyph.text.as_str()).collect();
+        let visual_text: String = span
+            .positioned_glyphs
+            .iter()
+            .map(|glyph| glyph.text.as_str())
+            .collect();
         let mut logical: Vec<_> = span.positioned_glyphs.iter().collect();
         logical.sort_by_key(|glyph| glyph.byte_idx);
         let actual_text: String = logical.iter().map(|glyph| glyph.text.as_str()).collect();

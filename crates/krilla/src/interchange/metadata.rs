@@ -320,7 +320,8 @@ impl Metadata {
     ) -> Self {
         let name = name.into();
         let source = source.into();
-        self.document_javascripts.retain(|(existing, _)| existing != &name);
+        self.document_javascripts
+            .retain(|(existing, _)| existing != &name);
         self.document_javascripts.push((name, source));
         self
     }
@@ -341,7 +342,8 @@ impl Metadata {
         source: impl Into<String>,
     ) -> Self {
         let source = source.into();
-        self.document_event_scripts.retain(|(existing, _)| *existing != event);
+        self.document_event_scripts
+            .retain(|(existing, _)| *existing != event);
         self.document_event_scripts.push((event, source));
         self
     }
@@ -357,11 +359,7 @@ impl Metadata {
     ///
     /// Duplicate `app` names retain the later value (last-wins) so
     /// the surface is idempotent.
-    pub fn piece_info(
-        mut self,
-        app: impl Into<String>,
-        entry: PieceInfoEntry,
-    ) -> Self {
+    pub fn piece_info(mut self, app: impl Into<String>, entry: PieceInfoEntry) -> Self {
         let app = app.into();
         if app.is_empty() {
             return self;
@@ -404,21 +402,17 @@ impl Metadata {
     /// per ISO 32000-2 §7.9.2.2).
     ///
     /// Duplicate `name`s retain the later value (last-wins).
-    pub fn custom_property(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn custom_property(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
         let value = value.into();
         if name.is_empty() {
             return self;
         }
-        self.custom_properties.retain(|(existing, _)| existing != &name);
+        self.custom_properties
+            .retain(|(existing, _)| existing != &name);
         self.custom_properties.push((name, value));
         self
     }
-
 
     pub(crate) fn has_document_info(&self) -> bool {
         self.title.is_some()
@@ -1618,7 +1612,10 @@ mod tests {
         let metadata = Metadata::new().piece_info("MoegoeApp", entry);
         assert!(metadata.piece_info.contains_key("MoegoeApp"));
         let stored = &metadata.piece_info["MoegoeApp"];
-        assert_eq!(stored.private.get("DocVersion").map(String::as_str), Some("1.2"));
+        assert_eq!(
+            stored.private.get("DocVersion").map(String::as_str),
+            Some("1.2")
+        );
     }
 
     #[test]
@@ -1647,7 +1644,10 @@ mod tests {
         assert_eq!(lc.javascript_actions, Some(true));
         assert_eq!(lc.uri_actions, Some(false));
         assert_eq!(lc.non_embedded_fonts, Some(7));
-        assert_eq!(lc.attestation.as_deref(), Some("Authenticated by acme.example"));
+        assert_eq!(
+            lc.attestation.as_deref(),
+            Some("Authenticated by acme.example")
+        );
         assert!(!lc.is_empty());
     }
 
@@ -1672,9 +1672,7 @@ mod tests {
             OpenAction::JavaScript(script) => {
                 assert_eq!(script, "app.alert('hi');");
             }
-            other => panic!(
-                "expected OpenAction::JavaScript, got {other:?}"
-            ),
+            other => panic!("expected OpenAction::JavaScript, got {other:?}"),
         }
     }
 
@@ -1683,8 +1681,7 @@ mod tests {
         // E.9-CC3 — round-trip the action through `Metadata` so the
         // catalogue `/OpenAction` serialisation path in
         // `chunk_container.rs` has a stable input shape to consume.
-        let metadata = Metadata::new()
-            .open_action(OpenAction::javascript("print();"));
+        let metadata = Metadata::new().open_action(OpenAction::javascript("print();"));
         let stored = metadata
             .open_action
             .as_ref()
@@ -1693,9 +1690,7 @@ mod tests {
             OpenAction::JavaScript(script) => {
                 assert_eq!(script, "print();");
             }
-            other => panic!(
-                "expected OpenAction::JavaScript, got {other:?}"
-            ),
+            other => panic!("expected OpenAction::JavaScript, got {other:?}"),
         }
     }
 

@@ -101,9 +101,7 @@ fn assert_no_operator(haystack: &[u8], op: &str) {
                 .map(|prefix| prefix.ends_with(' ') || prefix.is_empty())
                 .unwrap_or(false)
         {
-            panic!(
-                "operator `{op}` unexpectedly emitted on line `{trimmed}` in content stream"
-            );
+            panic!("operator `{op}` unexpectedly emitted on line `{trimmed}` in content stream");
         }
     }
 }

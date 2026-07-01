@@ -274,7 +274,11 @@ impl ColrBuilder {
             } else {
                 let palette_count = records.len() / num_palette_entries;
                 let raw_base = usize::from(self.font.palette_base());
-                if raw_base < palette_count { raw_base } else { 0 }
+                if raw_base < palette_count {
+                    raw_base
+                } else {
+                    0
+                }
             };
             let absolute_index = palette_base
                 .saturating_mul(num_palette_entries)

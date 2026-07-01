@@ -60,10 +60,7 @@ impl Encryption {
     /// Create an encryption configuration with the given user and
     /// owner passwords, no permissions, and metadata encryption
     /// enabled.
-    pub fn new(
-        user_password: impl Into<Vec<u8>>,
-        owner_password: impl Into<Vec<u8>>,
-    ) -> Self {
+    pub fn new(user_password: impl Into<Vec<u8>>, owner_password: impl Into<Vec<u8>>) -> Self {
         Self {
             user_password: user_password.into(),
             owner_password: owner_password.into(),

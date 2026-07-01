@@ -20,8 +20,7 @@ fn main() {
     // Register the layers up front. The returned `LayerHandle`s are
     // passed to `Surface::push_layer` to bracket drawing operations.
     let map = document.add_layer(Layer::new("Map"));
-    let notes =
-        document.add_layer(Layer::new("Notes").with_default_visible(false));
+    let notes = document.add_layer(Layer::new("Notes").with_default_visible(false));
 
     let font = {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

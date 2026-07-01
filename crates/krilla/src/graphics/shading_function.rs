@@ -1042,10 +1042,7 @@ mod tests {
     fn opacity_spread_separates_a_coincident_pair() {
         // A CSS hard stop (`transparent 0 50%, black 50% 100%`) yields two stops
         // at 0.5; without spreading they produce a duplicate Bounds entry.
-        let spread = spread_coincident_offsets(
-            &[stop(0.0), stop(0.5), stop(0.5), stop(1.0)],
-            true,
-        );
+        let spread = spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)], true);
         assert_eq!(spread.len(), 4);
         assert_strictly_increasing(&spread);
         // The ramp stays centred on the original offset and narrow.
@@ -1065,10 +1062,7 @@ mod tests {
     #[test]
     fn opacity_spread_keeps_boundary_runs_in_range_and_ordered() {
         // Coincident stops at both 0 and 1 must stay within [0, 1] yet ordered.
-        let spread = spread_coincident_offsets(
-            &[stop(0.0), stop(0.0), stop(1.0), stop(1.0)],
-            true,
-        );
+        let spread = spread_coincident_offsets(&[stop(0.0), stop(0.0), stop(1.0), stop(1.0)], true);
         assert_strictly_increasing(&spread);
         assert!(spread.first().unwrap().offset.get() >= 0.0);
         assert!(spread.last().unwrap().offset.get() <= 1.0);
@@ -1079,10 +1073,8 @@ mod tests {
         // An alpha-only gradient is constant black; its coincident colour stops
         // carry no colour change, so the colour shading is widened too (a step
         // there is needless and PDFium subdivides it inside a soft-mask group).
-        let spread = spread_coincident_offsets(
-            &[stop(0.0), stop(0.5), stop(0.5), stop(1.0)],
-            false,
-        );
+        let spread =
+            spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)], false);
         assert_strictly_increasing(&spread);
     }
 
