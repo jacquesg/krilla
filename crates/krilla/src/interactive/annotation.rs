@@ -501,6 +501,53 @@ impl Annotation {
         }
     }
 
+    /// Create a new sound annotation per ISO 32000-2 §12.5.6.16.
+    ///
+    /// The annotation embeds an audio stream and displays a speaker /
+    /// microphone glyph (or author-defined name) at the annotation
+    /// rectangle; activating the glyph plays back the audio. The alt
+    /// text may be required by certain export profiles (e.g. PDF/UA).
+    /// See [`SoundAnnotation`] for the available fields.
+    pub fn new_sound(annotation: SoundAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Sound(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
+    /// Create a new movie annotation per ISO 32000-2 §12.5.6.17.
+    ///
+    /// PDF 2.0 deprecates the `/Movie` subtype in favour of
+    /// [`Annotation::new_screen`] + a rendition action; the variant
+    /// remains supported for legacy viewer parity. See
+    /// [`MovieAnnotation`] for the available fields.
+    pub fn new_movie(annotation: MovieAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Movie(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
+    /// Create a new screen annotation per ISO 32000-2 §12.5.6.18.
+    ///
+    /// Screen annotations are the rich-media container the PDF 2.0
+    /// rendition framework targets. The annotation itself is a passive
+    /// rectangle; full rendition wiring (`/A` rendition action,
+    /// `/MediaClip` dictionaries) is the embedder's concern. See
+    /// [`ScreenAnnotation`] for the available fields.
+    pub fn new_screen(annotation: ScreenAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Screen(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Create a new rubber-stamp annotation per ISO 32000-2 §12.5.6.13.
     ///
     /// Stamp annotations display a predefined or author-defined stamp
@@ -602,6 +649,39 @@ impl From<StampAnnotation> for Annotation {
     fn from(value: StampAnnotation) -> Self {
         Self {
             annotation_type: AnnotationType::Stamp(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<SoundAnnotation> for Annotation {
+    fn from(value: SoundAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Sound(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<MovieAnnotation> for Annotation {
+    fn from(value: MovieAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Movie(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<ScreenAnnotation> for Annotation {
+    fn from(value: ScreenAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Screen(value),
             alt: None,
             struct_parent: None,
             location: None,
@@ -754,6 +834,38 @@ impl Annotation {
             _ => None,
         };
 
+        // Sound annotations carry their audio payload as a separate
+        // sound stream object referenced from `/Sound`. Allocate the
+        // ref + emit the stream up front so the annotation dict can
+        // name it; analogous to the FileAttachment `/FS` wiring.
+        let sound_stream_ref: Option<Ref> = match &self.annotation_type {
+            AnnotationType::Sound(s) => {
+                let stream_ref = sc.new_ref();
+                let mut chunk = Chunk::new();
+                {
+                    let mut stream = chunk.stream(stream_ref, &s.audio_bytes);
+                    // Sound stream dictionary entries per ISO 32000-2
+                    // §12.5.6.16 Table 185: `/Type /Sound`, `/R`
+                    // sample rate, `/C` channels, `/B` bits/sample,
+                    // `/E` encoding. Values are written verbatim from
+                    // the [`SoundAnnotation`] fields.
+                    stream.pair(Name(b"Type"), Name(b"Sound"));
+                    stream.pair(Name(b"R"), s.sample_rate);
+                    stream.pair(Name(b"C"), i32::from(s.channels));
+                    stream.pair(Name(b"B"), i32::from(s.bits_per_sample));
+                    stream.pair(Name(b"E"), Name(s.format.as_pdf_name()));
+                    stream.finish();
+                }
+                // Sound streams piggyback on the `x_objects` chunk
+                // bucket — both are indirect-stream chunks the
+                // remapper threads through `ChunkContainer::finish`
+                // without any container-side type discrimination.
+                chunk_container.streams.x_objects.push(chunk);
+                Some(stream_ref)
+            }
+            _ => None,
+        };
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)
@@ -767,9 +879,13 @@ impl Annotation {
             annotation.pair(Name(b"FS"), fs_ref);
         }
 
-        let appearance_job = self
-            .annotation_type
-            .serialize_type(sc, &mut annotation, page_height, widget_icon_refs)?;
+        let appearance_job = self.annotation_type.serialize_type(
+            sc,
+            &mut annotation,
+            page_height,
+            widget_icon_refs,
+            sound_stream_ref,
+        )?;
 
         // Link annotations only set the /F PRINT flag when they have a visible
         // border (so borderless links don't print). Text, Markup and Widget
@@ -966,6 +1082,15 @@ pub enum AnnotationType {
     FileAttachment(FileAttachmentAnnotation),
     /// A rubber-stamp annotation (ISO 32000-2 §12.5.6.13).
     Stamp(StampAnnotation),
+    /// A sound annotation (ISO 32000-2 §12.5.6.16).
+    Sound(SoundAnnotation),
+    /// A movie annotation (ISO 32000-2 §12.5.6.17). Deprecated in
+    /// PDF 2.0 in favour of [`AnnotationType::Screen`] + a rendition
+    /// action.
+    Movie(MovieAnnotation),
+    /// A screen annotation (ISO 32000-2 §12.5.6.18) — rich-media
+    /// container targeted by rendition actions.
+    Screen(ScreenAnnotation),
 }
 
 impl AnnotationType {
@@ -978,6 +1103,9 @@ impl AnnotationType {
             AnnotationType::Widget(w) => w.rect,
             AnnotationType::FileAttachment(f) => f.rect,
             AnnotationType::Stamp(s) => s.rect,
+            AnnotationType::Sound(s) => s.rect,
+            AnnotationType::Movie(m) => m.rect,
+            AnnotationType::Screen(s) => s.rect,
         }
     }
 
@@ -994,6 +1122,10 @@ impl AnnotationType {
             AnnotationType::FileAttachment(_) => None,
             // Stamp annotations carry no `/C` colour entry.
             AnnotationType::Stamp(_) => None,
+            // Sound, movie, and screen annotations carry no `/C` colour entry.
+            AnnotationType::Sound(_) => None,
+            AnnotationType::Movie(_) => None,
+            AnnotationType::Screen(_) => None,
         }
     }
 
@@ -1003,6 +1135,7 @@ impl AnnotationType {
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
         widget_icon_refs: WidgetIconRefs,
+        sound_stream_ref: Option<Ref>,
     ) -> KrillaResult<Option<AppearanceJob>> {
         match self {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
@@ -1013,6 +1146,18 @@ impl AnnotationType {
             }
             AnnotationType::FileAttachment(f) => f.serialize_type(sc, annotation, page_height),
             AnnotationType::Stamp(s) => s.serialize_type(sc, annotation, page_height),
+            AnnotationType::Sound(s) => {
+                // The sound stream ref is pre-resolved by the outer
+                // `Annotation::serialize` so the annotation dict can
+                // name it via `/Sound`. The branch is unreachable
+                // without a matching pre-resolution above; the
+                // `expect` documents the invariant.
+                let stream_ref = sound_stream_ref
+                    .expect("sound annotation must carry a pre-allocated stream ref");
+                s.serialize_type(sc, annotation, page_height, stream_ref)
+            }
+            AnnotationType::Movie(m) => m.serialize_type(sc, annotation, page_height),
+            AnnotationType::Screen(s) => s.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -2110,6 +2255,471 @@ impl StampAnnotation {
         if let Some(subject) = &self.subject {
             annotation.subject(TextStr(subject));
         }
+
+        Ok(None)
+    }
+}
+
+/// `/Name` (icon) keyword on a [`SoundAnnotation`] per ISO 32000-2
+/// §12.5.6.16 Table 186. Conforming readers display the corresponding
+/// glyph at the annotation rectangle; activating the icon plays the
+/// embedded sound stream.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub enum SoundIcon {
+    /// `/Speaker` — speaker glyph. Default per ISO 32000-2 §12.5.6.16.
+    #[default]
+    Speaker,
+    /// `/Mic` — microphone glyph.
+    Mic,
+    /// Author-defined name. The string is emitted verbatim as the
+    /// `/Name` value; embedders supplying a custom name should also
+    /// supply an `/AP` appearance stream.
+    Custom(String),
+}
+
+impl SoundIcon {
+    /// The bytes the `/Name` entry carries on the annotation dict.
+    pub fn as_pdf_name(&self) -> &[u8] {
+        match self {
+            Self::Speaker => b"Speaker",
+            Self::Mic => b"Mic",
+            Self::Custom(name) => name.as_bytes(),
+        }
+    }
+}
+
+/// Encoding format for the embedded PCM data carried by a
+/// [`SoundAnnotation`] (ISO 32000-2 §12.5.6.16 Table 185). The
+/// keyword selects the `/E` entry on the sound stream dictionary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum SoundFormat {
+    /// `/E /Raw` — linear PCM samples, native endian, unsigned for
+    /// 8-bit samples, signed for 16/32-bit samples. Default per
+    /// ISO 32000-2 §12.5.6.16.
+    #[default]
+    Raw,
+    /// `/E /Signed` — linear PCM samples, signed integers.
+    Signed,
+    /// `/E /muLaw` — 8-bit µ-law compressed samples.
+    MuLaw,
+    /// `/E /ALaw` — 8-bit A-law compressed samples.
+    ALaw,
+}
+
+impl SoundFormat {
+    /// The bytes the sound stream's `/E` (encoding) entry carries.
+    pub fn as_pdf_name(self) -> &'static [u8] {
+        match self {
+            Self::Raw => b"Raw",
+            Self::Signed => b"Signed",
+            Self::MuLaw => b"muLaw",
+            Self::ALaw => b"ALaw",
+        }
+    }
+}
+
+/// A sound annotation per ISO 32000-2 §12.5.6.16.
+///
+/// Sound annotations pin an embedded audio stream to a page
+/// rectangle. The annotation displays one of the predefined `/Name`
+/// icons ([`SoundIcon`]); activating the icon plays back the embedded
+/// audio. The audio data is carried as raw PCM (or µ/A-law compressed)
+/// bytes plus the sample-rate / channels / bits-per-sample geometry —
+/// krilla emits the bytes verbatim into a sound stream object and
+/// references it via the annotation's `/Sound` entry.
+///
+/// PDF 2.0 deprecates this annotation type in favour of [`ScreenAnnotation`]
+/// + a rendition action, but every major viewer still honours it.
+///
+/// Build with [`SoundAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_sound`]
+/// or [`From<SoundAnnotation>`].
+pub struct SoundAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) icon: SoundIcon,
+    /// Embedded audio payload. Emitted as a sound stream object
+    /// referenced from the annotation's `/Sound` entry.
+    pub(crate) audio_bytes: Vec<u8>,
+    /// Sound stream `/E` (encoding) entry.
+    pub(crate) format: SoundFormat,
+    /// Sound stream `/R` (sampling rate, samples per second). Per
+    /// ISO 32000-2 §12.5.6.16 Table 185 this is a number; krilla
+    /// writes it verbatim as an `f32`.
+    pub(crate) sample_rate: f32,
+    /// Sound stream `/C` (channel count). Most viewers expect
+    /// `1` (mono) or `2` (stereo).
+    pub(crate) channels: u8,
+    /// Sound stream `/B` (bits per sample). Typical values: 8, 16, 32.
+    pub(crate) bits_per_sample: u8,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl SoundAnnotation {
+    /// Create a new sound annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; `icon` selects the
+    /// predefined or author-defined display glyph; `audio_bytes`
+    /// carries the raw audio payload; `format`, `sample_rate`,
+    /// `channels`, and `bits_per_sample` describe the audio geometry
+    /// for the embedded sound stream.
+    pub fn new(
+        rect: Rect,
+        icon: SoundIcon,
+        audio_bytes: Vec<u8>,
+        format: SoundFormat,
+        sample_rate: f32,
+        channels: u8,
+        bits_per_sample: u8,
+    ) -> Self {
+        Self {
+            rect,
+            icon,
+            audio_bytes,
+            format,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            contents: None,
+            title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the annotation pop-up.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — formatted per ISO 32000-2
+    /// §7.9.4 (e.g. `D:20260515120000Z`).
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+        sound_stream_ref: Ref,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.16 — `/Subtype /Sound`. pdf-writer's
+        // typed AnnotationType enum does not model Sound, so write
+        // the name directly via the dict surface.
+        annotation.pair(Name(b"Subtype"), Name(b"Sound"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        annotation.pair(Name(b"Name"), Name(self.icon.as_pdf_name()));
+        // `/Sound` indirect reference to the sound stream object
+        // emitted by the outer serialiser (analogous to the `/FS`
+        // wiring on FileAttachment).
+        annotation.pair(Name(b"Sound"), sound_stream_ref);
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        // Sound annotations do not produce krilla appearance Form
+        // XObjects; the viewer renders the predefined icon glyph.
+        let _ = sc;
+        Ok(None)
+    }
+}
+
+/// A movie annotation per ISO 32000-2 §12.5.6.17.
+///
+/// PDF 2.0 deprecates the `/Movie` subtype in favour of
+/// [`ScreenAnnotation`] + a rendition action, but legacy viewers
+/// still honour it. The annotation references an external movie file
+/// via its file specification entry; krilla emits the file path
+/// verbatim and does not embed the movie bytes inline.
+///
+/// Build with [`MovieAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_movie`]
+/// or [`From<MovieAnnotation>`].
+pub struct MovieAnnotation {
+    pub(crate) rect: Rect,
+    /// External movie file reference written into the movie
+    /// dictionary's `/F` entry. Typically a relative path or URL; the
+    /// embedder owns resolution semantics.
+    pub(crate) movie_file: String,
+    /// `/Movie /Poster` — when true, the viewer displays a poster
+    /// image (the first frame) when the movie is not playing. Off by
+    /// default per ISO 32000-2 §12.5.6.17.
+    pub(crate) poster: bool,
+    /// Optional movie title written into the movie dictionary's
+    /// `/T` entry.
+    pub(crate) movie_title: Option<String>,
+    pub(crate) contents: Option<String>,
+    pub(crate) annotation_title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl MovieAnnotation {
+    /// Create a new movie annotation referencing an external movie
+    /// file.
+    ///
+    /// `rect` is in user-space (page) coordinates; `movie_file` is the
+    /// path/URL of the external movie resource.
+    pub fn new(rect: Rect, movie_file: impl Into<String>) -> Self {
+        Self {
+            rect,
+            movie_file: movie_file.into(),
+            poster: false,
+            movie_title: None,
+            contents: None,
+            annotation_title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Movie /T` title written into the movie dictionary.
+    /// Distinct from the annotation's `/T` author name.
+    pub fn with_movie_title(mut self, title: impl Into<String>) -> Self {
+        self.movie_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Movie /Poster` flag — show a still poster when the
+    /// movie is paused.
+    pub fn with_poster(mut self, poster: bool) -> Self {
+        self.poster = poster;
+        self
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the annotation's `/T` text — the title bar of the
+    /// annotation pop-up. Typically the author's name; the movie
+    /// dictionary's own `/T` is set separately via
+    /// [`Self::with_movie_title`].
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.annotation_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — formatted per ISO 32000-2
+    /// §7.9.4.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.17 — `/Subtype /Movie`. Movie
+        // annotations remain in the PDF 2.0 spec as a deprecated
+        // sub-type kept for backward compatibility.
+        annotation.pair(Name(b"Subtype"), Name(b"Movie"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+
+        // `/Movie` dictionary — `/F` is the file specification (we
+        // accept a string path / URL), `/Poster` is the optional
+        // boolean, `/T` is the movie's own title (distinct from the
+        // annotation author).
+        let mut movie = annotation.insert(Name(b"Movie")).dict();
+        movie.pair(Name(b"F"), TextStr(&self.movie_file));
+        if self.poster {
+            movie.pair(Name(b"Poster"), true);
+        }
+        if let Some(title) = &self.movie_title {
+            movie.pair(Name(b"T"), TextStr(title));
+        }
+        movie.finish();
+
+        if let Some(title) = &self.annotation_title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        Ok(None)
+    }
+}
+
+/// A screen annotation per ISO 32000-2 §12.5.6.18.
+///
+/// Screen annotations are the rich-media replacement for the
+/// deprecated [`MovieAnnotation`]: they identify a region of the
+/// page that displays media (video, audio, animation) under the
+/// control of a rendition action. The actual playback geometry and
+/// codec wiring live on the rendition action; the screen annotation
+/// itself is a passive container that the rendition action targets
+/// via the `/AN` (annotation) entry.
+///
+/// krilla emits the minimum dictionary the spec requires
+/// (`/Subtype /Screen`, `/Rect`, optional `/T` title) so a downstream
+/// pipeline can extend the dict with rendition wiring; full rendition
+/// support (`/A` action of type `/Rendition`, `/MediaClip` dicts,
+/// `/MediaPlayers`) is not modelled.
+///
+/// Build with [`ScreenAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via
+/// [`Annotation::new_screen`] or [`From<ScreenAnnotation>`].
+pub struct ScreenAnnotation {
+    pub(crate) rect: Rect,
+    /// `/T` (annotation title) emitted on the screen dict.
+    pub(crate) screen_title: Option<String>,
+    pub(crate) contents: Option<String>,
+    pub(crate) annotation_title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl ScreenAnnotation {
+    /// Create a new screen annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; the playback
+    /// geometry of the eventual rendition is controlled by the
+    /// rendition action's `/MediaClip` dictionary, not this rectangle.
+    pub fn new(rect: Rect) -> Self {
+        Self {
+            rect,
+            screen_title: None,
+            contents: None,
+            annotation_title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/T` entry on the screen annotation dict — typically
+    /// the screen's display title (distinct from the annotation
+    /// author's `/T` text).
+    pub fn with_screen_title(mut self, title: impl Into<String>) -> Self {
+        self.screen_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the annotation's `/T` text — the title bar of the
+    /// annotation pop-up. Typically the author's name; the screen's
+    /// own `/T` is set separately via [`Self::with_screen_title`].
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.annotation_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — formatted per ISO 32000-2
+    /// §7.9.4.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.18 — `/Subtype /Screen`. pdf-writer's
+        // typed AnnotationType enum does have a Screen variant
+        // (`pdf_writer::types::AnnotationType::Screen`) but we go
+        // through the dict surface for consistency with the other
+        // multimedia subtypes.
+        annotation.pair(Name(b"Subtype"), Name(b"Screen"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+
+        if let Some(title) = &self.screen_title {
+            // Screen-specific title (distinct from the annotation's
+            // author `/T`).
+            annotation.pair(Name(b"T"), TextStr(title));
+        }
+
+        if let Some(title) = &self.annotation_title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
 
         Ok(None)
     }
@@ -4077,6 +4687,149 @@ mod tests {
         .with_intent("StampImage");
         let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
         assert!(contains(&pdf, b"/IT /StampImage"), "missing /IT entry");
+    }
+
+    #[test]
+    fn sound_annotation_emits_subtype_and_sound_stream() {
+        // Tiny PCM payload so the stream is non-empty without
+        // bloating the test fixture.
+        let pcm = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 40.0, 40.0).unwrap(),
+            SoundIcon::Speaker,
+            pcm,
+            SoundFormat::Raw,
+            44_100.0,
+            2,
+            16,
+        )
+        .with_contents("audio note")
+        .with_title("reviewer");
+
+        let pdf = finish_with(Annotation::new_sound(sound, Some("audio".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Sound"), "missing /Subtype /Sound");
+        assert!(contains(&pdf, b"/Name /Speaker"), "missing /Name /Speaker");
+        // Sound stream dict entries.
+        assert!(contains(&pdf, b"/Type /Sound"), "missing /Type /Sound on stream");
+        assert!(contains(&pdf, b"/R 44100"), "missing /R sample rate");
+        assert!(contains(&pdf, b"/C 2"), "missing /C channels");
+        assert!(contains(&pdf, b"/B 16"), "missing /B bits/sample");
+        assert!(contains(&pdf, b"/E /Raw"), "missing /E encoding");
+    }
+
+    #[test]
+    fn sound_annotation_default_icon_is_speaker() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::default(),
+            vec![0u8; 4],
+            SoundFormat::default(),
+            8000.0,
+            1,
+            8,
+        );
+        let pdf = finish_with(Annotation::new_sound(sound, Some("alt".into())));
+        assert!(
+            contains(&pdf, b"/Name /Speaker"),
+            "default icon should be Speaker"
+        );
+        assert!(contains(&pdf, b"/E /Raw"), "default encoding should be Raw");
+    }
+
+    #[test]
+    fn sound_annotation_mulaw_encoding_round_trips() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::Mic,
+            vec![0u8; 16],
+            SoundFormat::MuLaw,
+            8000.0,
+            1,
+            8,
+        );
+        let pdf = finish_with(Annotation::new_sound(sound, Some("recording".into())));
+        assert!(contains(&pdf, b"/E /muLaw"), "missing /E /muLaw");
+        assert!(contains(&pdf, b"/Name /Mic"), "missing /Name /Mic");
+    }
+
+    #[test]
+    fn movie_annotation_emits_subtype_and_movie_dict() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 60.0).unwrap(),
+            "intro.mov",
+        )
+        .with_movie_title("Intro")
+        .with_poster(true)
+        .with_title("reviewer");
+
+        let pdf = finish_with(Annotation::new_movie(movie, Some("video".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Movie"), "missing /Subtype /Movie");
+        assert!(contains(&pdf, b"/Movie <<"), "missing /Movie dict");
+        assert!(contains(&pdf, b"(intro.mov)"), "missing /F file path");
+        assert!(contains(&pdf, b"/Poster true"), "missing /Poster true");
+        assert!(contains(&pdf, b"(Intro)"), "missing movie /T");
+    }
+
+    #[test]
+    fn movie_annotation_poster_off_by_default() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            "clip.mov",
+        );
+        let pdf = finish_with(Annotation::new_movie(movie, Some("clip".into())));
+        assert!(
+            !contains(&pdf, b"/Poster"),
+            "/Poster should be omitted when false"
+        );
+    }
+
+    #[test]
+    fn screen_annotation_emits_subtype_screen() {
+        let screen = ScreenAnnotation::new(Rect::from_xywh(10.0, 20.0, 80.0, 60.0).unwrap())
+            .with_screen_title("MainScreen")
+            .with_contents("rendition target");
+
+        let pdf = finish_with(Annotation::new_screen(screen, Some("rendition".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Screen"), "missing /Subtype /Screen");
+        assert!(contains(&pdf, b"(MainScreen)"), "missing screen /T");
+    }
+
+    #[test]
+    fn sound_annotation_from_trait_wraps_without_alt() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::Speaker,
+            vec![0u8; 4],
+            SoundFormat::Raw,
+            8000.0,
+            1,
+            8,
+        );
+        let annotation: Annotation = sound.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Sound(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn movie_annotation_from_trait_wraps_without_alt() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            "clip.mov",
+        );
+        let annotation: Annotation = movie.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Movie(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn screen_annotation_from_trait_wraps_without_alt() {
+        let screen = ScreenAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
+        let annotation: Annotation = screen.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Screen(_)));
+        assert!(annotation.alt.is_none());
     }
 
     #[test]
