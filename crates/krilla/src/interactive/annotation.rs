@@ -2901,41 +2901,22 @@ impl WidgetAnnotation {
             WidgetField::Signature(_) => {
                 // ISO 32000-2 §12.7.5.5: a signature field carries
                 // `/FT /Sig` plus optional `/Lock` and `/SV` (seed value).
-                // krilla emits the field unsigned — `/V` is *omitted*
-                // entirely so a downstream signing pipeline can fill it
-                // in without rewriting the widget structure.
+                // When the document is configured with
+                // [`Document::set_digital_signature`], `/V` is wired
+                // to the indirect `/Sig` dictionary krilla emits at
+                // finalise time. When the document is not signed,
+                // `/V` is *omitted* so a downstream signing pipeline
+                // can fill it in without rewriting the widget
+                // structure (the original krilla behaviour).
                 annotation.pair(Name(b"FT"), Name(b"Sig"));
-                match &sig.lock {
-                    SignatureLock::None => {}
-                    SignatureLock::All => {
-                        let mut lock = annotation.insert(Name(b"Lock")).dict();
-                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
-                        lock.pair(Name(b"Action"), Name(b"All"));
-                        lock.finish();
-                    }
-                    SignatureLock::Include { fields } => {
-                        let mut lock = annotation.insert(Name(b"Lock")).dict();
-                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
-                        lock.pair(Name(b"Action"), Name(b"Include"));
-                        let mut arr = lock.insert(Name(b"Fields")).array();
-                        for f in fields {
-                            arr.item(TextStr(f));
-                        }
-                        arr.finish();
-                        lock.finish();
-                    }
-                    SignatureLock::Exclude { fields } => {
-                        let mut lock = annotation.insert(Name(b"Lock")).dict();
-                        lock.pair(Name(b"Type"), Name(b"SigFieldLock"));
-                        lock.pair(Name(b"Action"), Name(b"Exclude"));
-                        let mut arr = lock.insert(Name(b"Fields")).array();
-                        for f in fields {
-                            arr.item(TextStr(f));
-                        }
-                        arr.finish();
-                        lock.finish();
-                    }
+                if let Some(sig_ref) = sc.signature_dict_ref() {
+                    annotation.pair(Name(b"V"), sig_ref);
                 }
+                // `/Lock` (`SigFieldLock`) is emitted as its own indirect
+                // object and named from the widget's `/Lock` entry by
+                // `Annotation::serialize` (ISO 32000-2 §12.7.5.5 Table 235
+                // requires an indirect reference), so no inline dictionary
+                // is written here.
                 // An empty appearance stream — the field is unsigned so
                 // there is nothing to display. Signing tools replace this
                 // when they populate `/V`. We still emit a Form XObject

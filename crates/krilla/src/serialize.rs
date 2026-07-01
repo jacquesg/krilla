@@ -1136,6 +1136,25 @@ pub(crate) struct SerializeContext {
     validation_store: ValidationStore,
     /// The current location, if set.
     pub(crate) location: Option<Location>,
+    /// Indirect ref of the document-wide signature dictionary
+    /// (`/FT /Sig` `/V`) emitted at finalise time when the
+    /// document is configured with
+    /// [`Document::set_digital_signature`](crate::Document::set_digital_signature).
+    /// Allocated lazily by [`SerializeContext::signature_dict_ref`]
+    /// the first time a [`SignatureField`](crate::annotation::SignatureField)
+    /// widget needs to write `/V <ref>`. `None` if the document
+    /// carries no digital signature, in which case
+    /// [`SignatureField`](crate::annotation::SignatureField) widgets
+    /// remain unsigned (`/V` omitted) — the original krilla
+    /// behaviour preserved for callers that only need the field
+    /// structure.
+    pub(crate) signature_dict_ref: Option<Ref>,
+    /// `true` when [`Document::set_digital_signature`] has been
+    /// called and the document has at least one
+    /// [`SignatureField`](crate::annotation::SignatureField)
+    /// widget needing to wire `/V`. Drives the eager allocation
+    /// of [`Self::signature_dict_ref`].
+    pub(crate) signing_enabled: bool,
 }
 
 impl SerializeContext {
@@ -1183,6 +1202,8 @@ impl SerializeContext {
             encryption_state,
             limits: Limits::new(),
             validation_store: ValidationStore::new(),
+            signature_dict_ref: None,
+            signing_enabled: false,
         };
 
         if unsupported_external_output_profile {
@@ -1192,6 +1213,31 @@ impl SerializeContext {
         }
 
         ctx
+    }
+
+    /// Mark this serialize context as carrying a digital signature.
+    /// Idempotent — repeated calls only flip the flag, the actual
+    /// signature dict ref is allocated lazily by
+    /// [`Self::signature_dict_ref`] so we do not consume a `Ref` for
+    /// documents that have no signature widget on any page.
+    pub(crate) fn enable_signing(&mut self) {
+        self.signing_enabled = true;
+    }
+
+    /// Returns the indirect ref of the signature dictionary,
+    /// allocating it on first call. Returns `None` when
+    /// [`Self::enable_signing`] has not been invoked — the
+    /// `WidgetField::Signature` arm then leaves `/V` absent,
+    /// preserving the legacy unsigned-widget behaviour.
+    pub(crate) fn signature_dict_ref(&mut self) -> Option<Ref> {
+        if !self.signing_enabled {
+            return None;
+        }
+        if self.signature_dict_ref.is_none() {
+            let r = self.cur_ref.bump();
+            self.signature_dict_ref = Some(r);
+        }
+        self.signature_dict_ref
     }
 
     /// Return the PDF 2.0 namespace refs, allocating them on first

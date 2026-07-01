@@ -21,6 +21,7 @@ pub type KrillaResult<T> = Result<T, KrillaError>;
 
 /// An error in krilla.
 #[derive(Debug, PartialEq, Eq, Clone)]
+#[non_exhaustive]
 pub enum KrillaError {
     /// An error while attempting to embed a font.
     Font(Font, String),
@@ -54,6 +55,15 @@ pub enum KrillaError {
     /// supported by the used PDF version (only available in PDF 1.5+).
     #[cfg(feature = "raster-images")]
     SixteenBitImage(Image, Option<Location>),
+    /// A digital-signature post-processing step failed — the
+    /// `/Sig` dictionary could not be located, the placeholder
+    /// width did not match the reservation, or the embedder's
+    /// signer callback returned a fatal error. The carried
+    /// string is a human-readable diagnostic suitable for
+    /// surfacing to the caller. Only emitted when the document
+    /// is configured with
+    /// [`Document::set_digital_signature`](crate::Document::set_digital_signature).
+    DigitalSignature(String),
 }
 
 impl Display for KrillaError {
@@ -99,6 +109,9 @@ impl Display for KrillaError {
                     "sixteen bit images require PDF 1.5 or newer, but the selected PDF version does not support them"
                 )?;
                 write_location(f, *location)
+            }
+            KrillaError::DigitalSignature(message) => {
+                write!(f, "digital signature failed: {message}")
             }
         }
     }

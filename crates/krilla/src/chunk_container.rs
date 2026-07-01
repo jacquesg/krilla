@@ -20,6 +20,30 @@ pub(crate) struct ChunkContainer {
     pub(crate) mixed: MixedChunks,
     pub(crate) metadata: Option<Metadata>,
     pub(crate) non_stream: NonStreamChunks,
+    /// Settings copied from [`crate::Document`]'s
+    /// [`DigitalSignature`](crate::interactive::signature::DigitalSignature)
+    /// just before [`Self::finish`] runs. `None` when the document
+    /// carries no digital signature — the catalogue-emit path then
+    /// omits the `/Sig` dictionary and leaves
+    /// `/AcroForm /SigFlags` absent.
+    pub(crate) signature_settings: Option<SignatureEmissionSettings>,
+}
+
+/// Subset of [`DigitalSignature`](crate::interactive::signature::DigitalSignature)
+/// that the chunk container needs to write the indirect `/Sig`
+/// dictionary. The signer callback itself stays on
+/// [`crate::Document`] and is invoked by
+/// [`crate::Document::finish`] after `pdf-writer` has produced the
+/// final byte buffer.
+#[derive(Debug, Clone)]
+pub(crate) struct SignatureEmissionSettings {
+    pub(crate) sub_filter: crate::interactive::signature::SignatureSubFilter,
+    pub(crate) placeholder_size_bytes: usize,
+    pub(crate) reason: Option<String>,
+    pub(crate) location: Option<String>,
+    pub(crate) contact_info: Option<String>,
+    pub(crate) signer_name: Option<String>,
+    pub(crate) signing_time: Option<String>,
 }
 
 pub(crate) struct StreamChunks {
@@ -59,6 +83,33 @@ pub(crate) struct NonStreamChunks {
 }
 
 impl ChunkContainer {
+    /// Apply the digital-signature emission settings copied from
+    /// [`crate::Document::set_digital_signature`]. Called by
+    /// [`crate::Document::finish`] just before [`Self::finish`]
+    /// runs so the catalogue-emit path can pick up the placeholder
+    /// reservation and metadata to write into the `/Sig`
+    /// dictionary.
+    pub(crate) fn set_signature_emission_settings(
+        &mut self,
+        sub_filter: crate::interactive::signature::SignatureSubFilter,
+        placeholder_size_bytes: usize,
+        reason: Option<String>,
+        location: Option<String>,
+        contact_info: Option<String>,
+        signer_name: Option<String>,
+        signing_time: Option<String>,
+    ) {
+        self.signature_settings = Some(SignatureEmissionSettings {
+            sub_filter,
+            placeholder_size_bytes,
+            reason,
+            location,
+            contact_info,
+            signer_name,
+            signing_time,
+        });
+    }
+
     pub(crate) fn new(sc: &SerializeContext) -> Self {
         Self {
             streams: StreamChunks {
@@ -95,6 +146,7 @@ impl ChunkContainer {
                 pages: sc.new_chunk(),
                 embedded_files: sc.new_chunk(),
             },
+            signature_settings: None,
         }
     }
 
@@ -163,6 +215,48 @@ impl ChunkContainer {
             .serialize_settings()
             .xref_streams
             .then(|| remapped_ref.bump());
+
+        // A cross-reference stream is a PDF 1.5 feature (ISO 32000-2 §7.5.8).
+        // Under an earlier declared version (PDF/A-1, PDF/X-1a and PDF/X-3 all
+        // force PDF 1.4) emitting one is a conformance error, so gate it just
+        // like optional content below.
+        if xref_stream_ref.is_some() && sc.serialize_settings().pdf_version() < PdfVersion::Pdf15 {
+            sc.register_validation_error(ValidationError::RequiresNewerPdfVersion(
+                crate::configure::VersionedFeature::CrossReferenceStream,
+                None,
+            ));
+        }
+
+        // Reserve a final-numbering ref for the `/Sig` indirect
+        // dictionary. When at least one `SignatureField` widget
+        // pre-allocated the build-time ref via
+        // `SerializeContext::signature_dict_ref`, we remap it through
+        // the same `remapper` used for every other indirect reference
+        // so the widget's `/V <ref>` resolves correctly. When the
+        // document is configured for signing but no widget allocated
+        // the ref (a document-level signing request need not carry an
+        // explicit author-supplied widget), we allocate one here so
+        // `chunk_container::finish` still emits the `/Sig` dict body
+        // and the AcroForm catalogue carries it directly in
+        // `/Fields`.
+        // For the standalone (no-widget) signing path we allocate TWO refs:
+        // the `/Sig` value dictionary and the signature *field* dictionary
+        // (`/FT /Sig`, `/V <value>`) that references it and goes into
+        // `/AcroForm /Fields`. Putting the value dict directly in `/Fields`
+        // would be a malformed field (ISO 32000-2 §12.7.5.5).
+        let standalone_sig_ref: Option<(Ref, Ref)> = if sc.signing_enabled {
+            if let Some(old_sig_ref) = sc.signature_dict_ref {
+                let final_sig_ref = remapped_ref.bump();
+                remapper.insert(old_sig_ref, final_sig_ref);
+                None
+            } else {
+                let value_ref = remapped_ref.bump();
+                let field_ref = remapped_ref.bump();
+                Some((value_ref, field_ref))
+            }
+        } else {
+            None
+        };
 
         // Chunk length is not an exact number because the length might change as we renumber,
         // so we add a bit of a padding by multiplying with 1.1. The 200 is additional padding
@@ -739,22 +833,68 @@ impl ChunkContainer {
                 }
             }
 
-            // AcroForm dictionary (ISO 32000-2 §12.7.3). Written whenever
-            // the document emitted at least one widget annotation. We do
-            // not currently emit `/AP` appearance streams; setting
-            // `/NeedAppearances true` directs conforming viewers
-            // (Acrobat in particular) to regenerate appearances from
-            // each field's `/V` and `/DA` on first save, which is the
-            // standard fallback for engines that emit field values
-            // without bundled appearances.
-            if !widget_fields.is_empty() {
+            // AcroForm dictionary (ISO 32000-2 §12.7.3). Written whenever the
+            // document emitted at least one widget annotation, or a standalone
+            // signature field is present. krilla emits a real `/AP /N`
+            // appearance stream for every widget, so `/NeedAppearances true` is
+            // only a hint for readers that would otherwise draw empty fields —
+            // and it is forbidden by PDF/A and the accessibility profiles
+            // (which require baked appearances). It is therefore suppressed
+            // whenever such a validator is active.
+            if !widget_fields.is_empty() || standalone_sig_ref.is_some() {
                 let mut acro_form = catalog.insert(Name(b"AcroForm")).dict();
                 let mut fields = acro_form.insert(Name(b"Fields")).array();
                 for field_ref in &widget_fields {
                     fields.item(remapper[field_ref]);
                 }
+                // Standalone signing (no author-supplied widget): reference
+                // the signature FIELD dictionary — not the `/Sig` value dict —
+                // so `/Fields` carries a well-formed `/FT /Sig` field.
+                if let Some((_value_ref, field_ref)) = standalone_sig_ref {
+                    fields.item(field_ref);
+                }
                 fields.finish();
-                acro_form.pair(Name(b"NeedAppearances"), true);
+                // /DR default resources: text and choice widgets emit a /DA
+                // string that references the font resource name /Helv, which
+                // ISO 32000-2 §12.7.4.3 requires to be resolvable through the
+                // interactive form dictionary's /DR /Font. Emit it whenever a
+                // widget requested the shared Helvetica font.
+                if let Some(helv) = helvetica_ref {
+                    let mut dr = acro_form.insert(Name(b"DR")).dict();
+                    let mut dr_fonts = dr.insert(Name(b"Font")).dict();
+                    dr_fonts.pair(Name(b"Helv"), remapper[&helv]);
+                    dr_fonts.finish();
+                    dr.finish();
+                }
+                // /CO calculation order (ISO 32000-2 §12.7.3 Table 224):
+                // required whenever any field carries a /AA /C calculate action.
+                // Registration order defines the calculation order.
+                if !calculate_order_fields.is_empty() {
+                    let mut co = acro_form.insert(Name(b"CO")).array();
+                    for field_ref in &calculate_order_fields {
+                        co.item(remapper[field_ref]);
+                    }
+                    co.finish();
+                }
+                if !sc
+                    .serialize_settings()
+                    .validators()
+                    .prohibits_need_appearances()
+                {
+                    acro_form.pair(Name(b"NeedAppearances"), true);
+                }
+                // ISO 32000-2 §12.7.3 Table 224 — `/SigFlags`. Bit 1
+                // (SignaturesExist) is set whenever the AcroForm
+                // contains a `/Sig` field; bit 2 (AppendOnly)
+                // instructs viewers to require incremental-update
+                // saves so the signature byte range stays valid.
+                // We emit `3` (both bits set) whenever the document
+                // is configured with a real digital signature —
+                // krilla itself does not enforce incremental saves
+                // but conforming consumers will.
+                if sc.signing_enabled {
+                    acro_form.pair(Name(b"SigFlags"), 3_i32);
+                }
                 acro_form.finish();
             }
 
@@ -851,8 +991,242 @@ impl ChunkContainer {
             catalog.finish();
         }
 
+        // Digital-signature dictionary (`/Sig`) — ISO 32000-2 §12.8.1
+        // Table 255. Written as a top-level indirect object so the
+        // widget annotation's `/V` can point at it from any page.
+        // The dict carries placeholder `/ByteRange` and `/Contents`
+        // values; the [`crate::Document::finish`] post-processor
+        // replaces them after `pdf-writer` returns the final byte
+        // buffer.
+        //
+        // The dict is emitted only when:
+        // - The document was configured with
+        //   [`Document::set_digital_signature`] (`sc.signing_enabled`),
+        // - And at least one `SignatureField` widget caused the lazy
+        //   allocation of [`SerializeContext::signature_dict_ref`].
+        //
+        // We allocate the ref lazily so PDFs that opt into signing
+        // but emit no `/Sig` widget on any page do not consume an
+        // indirect-object slot.
+        // Emit the `/Sig` indirect dictionary when signing is on.
+        // The ref source depends on whether at least one
+        // `SignatureField` widget pre-allocated the build-time ref
+        // (via `SerializeContext::signature_dict_ref`) — in which
+        // case we resolve through the remapper — or whether the
+        // standalone-signing branch above pre-allocated a fresh
+        // final-numbering ref.
+        if let Some(sig_ref) = sc.signature_dict_ref {
+            let remapped_sig_ref = remapper.get(&sig_ref).copied().ok_or_else(|| {
+                crate::error::KrillaError::DigitalSignature(
+                    "signature dict ref was not present in the chunk remapper — \
+                     widget arm allocated it but renumbering dropped the entry"
+                        .into(),
+                )
+            })?;
+            Self::write_signature_dict(
+                self.signature_settings.as_ref(),
+                &mut pdf,
+                remapped_sig_ref,
+            )?;
+        } else if let Some(standalone_ref) = standalone_sig_ref {
+            Self::write_signature_dict(
+                self.signature_settings.as_ref(),
+                &mut pdf,
+                standalone_ref,
+            )?;
+        }
+
         Ok((pdf, xref_stream_ref))
     }
+
+    /// Emit the placeholder `/Sig` indirect dictionary. Called from
+    /// [`Self::finish`] after the catalogue has been written but
+    /// before `pdf-writer` finalises the buffer.
+    ///
+    /// We emit the dict through `pdf-writer`'s typed API and rely on
+    /// two carefully-chosen placeholder shapes that the post-finish
+    /// patcher can locate and rewrite without shifting downstream
+    /// offsets:
+    ///
+    /// - `/ByteRange [0 1000000000 1000000000 1000000000]` — three
+    ///   ten-digit integer placeholders that fit comfortably in
+    ///   `i32`. After post-processing each placeholder is replaced
+    ///   in place with the actual offset/length, left-padded with
+    ///   zeros to ten characters so the array byte width stays
+    ///   constant.
+    /// - `/Contents (000000…)` — a literal-string placeholder of
+    ///   exactly `placeholder_size_bytes * 2` `'0'` ASCII bytes
+    ///   between `(` and `)`. After post-processing the entire
+    ///   parenthesised literal is overwritten by a hex string of
+    ///   the same total byte width (`<HEX…>`), the byte range is
+    ///   recomputed against the `<` offset, and the actual DER
+    ///   signature bytes are written into the hex slot.
+    ///
+    /// Both placeholder shapes are recognisable by unique byte
+    /// patterns so the patcher can find them with a single
+    /// substring scan.
+    fn write_signature_dict(
+        signature_settings: Option<&SignatureEmissionSettings>,
+        pdf: &mut Pdf,
+        sig_ref: Ref,
+    ) -> KrillaResult<()> {
+        use crate::error::KrillaError;
+        use crate::interactive::signature::BYTE_RANGE_PLACEHOLDER_VALUE;
+        use pdf_writer::{Str, TextStr};
+
+        let settings = signature_settings.ok_or_else(|| {
+            KrillaError::DigitalSignature(
+                "signature dict ref was allocated but no \
+                     digital-signature emission settings were provided"
+                    .into(),
+            )
+        })?;
+
+        // The contents placeholder must round-trip cleanly through
+        // `Str`'s ASCII literal-string path: every `'0'` byte is
+        // 0x30, which is in the 32..=126 passthrough range, so
+        // `Str(b"0000…")` writes `(0000…)` verbatim — the exact
+        // byte pattern the post-finish patcher scans for.
+        let contents_placeholder = vec![b'0'; settings.placeholder_size_bytes * 2];
+
+        // No external marker is needed: the post-finish patcher scans
+        // for two unique placeholder byte patterns, each appearing at
+        // most once in any document krilla emits —
+        //
+        // - `/ByteRange [0 1000000000 1000000000 1000000000]`
+        // - `/Contents (0000…)`  (`placeholder_size_bytes * 2` zeros)
+        //
+        // Emit the `/Sig` dictionary. Under encryption every string is
+        // AES-encrypted as usual EXCEPT the `/Contents` hex string, which ISO
+        // 32000-2 §7.6.2 exempts (so the `(0000…)` placeholder survives
+        // verbatim for the post-finish byte-range patch); it is wrapped in
+        // `Unencrypted` to suspend encryption for that single value. The
+        // `/Reason`, `/Location`, `/ContactInfo` and `/Name` strings are
+        // ordinary strings and are encrypted normally; names and the integer
+        // `/ByteRange` are never encrypted.
+        let mut sig_dict = pdf.indirect(sig_ref).dict();
+        sig_dict.pair(pdf_writer::Name(b"Type"), pdf_writer::Name(b"Sig"));
+        sig_dict.pair(pdf_writer::Name(b"Filter"), pdf_writer::Name(b"Adobe.PPKLite"));
+        sig_dict.pair(
+            pdf_writer::Name(b"SubFilter"),
+            pdf_writer::Name(settings.sub_filter.as_pdf_name()),
+        );
+        // /ByteRange placeholder.
+        let mut br = sig_dict.insert(pdf_writer::Name(b"ByteRange")).array();
+        br.item(0_i32);
+        br.item(BYTE_RANGE_PLACEHOLDER_VALUE);
+        br.item(BYTE_RANGE_PLACEHOLDER_VALUE);
+        br.item(BYTE_RANGE_PLACEHOLDER_VALUE);
+        br.finish();
+        // /Contents placeholder — exempt from encryption (§7.6.2) via
+        // `Unencrypted`, so the ASCII `(0000…)` literal survives verbatim
+        // for the patcher instead of being AES-encrypted.
+        sig_dict.pair(
+            pdf_writer::Name(b"Contents"),
+            pdf_writer::Unencrypted(Str(&contents_placeholder)),
+        );
+        if let Some(reason) = &settings.reason {
+            sig_dict.pair(pdf_writer::Name(b"Reason"), TextStr(reason));
+        }
+        if let Some(location) = &settings.location {
+            sig_dict.pair(pdf_writer::Name(b"Location"), TextStr(location));
+        }
+        if let Some(contact_info) = &settings.contact_info {
+            sig_dict.pair(pdf_writer::Name(b"ContactInfo"), TextStr(contact_info));
+        }
+        if let Some(signer_name) = &settings.signer_name {
+            sig_dict.pair(pdf_writer::Name(b"Name"), TextStr(signer_name));
+        }
+        if let Some(signing_time) = &settings.signing_time {
+            // `/M` is a date object literal (ISO 32000-2 §7.9.4
+            // "Dates"). pdf-writer's `Date` writer takes a year
+            // and gradually adds month/day/etc. Parse the supplied
+            // string conservatively: when it matches
+            // `D:YYYYMMDDHHMMSS` (with optional `Z` / `+HH'MM'`
+            // suffix) we route through `Date::new(year)`; otherwise
+            // we surface the raw bytes via `Str` so the embedder
+            // can supply non-standard date formats without
+            // krilla rejecting them.
+            if let Some(date) = parse_pdf_date(signing_time) {
+                sig_dict.pair(pdf_writer::Name(b"M"), date);
+            } else {
+                sig_dict.pair(pdf_writer::Name(b"M"), Str(signing_time.as_bytes()));
+            }
+        }
+        // Drop closes the dict and emits `>>\nendobj\n`.
+        drop(sig_dict);
+
+        Ok(())
+    }
+}
+
+/// Parse a PDF date string of the canonical form
+/// `D:YYYYMMDDHHmmSS[Z|+HH'mm'|-HH'mm']` into a [`pdf_writer::Date`].
+///
+/// Returns `None` if the input does not match — the caller then
+/// falls back to a `Str` literal so embedder-supplied date strings
+/// outside the canonical grammar still land verbatim in `/M`.
+fn parse_pdf_date(s: &str) -> Option<pdf_writer::Date> {
+    let body = s.strip_prefix("D:").unwrap_or(s);
+    if body.len() < 4 {
+        return None;
+    }
+    let year: u16 = body.get(0..4)?.parse().ok()?;
+    let mut date = pdf_writer::Date::new(year);
+    let mut cursor = 4;
+    if let Some(month) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+        date = date.month(month);
+        cursor += 2;
+    }
+    if let Some(day) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+        date = date.day(day);
+        cursor += 2;
+    }
+    if let Some(hour) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+        date = date.hour(hour);
+        cursor += 2;
+    }
+    if let Some(minute) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+        date = date.minute(minute);
+        cursor += 2;
+    }
+    if let Some(second) = body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok()) {
+        date = date.second(second);
+        cursor += 2;
+    }
+    // Time-zone suffix (optional). `Z` is the no-op UTC marker.
+    // `+HH'mm'` or `-HH'mm'` set the offset.
+    if let Some(tz_byte) = body.as_bytes().get(cursor) {
+        match tz_byte {
+            // Explicit UTC. Set a zero offset so `Date::write` re-emits the `Z`
+            // marker (offset hour 0 + minute 0 -> `Z`); leaving the offset
+            // `None` would drop the UT designator entirely.
+            b'Z' => {
+                date = date.utc_offset_hour(0);
+            }
+            b'+' | b'-' => {
+                let sign: i8 = if *tz_byte == b'-' { -1 } else { 1 };
+                cursor += 1;
+                if let Some(hour) =
+                    body.get(cursor..cursor + 2).and_then(|s| s.parse::<i8>().ok())
+                {
+                    date = date.utc_offset_hour(sign * hour);
+                    cursor += 2;
+                    // Skip the optional apostrophe separator.
+                    if body.as_bytes().get(cursor) == Some(&b'\'') {
+                        cursor += 1;
+                    }
+                    if let Some(minute) =
+                        body.get(cursor..cursor + 2).and_then(|s| s.parse::<u8>().ok())
+                    {
+                        date = date.utc_offset_minute(minute);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Some(date)
 }
 
 pub(crate) struct EmbeddedPdfChunk {
