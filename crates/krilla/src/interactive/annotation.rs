@@ -769,6 +769,26 @@ impl Annotation {
                             ));
                         }
                     }
+                    crate::color::RegularColor::CalRgb { .. }
+                    | crate::color::RegularColor::Lab { .. } => {
+                        // CalRGB and Lab emit as a DeviceRGB triple in the raw
+                        // `/C` array — characterised like RGB under the intent.
+                        if !sc.serialize_settings().pdfx_output_intent_is_rgb() {
+                            sc.register_validation_error(ValidationError::AnnotationContainsRgb(
+                                self.location,
+                            ));
+                        }
+                    }
+                    crate::color::RegularColor::CalGray { .. } => {
+                        // CalGray emits as a single DeviceGray scalar —
+                        // characterised like DeviceGray (invalid under an RGB
+                        // output intent).
+                        if sc.serialize_settings().pdfx_output_intent_is_rgb() {
+                            sc.register_validation_error(
+                                ValidationError::OutputIntentColorSpaceMismatch(self.location),
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -4185,6 +4205,27 @@ fn write_mk_colour_entry(
                     array.item(component);
                 }
             }
+            // `/MK` colour arrays are device-space only (PDF 32000-2
+            // §12.5.6.19 Table 167); calibrated CIE-based variants have
+            // no device-space scalar form. Emit the components verbatim
+            // — CalRGB and Lab as a DeviceRGB triple, CalGray as a
+            // single DeviceGray scalar — matching the IccBased
+            // degenerate-projection above. Authoring a calibrated
+            // border / background is a niche case; an appearance stream
+            // is the proper escape hatch.
+            RegularColor::CalRgb { components, .. } => {
+                for &component in components {
+                    array.item(component);
+                }
+            }
+            RegularColor::CalGray { component, .. } => {
+                array.item(*component);
+            }
+            RegularColor::Lab { components, .. } => {
+                for &component in components {
+                    array.item(component);
+                }
+            }
         },
         Color::Special(_) => {
             // Separation / DeviceN have no device-space scalar form
@@ -4490,6 +4531,21 @@ fn write_color(annotation: &mut pdf_writer::writers::Annotation, color: &Color) 
         // case (annotation appearance streams handle gamut more
         // precisely than the `/C` colour entry).
         crate::color::RegularColor::IccBased { components, .. } => {
+            annotation.color_rgb(components[0], components[1], components[2]);
+        }
+        // `/C` annotation entries are device-space only (PDF 32000-2
+        // §12.5.6.5). Calibrated CIE-based variants get the same
+        // verbatim-as-device fallback as IccBased: CalRGB and Lab as a
+        // three-component DeviceRGB triple, CalGray as a DeviceGray
+        // scalar. Annotation appearance streams remain the proper
+        // route for precise calibrated colour.
+        crate::color::RegularColor::CalRgb { components, .. } => {
+            annotation.color_rgb(components[0], components[1], components[2]);
+        }
+        crate::color::RegularColor::CalGray { component, .. } => {
+            annotation.color_gray(component);
+        }
+        crate::color::RegularColor::Lab { components, .. } => {
             annotation.color_rgb(components[0], components[1], components[2]);
         }
     }

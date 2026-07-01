@@ -1765,6 +1765,15 @@ impl SerializeContext {
             ColorSpace::CieBased(CieBasedColorSpace::IccRgb(cs)) => {
                 MaybeDeviceColorSpace::ColorSpace(self.register_resourceable(chunk_container, cs))
             }
+            ColorSpace::CieBased(CieBasedColorSpace::CalRgb(cs)) => {
+                MaybeDeviceColorSpace::ColorSpace(self.register_resourceable(chunk_container, cs))
+            }
+            ColorSpace::CieBased(CieBasedColorSpace::CalGray(cs)) => {
+                MaybeDeviceColorSpace::ColorSpace(self.register_resourceable(chunk_container, cs))
+            }
+            ColorSpace::CieBased(CieBasedColorSpace::Lab(cs)) => {
+                MaybeDeviceColorSpace::ColorSpace(self.register_resourceable(chunk_container, cs))
+            }
             ColorSpace::Device(DeviceColorSpace::Gray) => MaybeDeviceColorSpace::DeviceGray,
             ColorSpace::Device(DeviceColorSpace::Rgb) => MaybeDeviceColorSpace::DeviceRgb,
             ColorSpace::Device(DeviceColorSpace::Cmyk) => MaybeDeviceColorSpace::DeviceCMYK,
