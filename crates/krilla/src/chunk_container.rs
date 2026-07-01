@@ -538,6 +538,47 @@ impl ChunkContainer {
                 if let Some(enabled) = vp_struct.pick_tray_by_pdf_size {
                     vp.pair(Name(b"PickTrayByPDFSize"), enabled);
                 }
+                // K13 — `/NumCopies` (ISO 32000-2 §12.4.4 Table 168).
+                // The spec requires a positive integer; clamp a `0`
+                // request to `1` rather than emitting an invalid PDF.
+                if let Some(copies) = vp_struct.num_copies {
+                    let copies = if copies == 0 { 1 } else { copies };
+                    vp.pair(Name(b"NumCopies"), copies as i32);
+                }
+                // K13 — `/PrintPageRange` (ISO 32000-2 §12.4.4
+                // Table 168): even-length array of inclusive
+                // 1-indexed `[from, to]` pairs. An empty author
+                // vector means "no preference" — the entry is
+                // omitted so the viewer falls back to "all pages".
+                if let Some(ref ranges) = vp_struct.print_page_range {
+                    if !ranges.is_empty() {
+                        let mut arr = vp
+                            .deref_mut()
+                            .insert(Name(b"PrintPageRange"))
+                            .array();
+                        for &(from, to) in ranges {
+                            arr.item(from as i32);
+                            arr.item(to as i32);
+                        }
+                        arr.finish();
+                    }
+                }
+                // K14 — `/ViewArea`, `/ViewClip`, `/PrintArea`,
+                // `/PrintClip` (ISO 32000-2 §12.4.4 Table 168).
+                // Each selects one of the document's authored page
+                // boxes; omitted entries default to `MediaBox`.
+                if let Some(sel) = vp_struct.view_area {
+                    vp.pair(Name(b"ViewArea"), sel.to_pdf_name());
+                }
+                if let Some(sel) = vp_struct.view_clip {
+                    vp.pair(Name(b"ViewClip"), sel.to_pdf_name());
+                }
+                if let Some(sel) = vp_struct.print_area {
+                    vp.pair(Name(b"PrintArea"), sel.to_pdf_name());
+                }
+                if let Some(sel) = vp_struct.print_clip {
+                    vp.pair(Name(b"PrintClip"), sel.to_pdf_name());
+                }
             }
 
             let page_layout = metadata.page_layout;
