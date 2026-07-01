@@ -28,6 +28,8 @@ pub struct Metadata {
     pub(crate) text_direction: Option<TextDirection>,
     pub(crate) page_layout: Option<PageLayout>,
     pub(crate) trapped: Option<Trapping>,
+    pub(crate) page_mode: Option<PageMode>,
+    pub(crate) viewer_preferences: ViewerPreferences,
 }
 
 /// Trapping status for a PDF document.
@@ -161,6 +163,25 @@ impl Metadata {
     /// PDF/X validator is active.
     pub fn trapped(mut self, trapped: Trapping) -> Self {
         self.trapped = Some(trapped);
+        self
+    }
+
+    /// Which document chrome (outlines, thumbs, full-screen, …) the
+    /// viewer should display when the document is opened.
+    pub fn page_mode(mut self, page_mode: PageMode) -> Self {
+        self.page_mode = Some(page_mode);
+        self
+    }
+
+    /// Set the document's `/ViewerPreferences` dictionary (ISO
+    /// 32000-2 §12.2). Every field on [`ViewerPreferences`] is
+    /// optional; absent fields are omitted from the emitted dictionary.
+    /// The `Direction` and `DisplayDocTitle` slots interoperate with
+    /// the existing [`Self::text_direction`] hint and the
+    /// validator-driven `DisplayDocTitle` enforcement (PDF/UA-1) —
+    /// values from this struct take precedence when set.
+    pub fn viewer_preferences(mut self, preferences: ViewerPreferences) -> Self {
+        self.viewer_preferences = preferences;
         self
     }
 
@@ -606,5 +627,206 @@ impl PageLayout {
             PageLayout::TwoPageLeft => pdf_writer::types::PageLayout::TwoPageLeft,
             PageLayout::TwoPageRight => pdf_writer::types::PageLayout::TwoPageRight,
         }
+    }
+}
+
+/// Which document chrome the viewer should display when the document
+/// is first opened (ISO 32000-2 §7.7.2, `/PageMode`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PageMode {
+    /// Neither the document outline panel nor a panel with page preview
+    /// images are visible.
+    UseNone,
+    /// The document outline panel is visible.
+    UseOutlines,
+    /// A panel with page preview images is visible.
+    UseThumbs,
+    /// Show the document page in full screen mode, with no chrome.
+    FullScreen,
+    /// Show the optional content group panel. PDF 1.5+.
+    UseOC,
+    /// Show the attachments panel. PDF 1.6+.
+    UseAttachments,
+}
+
+impl PageMode {
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::PageMode {
+        match self {
+            PageMode::UseNone => pdf_writer::types::PageMode::UseNone,
+            PageMode::UseOutlines => pdf_writer::types::PageMode::UseOutlines,
+            PageMode::UseThumbs => pdf_writer::types::PageMode::UseThumbs,
+            PageMode::FullScreen => pdf_writer::types::PageMode::FullScreen,
+            PageMode::UseOC => pdf_writer::types::PageMode::UseOC,
+            PageMode::UseAttachments => pdf_writer::types::PageMode::UseAttachments,
+        }
+    }
+}
+
+/// Page mode shown when the viewer is NOT in full-screen mode
+/// (`/ViewerPreferences /NonFullScreenPageMode`). Strict subset of
+/// [`PageMode`]; ISO 32000-2 §12.2 forbids `FullScreen` here.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub enum NonFullScreenPageMode {
+    UseNone,
+    UseOutlines,
+    UseThumbs,
+    UseOC,
+}
+
+impl NonFullScreenPageMode {
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::PageMode {
+        match self {
+            NonFullScreenPageMode::UseNone => pdf_writer::types::PageMode::UseNone,
+            NonFullScreenPageMode::UseOutlines => pdf_writer::types::PageMode::UseOutlines,
+            NonFullScreenPageMode::UseThumbs => pdf_writer::types::PageMode::UseThumbs,
+            NonFullScreenPageMode::UseOC => pdf_writer::types::PageMode::UseOC,
+        }
+    }
+}
+
+/// Print-dialog page-scaling preference
+/// (`/ViewerPreferences /PrintScaling`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub enum PrintScaling {
+    /// No page scaling — print at 100%.
+    None,
+    /// Application default (the viewer's standard fit-to-page behaviour).
+    AppDefault,
+}
+
+impl PrintScaling {
+    pub(crate) fn to_pdf_name(self) -> Name<'static> {
+        match self {
+            PrintScaling::None => Name(b"None"),
+            PrintScaling::AppDefault => Name(b"AppDefault"),
+        }
+    }
+}
+
+/// Duplex / simplex preference for the print dialog
+/// (`/ViewerPreferences /Duplex`).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[allow(missing_docs)]
+pub enum Duplex {
+    Simplex,
+    DuplexFlipShortEdge,
+    DuplexFlipLongEdge,
+}
+
+impl Duplex {
+    pub(crate) fn to_pdf_name(self) -> Name<'static> {
+        match self {
+            Duplex::Simplex => Name(b"Simplex"),
+            Duplex::DuplexFlipShortEdge => Name(b"DuplexFlipShortEdge"),
+            Duplex::DuplexFlipLongEdge => Name(b"DuplexFlipLongEdge"),
+        }
+    }
+}
+
+/// `/ViewerPreferences` dictionary entries (ISO 32000-2 §12.4.4).
+///
+/// Every field is optional. Setters on this struct return `Self` for
+/// builder-style chaining; absent fields are not emitted in the PDF.
+/// `direction` is set independently via [`Metadata::text_direction`];
+/// supplying it here as part of a `ViewerPreferences` value
+/// overrides the writing-mode-derived hint.
+#[derive(Default, Clone, Debug)]
+pub struct ViewerPreferences {
+    pub(crate) hide_toolbar: Option<bool>,
+    pub(crate) hide_menubar: Option<bool>,
+    pub(crate) hide_window_ui: Option<bool>,
+    pub(crate) fit_window: Option<bool>,
+    pub(crate) center_window: Option<bool>,
+    pub(crate) display_doc_title: Option<bool>,
+    pub(crate) non_fullscreen_page_mode: Option<NonFullScreenPageMode>,
+    pub(crate) print_scaling: Option<PrintScaling>,
+    pub(crate) duplex: Option<Duplex>,
+    pub(crate) pick_tray_by_pdf_size: Option<bool>,
+}
+
+impl ViewerPreferences {
+    /// Create an empty viewer-preferences dictionary.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `/HideToolbar` — hide the viewer's toolbar while the document is open.
+    pub fn hide_toolbar(mut self, hide: bool) -> Self {
+        self.hide_toolbar = Some(hide);
+        self
+    }
+
+    /// `/HideMenubar` — hide the viewer's menu bar while the document is open.
+    pub fn hide_menubar(mut self, hide: bool) -> Self {
+        self.hide_menubar = Some(hide);
+        self
+    }
+
+    /// `/HideWindowUI` — hide the viewer's window-management controls.
+    pub fn hide_window_ui(mut self, hide: bool) -> Self {
+        self.hide_window_ui = Some(hide);
+        self
+    }
+
+    /// `/FitWindow` — resize the viewer window to the size of the first page.
+    pub fn fit_window(mut self, fit: bool) -> Self {
+        self.fit_window = Some(fit);
+        self
+    }
+
+    /// `/CenterWindow` — centre the viewer window on the screen.
+    pub fn center_window(mut self, center: bool) -> Self {
+        self.center_window = Some(center);
+        self
+    }
+
+    /// `/DisplayDocTitle` — display the document's `/Title` rather than
+    /// the file name in the viewer's title bar. Required `true` under
+    /// PDF/UA-1.
+    pub fn display_doc_title(mut self, display: bool) -> Self {
+        self.display_doc_title = Some(display);
+        self
+    }
+
+    /// `/NonFullScreenPageMode` — which chrome the viewer shows when
+    /// the document is requesting full-screen but not currently
+    /// in full-screen mode.
+    pub fn non_fullscreen_page_mode(mut self, mode: NonFullScreenPageMode) -> Self {
+        self.non_fullscreen_page_mode = Some(mode);
+        self
+    }
+
+    /// `/PrintScaling` — default page-scaling preference for the print dialog.
+    pub fn print_scaling(mut self, scaling: PrintScaling) -> Self {
+        self.print_scaling = Some(scaling);
+        self
+    }
+
+    /// `/Duplex` — duplex / simplex preference for the print dialog.
+    pub fn duplex(mut self, duplex: Duplex) -> Self {
+        self.duplex = Some(duplex);
+        self
+    }
+
+    /// `/PickTrayByPDFSize` — automatically choose the paper tray by
+    /// matching the page size.
+    pub fn pick_tray_by_pdf_size(mut self, enabled: bool) -> Self {
+        self.pick_tray_by_pdf_size = Some(enabled);
+        self
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.hide_toolbar.is_none()
+            && self.hide_menubar.is_none()
+            && self.hide_window_ui.is_none()
+            && self.fit_window.is_none()
+            && self.center_window.is_none()
+            && self.display_doc_title.is_none()
+            && self.non_fullscreen_page_mode.is_none()
+            && self.print_scaling.is_none()
+            && self.duplex.is_none()
+            && self.pick_tray_by_pdf_size.is_none()
     }
 }

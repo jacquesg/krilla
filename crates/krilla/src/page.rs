@@ -40,6 +40,9 @@ pub struct PageSettings {
     trim_box: Option<Rect>,
     /// The actual content boundaries
     art_box: Option<Rect>,
+    /// The number of degrees the page should be rotated clockwise when displayed.
+    /// Must be a multiple of 90.
+    rotate: Option<i32>,
 }
 
 impl PageSettings {
@@ -158,6 +161,22 @@ impl PageSettings {
     pub(crate) fn art_box(&self) -> Option<Rect> {
         self.art_box
     }
+
+    /// Change the page rotation.
+    ///
+    /// The number of degrees the page should be rotated clockwise when
+    /// displayed. Must be a multiple of 90. Common values: 0, 90, 180, 270.
+    ///
+    /// If `None`, no `/Rotate` attribute will be written to the page.
+    pub fn with_rotate(mut self, rotate: Option<i32>) -> PageSettings {
+        self.rotate = rotate;
+        self
+    }
+
+    /// The current rotation.
+    pub(crate) fn rotate(&self) -> Option<i32> {
+        self.rotate
+    }
 }
 
 impl Default for PageSettings {
@@ -174,6 +193,7 @@ impl Default for PageSettings {
             bleed_box: None,
             trim_box: None,
             art_box: None,
+            rotate: None,
         }
     }
 }
@@ -564,6 +584,19 @@ impl InternalPage {
                     self.page_index,
                     sc.location,
                 ));
+            }
+        }
+
+        if let Some(rotate) = self.page_settings.rotate() {
+            // `/Rotate` shall be a multiple of 90 (ISO 32000-2 §7.7.3.3
+            // Table 31). Canonicalise negatives / values >= 360 into [0, 360);
+            // a value that is not a multiple of 90 has no valid representation,
+            // so omit the entry (leaving the default 0) rather than emit an
+            // invalid one.
+            let rotate = rotate.rem_euclid(360);
+            debug_assert!(rotate % 90 == 0, "/Rotate must be a multiple of 90");
+            if rotate % 90 == 0 {
+                page.rotate(rotate);
             }
         }
 
