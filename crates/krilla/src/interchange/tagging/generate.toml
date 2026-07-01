@@ -360,8 +360,18 @@ optional = [
   "Layout::Width",
   "Layout::Height",
 ]
-# An interactive form field.
+# A form structure type (ISO 32000-2 §14.8.4.4) — wraps an interactive
+# or non-interactive form control. The PDF `/PrintField` attribute
+# owner attaches metadata that PDF/UA-1 (§7.18) / PDF/UA-2 (§8.13)
+# rely on to expose role, checked-state, and accessible-name
+# information for non-interactive form controls printed to PDF
+# (ISO 32000-2 §14.7.4.4 Table 359, "PrintField" attribute owner).
 [Tag.Form]
+optional = [
+  "Form::Role",
+  "Form::Checked",
+  "Form::Name",
+]
 # Non-structural element. A grouping element having no inherent structural significance;
 # it serves solely for grouping purposes.
 [Tag.NonStruct]
@@ -430,6 +440,25 @@ CellHeaders = { name = "headers", type = "SmallVec<[TagId; 1]>", accessor = "Cus
 RowSpan = { type = "NonZeroU32", accessor = "Copy" }
 # The column span of this table cell.
 ColSpan = { type = "NonZeroU32", accessor = "Copy" }
+
+# PrintField attribute owner attached to a Form structure element.
+# Maps onto the PDF `/PrintField` attribute owner per ISO 32000-2
+# §14.7.4.4 Table 359; serialised under the Form structure element's
+# attribute dictionary by `pdf_writer::writers::FieldAttributes`.
+[Attr.Form]
+# The PDF `/Role` entry on the `/PrintField` attribute owner — kind
+# of non-interactive form control (push-button, checkbox, radio
+# button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+Role = { type = "FormFieldRole", accessor = "Copy" }
+# The PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+# `/PrintField` attribute owner — checked-state of a checkbox or
+# radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+Checked = { name = "checked_state", type = "FormFieldState", accessor = "Copy" }
+# The PDF `/Desc` entry on the `/PrintField` attribute owner —
+# accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+# PDF/UA-2 §8.13 require this on non-interactive form controls so
+# screen readers can announce a meaningful label.
+Name = { name = "name", type = "String", accessor = "AsRef<str>" }
 
 [Attr.Layout]
 # The placement.

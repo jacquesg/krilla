@@ -30,10 +30,47 @@ pub struct Metadata {
     pub(crate) trapped: Option<Trapping>,
     pub(crate) page_mode: Option<PageMode>,
     pub(crate) viewer_preferences: ViewerPreferences,
+    /// G5b — `/OpenAction` document action (ISO 32000-2 §7.7.2 Table 29).
+    /// `None` (the default) emits no `/OpenAction` slot in the
+    /// catalogue dictionary; PDF readers open the document at the
+    /// first page at their preferred zoom level.
+    pub(crate) open_action: Option<OpenAction>,
     /// Author-supplied verbatim XMP packet. When set, it replaces the
     /// stream payload that krilla would otherwise build via [`XmpWriter`].
     /// See [`Metadata::raw_xmp`].
     pub(crate) raw_xmp: Option<Vec<u8>>,
+    /// G64 — document-level JavaScript entries written into the
+    /// catalogue's `/Names /JavaScript` name tree (ISO 32000-2
+    /// §12.6.4.17). Each entry is `(name, source)`; the name must be
+    /// unique in the tree, and the source is registered verbatim as
+    /// a `/S /JavaScript` action dictionary. Order is preserved at
+    /// the API boundary; the writer sorts the name tree
+    /// alphabetically as required by ISO 32000-1 §7.9.6.
+    pub(crate) document_javascripts: Vec<(String, String)>,
+    /// G64 — JavaScript actions attached to the document catalogue's
+    /// `/AA` additional-actions dictionary (ISO 32000-2 §12.6.3
+    /// Table 200). One entry per event key; `set_document_event_script`
+    /// overwrites a duplicate event.
+    pub(crate) document_event_scripts: Vec<(DocumentEvent, String)>,
+}
+
+/// PDF catalogue-level additional-action event keys (ISO 32000-2
+/// §12.6.3 Table 200).
+///
+/// The discriminant matches the PDF event name and the rendered
+/// dictionary key (`/WC`, `/WS`, `/DS`, `/WP`, `/DP`).
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+pub enum DocumentEvent {
+    /// `/WC` — fires before the document is closed.
+    WillClose,
+    /// `/WS` — fires before the document is saved.
+    WillSave,
+    /// `/DS` — fires after the document is saved.
+    DidSave,
+    /// `/WP` — fires before the document is printed.
+    WillPrint,
+    /// `/DP` — fires after the document is printed.
+    DidPrint,
 }
 
 /// Trapping status for a PDF document.
@@ -189,6 +226,32 @@ impl Metadata {
         self
     }
 
+    /// Set the document's `/OpenAction` (ISO 32000-2 §7.7.2 Table 29).
+    ///
+    /// The viewer executes this action when the document is opened.
+    /// Three flavours are exposed:
+    ///
+    /// - [`OpenAction::go_to_page_with_zoom`] — direct-link to a
+    ///   page-and-zoom destination (moegoe G5b: `-bd-initial-page`
+    ///   + `-bd-initial-zoom`). The 0-indexed page reference is
+    ///   resolved at serialise time against the `PageInfo` table;
+    ///   an out-of-range page index is not detected here (it would
+    ///   panic during serialisation mirroring
+    ///   `XyzDestination::serialize`'s behaviour). Callers must
+    ///   clamp into `[0, page_count)` before invoking this setter.
+    /// - [`OpenAction::named`] — named-action dispatch
+    ///   (ISO 32000-2 §12.6.4.9 Table 200). Used by the PDFreactor
+    ///   `printDialogPrompt` parity surface to raise the print
+    ///   dialog on document open via [`NamedAction::Print`].
+    ///
+    /// Other action types (`/JavaScript`, `/SubmitForm`, etc.) are
+    /// not exposed at this entry; use the appropriate annotation
+    /// or document-event setter instead.
+    pub fn open_action(mut self, action: OpenAction) -> Self {
+        self.open_action = Some(action);
+        self
+    }
+
     /// Override the XMP metadata stream with the supplied bytes verbatim.
     ///
     /// When set, the `/Metadata` stream the catalogue points at will contain
@@ -209,6 +272,52 @@ impl Metadata {
     /// [`XmpWriter`]: xmp_writer::XmpWriter
     pub fn raw_xmp(mut self, bytes: Vec<u8>) -> Self {
         self.raw_xmp = Some(bytes);
+        self
+    }
+
+    /// Register a document-level JavaScript action under `name` in the
+    /// catalogue's `/Names /JavaScript` name tree (ISO 32000-2
+    /// §12.6.4.17).
+    ///
+    /// The `source` string is written verbatim into the action
+    /// dictionary's `/JS` entry as a `TextStr` — no escaping or
+    /// sanitisation is applied. Authors building executable AcroForm
+    /// or document-level scripts are responsible for emitting
+    /// well-formed JavaScript.
+    ///
+    /// Names must be unique within the tree; a duplicate name from
+    /// the same metadata builder silently overwrites the earlier
+    /// entry to keep the surface idempotent.
+    pub fn document_javascript(
+        mut self,
+        name: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let source = source.into();
+        self.document_javascripts.retain(|(existing, _)| existing != &name);
+        self.document_javascripts.push((name, source));
+        self
+    }
+
+    /// Attach a JavaScript action to a catalogue-level additional
+    /// action event (ISO 32000-2 §12.6.3 Table 200).
+    ///
+    /// `/WC` (Will Close), `/WS` (Will Save), `/DS` (Did Save),
+    /// `/WP` (Will Print), `/DP` (Did Print).
+    ///
+    /// At most one script can be attached per event; calling this
+    /// setter again with the same event overwrites the earlier
+    /// script. The `source` is byte-passthrough — see
+    /// [`Metadata::document_javascript`] for the escaping contract.
+    pub fn document_event_script(
+        mut self,
+        event: DocumentEvent,
+        source: impl Into<String>,
+    ) -> Self {
+        let source = source.into();
+        self.document_event_scripts.retain(|(existing, _)| *existing != event);
+        self.document_event_scripts.push((event, source));
         self
     }
 
@@ -622,6 +731,126 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
         second: Some(datetime.second.unwrap_or(0)),
         timezone,
     }
+}
+
+/// `/OpenAction` document action (ISO 32000-2 §7.7.2 Table 29).
+///
+/// Two flavours are exposed:
+///
+/// - [`OpenAction::go_to_page_with_zoom`] — the direct-link
+///   `[<page-ref> <destination>]` form serialised as a single-line
+///   array entry on the catalogue dictionary.
+/// - [`OpenAction::named`] — the named-action form serialised as
+///   a `<< /S /Named /N /<NamedAction> >>` dictionary. Used to
+///   trigger viewer-side commands such as the print dialog on
+///   document open (ISO 32000-2 §12.6.4.9 Table 200).
+#[derive(Copy, Clone, Debug)]
+pub enum OpenAction {
+    /// Direct-link destination — opens `page_index` (0-indexed)
+    /// at the given destination flavour. Resolved against the
+    /// document's `PageInfo` table at serialise time; an
+    /// out-of-range index panics in the same way `XyzDestination`
+    /// does.
+    GoToPage {
+        /// 0-indexed page the viewer should open on.
+        page_index: usize,
+        /// Destination flavour.
+        zoom: OpenZoom,
+    },
+    /// Named action — opens the document and immediately
+    /// dispatches a viewer-side command (ISO 32000-2 §12.6.4.12,
+    /// Table 215 (names) / Table 216 (entries)).
+    Named(NamedAction),
+}
+
+impl OpenAction {
+    /// Build an `/OpenAction` direct-link entry that opens
+    /// `page_index` (0-indexed) at the given destination flavour.
+    pub fn go_to_page_with_zoom(page_index: usize, zoom: OpenZoom) -> Self {
+        Self::GoToPage { page_index, zoom }
+    }
+
+    /// Build an `/OpenAction` named-action entry that dispatches
+    /// `action` on document open (ISO 32000-2 §12.6.4.12,
+    /// Table 215 (names) / Table 216 (entries)).
+    ///
+    /// The most common use is [`NamedAction::Print`] to raise the
+    /// viewer's print dialog immediately on document open.
+    pub fn named(action: NamedAction) -> Self {
+        Self::Named(action)
+    }
+}
+
+/// Named-action targets for [`OpenAction::Named`] and other
+/// `/Type /Action /S /Named` slots (ISO 32000-2 §12.6.4.12,
+/// Table 215 (names) / Table 216 (entries)).
+///
+/// The PDF spec defines four standard named actions (`NextPage`,
+/// `PrevPage`, `FirstPage`, `LastPage`); krilla emits those plus the
+/// non-standard `/Print`. Per the Table 215 NOTE, any document using
+/// a non-standard named action is not portable, so `Print` may be
+/// ignored by conforming readers that do not recognise it. Each
+/// variant serialises to the matching `/N` name.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NamedAction {
+    /// `/N /NextPage` — advance to the next page.
+    NextPage,
+    /// `/N /PrevPage` — return to the previous page.
+    PrevPage,
+    /// `/N /FirstPage` — jump to the first page.
+    FirstPage,
+    /// `/N /LastPage` — jump to the last page.
+    LastPage,
+    /// `/N /Print` — raise the viewer's print dialog. Typically
+    /// paired with [`OpenAction::named`] to prompt printing on
+    /// document open.
+    Print,
+}
+
+impl NamedAction {
+    pub(crate) fn to_name(self) -> Name<'static> {
+        match self {
+            NamedAction::NextPage => Name(b"NextPage"),
+            NamedAction::PrevPage => Name(b"PrevPage"),
+            NamedAction::FirstPage => Name(b"FirstPage"),
+            NamedAction::LastPage => Name(b"LastPage"),
+            NamedAction::Print => Name(b"Print"),
+        }
+    }
+}
+
+/// Destination flavour for `/OpenAction` (ISO 32000-2 §12.3.2).
+///
+/// Each variant maps onto one of the eight destination arrays the
+/// PDF spec accepts in this slot:
+/// `Xyz(zoom)` → `[<page> /XYZ null null <zoom>]`;
+/// `FitPage` → `[<page> /Fit]`;
+/// `FitHorizontalToWidth` → `[<page> /FitH null]`;
+/// `FitVerticalToHeight` → `[<page> /FitV null]`;
+/// `FitBoundingBox` → `[<page> /FitB]`;
+/// `FitBoundingBoxHorizontal` → `[<page> /FitBH null]`;
+/// `FitBoundingBoxVertical` → `[<page> /FitBV null]`.
+#[derive(Copy, Clone, Debug)]
+pub enum OpenZoom {
+    /// `/XYZ null null <zoom>` — open at an explicit zoom factor.
+    /// `1.0` = 100 %. A zoom of `0` is equivalent to `null` (retain
+    /// the current magnification) per Table 149; negative values are
+    /// unspecified, so callers should pass a positive factor or `0`.
+    Xyz(f32),
+    /// `/Fit` — fit the entire page into the viewer window.
+    FitPage,
+    /// `/FitH null` — fit the page's width to the window; vertical
+    /// position chosen by the viewer.
+    FitHorizontalToWidth,
+    /// `/FitV null` — fit the page's height to the window;
+    /// horizontal position chosen by the viewer.
+    FitVerticalToHeight,
+    /// `/FitB` — fit the page's bounding box into the window.
+    FitBoundingBox,
+    /// `/FitBH null` — fit the bounding-box width to the window.
+    FitBoundingBoxHorizontal,
+    /// `/FitBV null` — fit the bounding-box height to the window.
+    FitBoundingBoxVertical,
 }
 
 /// The main text direction of the document.

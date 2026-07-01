@@ -125,7 +125,12 @@ pub enum TagKind {
     ///
     /// Providing `alt_text` is required in some export modes, like for example PDF/UA-1.
     Formula(Tag<kind::Formula>),
-    /// An interactive form field.
+    /// A form structure type (ISO 32000-2 §14.8.4.4) — wraps an interactive
+    /// or non-interactive form control. The PDF `/PrintField` attribute
+    /// owner attaches metadata that PDF/UA-1 (§7.18) / PDF/UA-2 (§8.13)
+    /// rely on to expose role, checked-state, and accessible-name
+    /// information for non-interactive form controls printed to PDF
+    /// (ISO 32000-2 §14.7.4.4 Table 359, "PrintField" attribute owner).
     Form(Tag<kind::Form>),
     /// Non-structural element. A grouping element having no inherent structural significance;
     /// it serves solely for grouping purposes.
@@ -383,6 +388,28 @@ impl TagKind {
     /// The column span of this table cell.
     pub fn col_span(&self) -> Option<NonZeroU32> {
         self.as_any().col_span()
+    }
+
+    /// The PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn role(&self) -> Option<FormFieldRole> {
+        self.as_any().role()
+    }
+
+    /// The PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn checked_state(&self) -> Option<FormFieldState> {
+        self.as_any().checked_state()
+    }
+
+    /// The PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    pub fn name(&self) -> Option<&str> {
+        self.as_any().name()
     }
 
     /// The placement.
@@ -746,6 +773,23 @@ impl AnyTag {
     }
 
     #[inline(always)]
+    fn get_form(&self, ordinal: usize) -> Option<&FormAttr> {
+        self.attrs.get(ordinal).map(Attr::unwrap_form)
+    }
+
+    #[allow(unused)]
+    #[inline(always)]
+    fn set_form(&mut self, attr: FormAttr) {
+        self.attrs.set(Attr::Form(attr));
+    }
+
+    #[allow(unused)]
+    #[inline(always)]
+    fn set_or_remove_form(&mut self, ordinal: usize, attr: Option<FormAttr>) {
+        self.attrs.set_or_remove(ordinal, attr.map(Attr::Form));
+    }
+
+    #[inline(always)]
     fn get_layout(&self, ordinal: usize) -> Option<&LayoutAttr> {
         self.attrs.get(ordinal).map(Attr::unwrap_layout)
     }
@@ -899,6 +943,28 @@ impl AnyTag {
     /// The column span of this table cell.
     pub fn col_span(&self) -> Option<NonZeroU32> {
         self.get_table(TableAttr::COL_SPAN).map(TableAttr::unwrap_col_span)
+    }
+
+    /// The PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn role(&self) -> Option<FormFieldRole> {
+        self.get_form(FormAttr::ROLE).map(FormAttr::unwrap_role)
+    }
+
+    /// The PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn checked_state(&self) -> Option<FormFieldState> {
+        self.get_form(FormAttr::CHECKED).map(FormAttr::unwrap_checked_state)
+    }
+
+    /// The PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    pub fn name(&self) -> Option<&str> {
+        self.get_form(FormAttr::NAME).map(FormAttr::unwrap_name)
     }
 
     /// The placement.
@@ -1713,7 +1779,12 @@ pub mod kind {
     #[derive(Clone, Debug, PartialEq)]
     pub struct Formula;
 
-    /// An interactive form field.
+    /// A form structure type (ISO 32000-2 §14.8.4.4) — wraps an interactive
+    /// or non-interactive form control. The PDF `/PrintField` attribute
+    /// owner attaches metadata that PDF/UA-1 (§7.18) / PDF/UA-2 (§8.13)
+    /// rely on to expose role, checked-state, and accessible-name
+    /// information for non-interactive form controls printed to PDF
+    /// (ISO 32000-2 §14.7.4.4 Table 359, "PrintField" attribute owner).
     #[derive(Clone, Debug, PartialEq)]
     pub struct Form;
 
@@ -4151,9 +4222,83 @@ impl From<Tag<kind::Form>> for TagKind {
     }
 }
 impl Tag<kind::Form> {
-    /// An interactive form field.
+    /// A form structure type (ISO 32000-2 §14.8.4.4) — wraps an interactive
+    /// or non-interactive form control. The PDF `/PrintField` attribute
+    /// owner attaches metadata that PDF/UA-1 (§7.18) / PDF/UA-2 (§8.13)
+    /// rely on to expose role, checked-state, and accessible-name
+    /// information for non-interactive form controls printed to PDF
+    /// (ISO 32000-2 §14.7.4.4 Table 359, "PrintField" attribute owner).
     #[allow(non_upper_case_globals)]
     pub const Form: Tag<kind::Form> = Tag::new();
+
+    /// The PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn role(&self) -> Option<FormFieldRole> {
+        self.inner.get_form(FormAttr::ROLE).map(FormAttr::unwrap_role)
+    }
+
+    /// Set the PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn set_role(&mut self, role: Option<FormFieldRole>) {
+        self.inner.set_or_remove_form(FormAttr::ROLE, role.map(FormAttr::Role));
+    }
+
+    /// Set the PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn with_role(mut self, role: Option<FormFieldRole>) -> Self {
+        self.set_role(role);
+        self
+    }
+
+    /// The PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn checked_state(&self) -> Option<FormFieldState> {
+        self.inner.get_form(FormAttr::CHECKED).map(FormAttr::unwrap_checked_state)
+    }
+
+    /// Set the PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn set_checked_state(&mut self, checked_state: Option<FormFieldState>) {
+        self.inner.set_or_remove_form(FormAttr::CHECKED, checked_state.map(FormAttr::Checked));
+    }
+
+    /// Set the PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    pub fn with_checked_state(mut self, checked_state: Option<FormFieldState>) -> Self {
+        self.set_checked_state(checked_state);
+        self
+    }
+
+    /// The PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    pub fn name(&self) -> Option<&str> {
+        self.inner.get_form(FormAttr::NAME).map(FormAttr::unwrap_name)
+    }
+
+    /// Set the PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.inner.set_or_remove_form(FormAttr::NAME, name.map(FormAttr::Name));
+    }
+
+    /// Set the PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    pub fn with_name(mut self, name: Option<String>) -> Self {
+        self.set_name(name);
+        self
+    }
 }
 
 impl From<Tag<kind::NonStruct>> for TagKind {
@@ -4246,6 +4391,7 @@ pub(crate) enum Attr {
     Struct(StructAttr),
     List(ListAttr),
     Table(TableAttr),
+    Form(FormAttr),
     Layout(LayoutAttr),
 }
 
@@ -4276,6 +4422,14 @@ impl Attr {
         }
 
         #[inline(always)]
+        fn unwrap_form(&self) -> &FormAttr {
+            match self {
+                Self::Form(attr) => attr,
+                _ => unreachable!(),
+            }
+        }
+
+        #[inline(always)]
         fn unwrap_layout(&self) -> &LayoutAttr {
             match self {
                 Self::Layout(attr) => attr,
@@ -4289,6 +4443,7 @@ impl Ordinal for Attr {
             Self::Struct(a) => a.ordinal(),
             Self::List(a) => a.ordinal(),
             Self::Table(a) => a.ordinal(),
+            Self::Form(a) => a.ordinal(),
             Self::Layout(a) => a.ordinal(),
         }
     }
@@ -4502,6 +4657,63 @@ impl Ordinal for TableAttr {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) enum FormAttr {
+    /// The PDF `/Role` entry on the `/PrintField` attribute owner — kind
+    /// of non-interactive form control (push-button, checkbox, radio
+    /// button, text field, list box). ISO 32000-2 §14.7.4.4 Table 359.
+    Role(FormFieldRole),
+    /// The PDF `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry on the
+    /// `/PrintField` attribute owner — checked-state of a checkbox or
+    /// radio button form control. ISO 32000-2 §14.7.4.4 Table 359.
+    Checked(FormFieldState),
+    /// The PDF `/Desc` entry on the `/PrintField` attribute owner —
+    /// accessible descriptive name of the form control. PDF/UA-1 §7.18 /
+    /// PDF/UA-2 §8.13 require this on non-interactive form controls so
+    /// screen readers can announce a meaningful label.
+    Name(String),
+}
+
+impl FormAttr {
+    pub(crate) const ROLE: usize = 13;
+    pub(crate) const CHECKED: usize = 14;
+    pub(crate) const NAME: usize = 15;
+
+        #[inline(always)]
+        fn unwrap_role(&self) -> FormFieldRole {
+            match self {
+                Self::Role(val) => *val,
+                _ => unreachable!(),
+            }
+        }
+
+        #[inline(always)]
+        fn unwrap_checked_state(&self) -> FormFieldState {
+            match self {
+                Self::Checked(val) => *val,
+                _ => unreachable!(),
+            }
+        }
+
+        #[inline(always)]
+        fn unwrap_name(&self) -> &str {
+            match self {
+                Self::Name(val) => val.as_ref(),
+                _ => unreachable!(),
+            }
+        }
+}
+
+impl Ordinal for FormAttr {
+    fn ordinal(&self) -> usize {
+        match self {
+            Self::Role(_) => Self::ROLE,
+            Self::Checked(_) => Self::CHECKED,
+            Self::Name(_) => Self::NAME,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum LayoutAttr {
     /// The placement.
     Placement(Placement),
@@ -4568,36 +4780,36 @@ pub(crate) enum LayoutAttr {
 }
 
 impl LayoutAttr {
-    pub(crate) const PLACEMENT: usize = 13;
-    pub(crate) const WRITING_MODE: usize = 14;
-    pub(crate) const B_BOX: usize = 15;
-    pub(crate) const WIDTH: usize = 16;
-    pub(crate) const HEIGHT: usize = 17;
-    pub(crate) const BACKGROUND_COLOR: usize = 18;
-    pub(crate) const BORDER_COLOR: usize = 19;
-    pub(crate) const BORDER_STYLE: usize = 20;
-    pub(crate) const BORDER_THICKNESS: usize = 21;
-    pub(crate) const PADDING: usize = 22;
-    pub(crate) const COLOR: usize = 23;
-    pub(crate) const SPACE_BEFORE: usize = 24;
-    pub(crate) const SPACE_AFTER: usize = 25;
-    pub(crate) const START_INDENT: usize = 26;
-    pub(crate) const END_INDENT: usize = 27;
-    pub(crate) const TEXT_INDENT: usize = 28;
-    pub(crate) const TEXT_ALIGN: usize = 29;
-    pub(crate) const BLOCK_ALIGN: usize = 30;
-    pub(crate) const INLINE_ALIGN: usize = 31;
-    pub(crate) const TABLE_BORDER_STYLE: usize = 32;
-    pub(crate) const TABLE_PADDING: usize = 33;
-    pub(crate) const BASELINE_SHIFT: usize = 34;
-    pub(crate) const LINE_HEIGHT: usize = 35;
-    pub(crate) const TEXT_DECORATION_COLOR: usize = 36;
-    pub(crate) const TEXT_DECORATION_THICKNESS: usize = 37;
-    pub(crate) const TEXT_DECORATION_TYPE: usize = 38;
-    pub(crate) const GLYPH_ORIENTATION_VERTICAL: usize = 39;
-    pub(crate) const COLUMN_COUNT: usize = 40;
-    pub(crate) const COLUMN_GAP: usize = 41;
-    pub(crate) const COLUMN_WIDTHS: usize = 42;
+    pub(crate) const PLACEMENT: usize = 16;
+    pub(crate) const WRITING_MODE: usize = 17;
+    pub(crate) const B_BOX: usize = 18;
+    pub(crate) const WIDTH: usize = 19;
+    pub(crate) const HEIGHT: usize = 20;
+    pub(crate) const BACKGROUND_COLOR: usize = 21;
+    pub(crate) const BORDER_COLOR: usize = 22;
+    pub(crate) const BORDER_STYLE: usize = 23;
+    pub(crate) const BORDER_THICKNESS: usize = 24;
+    pub(crate) const PADDING: usize = 25;
+    pub(crate) const COLOR: usize = 26;
+    pub(crate) const SPACE_BEFORE: usize = 27;
+    pub(crate) const SPACE_AFTER: usize = 28;
+    pub(crate) const START_INDENT: usize = 29;
+    pub(crate) const END_INDENT: usize = 30;
+    pub(crate) const TEXT_INDENT: usize = 31;
+    pub(crate) const TEXT_ALIGN: usize = 32;
+    pub(crate) const BLOCK_ALIGN: usize = 33;
+    pub(crate) const INLINE_ALIGN: usize = 34;
+    pub(crate) const TABLE_BORDER_STYLE: usize = 35;
+    pub(crate) const TABLE_PADDING: usize = 36;
+    pub(crate) const BASELINE_SHIFT: usize = 37;
+    pub(crate) const LINE_HEIGHT: usize = 38;
+    pub(crate) const TEXT_DECORATION_COLOR: usize = 39;
+    pub(crate) const TEXT_DECORATION_THICKNESS: usize = 40;
+    pub(crate) const TEXT_DECORATION_TYPE: usize = 41;
+    pub(crate) const GLYPH_ORIENTATION_VERTICAL: usize = 42;
+    pub(crate) const COLUMN_COUNT: usize = 43;
+    pub(crate) const COLUMN_GAP: usize = 44;
+    pub(crate) const COLUMN_WIDTHS: usize = 45;
 
         #[inline(always)]
         fn unwrap_placement(&self) -> Placement {

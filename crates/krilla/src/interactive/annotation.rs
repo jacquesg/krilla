@@ -8,6 +8,9 @@
 //! - [`TextAnnotation`]: sticky-note style comments (ISO 32000-2 §12.5.6.4).
 //! - [`MarkupAnnotation`]: highlight / underline / strike-out / squiggly markup
 //!   over a region of page content (ISO 32000-2 §12.5.6.10).
+//! - [`FileAttachmentAnnotation`]: per-page file-attachment annotations
+//!   (ISO 32000-2 §12.5.6.15) that pin an [`EmbeddedFile`] to a page
+//!   rectangle and display one of the predefined `/Name` icons.
 //! - [`WidgetAnnotation`]: AcroForm widget annotations for interactive form
 //!   fields — text inputs, buttons (checkbox / radio / pushbutton) and choice
 //!   fields (combo / list) per ISO 32000-2 §12.7.
@@ -25,15 +28,296 @@ use pdf_writer::types::{AnnotationFlags, FieldFlags};
 use pdf_writer::{Chunk, Finish, Name, Ref, Str, TextStr};
 
 use crate::chunk_container::ChunkContainer;
-use crate::color::Color;
+use crate::color::{Color, RegularColor};
 use crate::configure::{PdfVersion, ValidationError};
 use crate::error::KrillaResult;
 use crate::geom::{Quadrilateral, Rect};
 use crate::interactive::action::Action;
 use crate::interactive::destination::Destination;
+use crate::interchange::embed::EmbeddedFile;
 use crate::page::page_root_transform;
 use crate::serialize::SerializeContext;
 use crate::surface::Location;
+
+/// `/MK /R` rotation entry for an AcroForm widget annotation per ISO
+/// 32000-2 §12.5.6.19 Table 192.
+///
+/// Encodes the integer the spec admits (a multiple of 90 in
+/// `0..360`). `None` rotation is the default and the absent state on
+/// the wire — when the embedder selects `None`, krilla omits `/R`
+/// from the `/MK` dictionary so the viewer applies its default
+/// orientation. The three rotated states map to the explicit integer
+/// the spec carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Rotation {
+    /// 90° counter-clockwise.
+    Quarter,
+    /// 180° (upside-down).
+    Half,
+    /// 270° counter-clockwise (equivalently 90° clockwise).
+    ThreeQuarter,
+}
+
+impl Rotation {
+    /// Return the integer encoding the PDF `/MK /R` entry uses
+    /// (90 / 180 / 270 — multiples of 90 per ISO 32000-2 §12.5.6.19).
+    #[inline]
+    pub fn degrees(self) -> i32 {
+        match self {
+            Rotation::Quarter => 90,
+            Rotation::Half => 180,
+            Rotation::ThreeQuarter => 270,
+        }
+    }
+}
+
+/// `/MK /IF /SW` — when the icon scales relative to the widget rect
+/// (ISO 32000-2 §12.5.6.19 Table 250). Together with [`ScaleType`]
+/// the keyword determines the conditional logic the viewer uses
+/// before applying the scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScaleWhen {
+    /// `/SW /A` — always scale the icon (default).
+    #[default]
+    Always,
+    /// `/SW /B` — scale only when the icon is larger than the
+    /// annotation rectangle.
+    ContentBiggerThanRect,
+    /// `/SW /S` — scale only when the icon is smaller than the
+    /// annotation rectangle.
+    ContentSmallerThanRect,
+    /// `/SW /N` — never scale the icon.
+    Never,
+}
+
+impl ScaleWhen {
+    /// The single-byte name the PDF `/IF /SW` entry uses (ISO
+    /// 32000-2 §12.5.6.19 Table 250).
+    #[inline]
+    pub fn to_pdf_name(self) -> &'static [u8] {
+        match self {
+            ScaleWhen::Always => b"A",
+            ScaleWhen::ContentBiggerThanRect => b"B",
+            ScaleWhen::ContentSmallerThanRect => b"S",
+            ScaleWhen::Never => b"N",
+        }
+    }
+}
+
+/// `/MK /IF /S` — how the icon scales when [`ScaleWhen`] admits
+/// scaling (ISO 32000-2 §12.5.6.19 Table 250).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ScaleType {
+    /// `/S /A` — anamorphic scaling: fill the annotation rectangle
+    /// without preserving the icon's aspect ratio.
+    Anamorphic,
+    /// `/S /P` — proportional scaling: preserve the icon's aspect
+    /// ratio and centre it inside the annotation rectangle (the
+    /// `/A` alignment array refines the placement). Per ISO 32000-2
+    /// §12.5.6.19 Table 250 this is the `/S` default.
+    #[default]
+    Proportional,
+}
+
+impl ScaleType {
+    /// The single-byte name the PDF `/IF /S` entry uses (ISO
+    /// 32000-2 §12.5.6.19 Table 250).
+    #[inline]
+    pub fn to_pdf_name(self) -> &'static [u8] {
+        match self {
+            ScaleType::Anamorphic => b"A",
+            ScaleType::Proportional => b"P",
+        }
+    }
+}
+
+/// `/MK /IF` — icon fit dictionary per ISO 32000-2 §12.5.6.19
+/// Table 250. Controls how a pushbutton widget's icon image
+/// (`/I`, `/RI`, `/IX`) is scaled and positioned inside the
+/// annotation rectangle.
+///
+/// `scale_when` selects the predicate the viewer evaluates;
+/// `scale_type` selects how the icon is scaled when the predicate
+/// admits scaling; `align_x` / `align_y` are the alignment
+/// percentages (`[0.0, 1.0]`) that position the icon inside the
+/// rectangle when proportional scaling leaves slack on one axis;
+/// `fit_bounds` (`/FB`) selects whether the button appearance is
+/// scaled to fit within the full annotation bounds ignoring the
+/// border line width (`true`) or within the border-reduced drawing
+/// area (`false`, the default); it applies to both anamorphic and
+/// proportional scaling.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IconFit {
+    /// `/SW` — when to scale.
+    pub scale_when: ScaleWhen,
+    /// `/S` — how to scale.
+    pub scale_type: ScaleType,
+    /// `/A[0]` — horizontal alignment in `[0.0, 1.0]`. `0.5` centres
+    /// the icon; `0.0` left-aligns; `1.0` right-aligns.
+    pub align_x: f32,
+    /// `/A[1]` — vertical alignment in `[0.0, 1.0]`. `0.5` centres
+    /// the icon; `0.0` bottom-aligns; `1.0` top-aligns.
+    pub align_y: f32,
+    /// `/FB` — if `true`, the button appearance is scaled to fit
+    /// within the annotation bounds without accounting for the border
+    /// line width; if `false` (the default), the border line width is
+    /// taken into account (icon fits within the border-reduced drawing
+    /// area).
+    pub fit_bounds: bool,
+}
+
+impl Default for IconFit {
+    fn default() -> Self {
+        // Spec defaults per ISO 32000-2 §12.5.6.19 Table 250: `/SW`
+        // defaults to `A` (always scale), `/S` defaults to `P`
+        // (proportional scaling — preserve the icon's aspect ratio),
+        // and `/A` defaults to `[0.5 0.5]`.
+        Self {
+            scale_when: ScaleWhen::Always,
+            scale_type: ScaleType::Proportional,
+            align_x: 0.5,
+            align_y: 0.5,
+            fit_bounds: false,
+        }
+    }
+}
+
+/// `/MK /TP` — text position relative to the icon for a pushbutton
+/// widget (ISO 32000-2 §12.5.6.19 Table 192). The default
+/// [`TextPosition::CaptionOnly`] matches the spec default when `/TP`
+/// is absent — the caption fills the button and the icon (if any)
+/// is suppressed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextPosition {
+    /// `/TP 0` — caption only; icon (if any) is suppressed.
+    #[default]
+    CaptionOnly,
+    /// `/TP 1` — icon only; caption (if any) is suppressed.
+    IconOnly,
+    /// `/TP 2` — caption below the icon.
+    CaptionBelowIcon,
+    /// `/TP 3` — caption above the icon.
+    CaptionAboveIcon,
+    /// `/TP 4` — caption to the right of the icon.
+    CaptionRightOfIcon,
+    /// `/TP 5` — caption to the left of the icon.
+    CaptionLeftOfIcon,
+    /// `/TP 6` — caption overlaid (centred on) the icon.
+    CaptionOverlaidOnIcon,
+}
+
+impl TextPosition {
+    /// The integer the PDF `/TP` entry carries (ISO 32000-2
+    /// §12.5.6.19 Table 192).
+    #[inline]
+    pub fn to_pdf_integer(self) -> i32 {
+        match self {
+            TextPosition::CaptionOnly => 0,
+            TextPosition::IconOnly => 1,
+            TextPosition::CaptionBelowIcon => 2,
+            TextPosition::CaptionAboveIcon => 3,
+            TextPosition::CaptionRightOfIcon => 4,
+            TextPosition::CaptionLeftOfIcon => 5,
+            TextPosition::CaptionOverlaidOnIcon => 6,
+        }
+    }
+}
+
+/// `/MK` (Appearance Characteristics) dictionary entries for an
+/// AcroForm widget annotation per ISO 32000-2 §12.5.6.19 Table 192
+/// and §12.7.4.3.
+///
+/// The `/MK` dictionary supplements the field's appearance with the
+/// optional widget-level decorations the spec defines — border /
+/// background colours, rotation, the pushbutton caption family
+/// (down / rollover), the rollover / alternate icon entries
+/// (`/RI`, `/IX`), the icon fit dictionary (`/IF`), and the text
+/// position keyword (`/TP`) — in addition to the icon (`/I`) and
+/// caption (`/CA`) entries the existing krilla surface already
+/// populates.
+///
+/// `border_color` and `background_color` accept any
+/// [`Color::Regular`] value the embedder can construct; the
+/// serialiser projects the colour onto the matching `/BC` / `/BG`
+/// array layout (length 1 for DeviceGray, 3 for DeviceRGB, 4 for
+/// DeviceCMYK) per Table 192. Wide-gamut ICC paints written into
+/// `/MK` collapse to a three-component DeviceRGB array because
+/// `/MK` colours are device-space only per the same table; the
+/// embedder is expected to author device-space colours when this
+/// matters for round-trip preservation.
+///
+/// `rollover_caption`, `down_caption`, `rollover_icon`,
+/// `alternate_icon`, `icon_fit`, and `text_position` are only
+/// meaningful for pushbutton widgets (ISO 32000-2 §12.5.6.19 Table
+/// 192: `/RC`, `/AC`, `/RI`, `/IX`, `/IF`, `/TP` apply only to
+/// widget annotations with field `/FT /Btn` and the pushbutton flag
+/// set). krilla writes them on any widget the
+/// `AppearanceCharacteristics` is attached to; viewers that read
+/// `/MK` on a non-button widget silently ignore the surplus
+/// entries.
+#[derive(Debug, Clone, Default)]
+pub struct AppearanceCharacteristics {
+    /// `/BC` — border colour. `None` omits the entry; the viewer
+    /// then applies its default (typically transparent / no
+    /// border).
+    pub border_color: Option<Color>,
+    /// `/BG` — background colour. `None` omits the entry; the
+    /// viewer applies no background fill.
+    pub background_color: Option<Color>,
+    /// `/R` — widget rotation per [`Rotation`]. `None` omits the
+    /// entry and the viewer applies the default orientation.
+    pub rotation: Option<Rotation>,
+    /// `/RC` — rollover caption (pushbutton only); displayed when
+    /// the pointer hovers over the widget. `None` omits the entry.
+    pub rollover_caption: Option<String>,
+    /// `/AC` — alternate (down) caption (pushbutton only);
+    /// displayed while the user is clicking the widget. `None`
+    /// omits the entry.
+    pub down_caption: Option<String>,
+    /// `/RI` — rollover icon (pushbutton only); the image the
+    /// viewer displays when the pointer is over the widget but the
+    /// button is not depressed. `None` omits the entry; only
+    /// available when the `raster-images` feature is enabled.
+    #[cfg(feature = "raster-images")]
+    pub rollover_icon: Option<crate::graphics::image::Image>,
+    /// `/IX` — alternate (down) icon (pushbutton only); the image
+    /// the viewer displays while the button is depressed. `None`
+    /// omits the entry; only available when the `raster-images`
+    /// feature is enabled.
+    #[cfg(feature = "raster-images")]
+    pub alternate_icon: Option<crate::graphics::image::Image>,
+    /// `/IF` — icon fit dictionary (pushbutton only); controls how
+    /// the icon images (`/I`, `/RI`, `/IX`) are scaled and
+    /// positioned inside the annotation rectangle. `None` omits the
+    /// entry; the viewer then falls back to its anamorphic-scaling
+    /// default.
+    pub icon_fit: Option<IconFit>,
+    /// `/TP` — text position keyword (pushbutton only); the spec
+    /// admits the absent case to mean [`TextPosition::CaptionOnly`].
+    /// `None` omits the entry; the viewer falls back to its
+    /// caption-only default.
+    pub text_position: Option<TextPosition>,
+}
+
+impl AppearanceCharacteristics {
+    /// Whether any entry this structure contributes *directly* to the
+    /// widget's `/MK` dictionary is populated. `rollover_icon` and
+    /// `alternate_icon` are deliberately excluded: they surface only as
+    /// the `/RI` / `/IX` Form-XObject references on a pushbutton widget
+    /// (resolved through a separate channel), so a non-button widget
+    /// carrying only those must not open an otherwise-empty `/MK`
+    /// dictionary. Used to skip the `/MK` extension when no writable
+    /// entry is set.
+    fn has_mk_dict_entry(&self) -> bool {
+        self.border_color.is_some()
+            || self.background_color.is_some()
+            || self.rotation.is_some()
+            || self.rollover_caption.is_some()
+            || self.down_caption.is_some()
+            || self.icon_fit.is_some()
+            || self.text_position.is_some()
+    }
+}
 
 /// A single Form XObject the widget appearance pipeline emits as an
 /// indirect object alongside the annotation dict. The widget's `/AP`
@@ -51,6 +335,20 @@ pub(crate) struct AppearanceStream {
     pub(crate) uses_helvetica: bool,
 }
 
+/// A pushbutton icon-appearance Form XObject — ISO 32000-2 §12.5.6.19
+/// Table 192 `/MK /I`. Wraps a single registered [`crate::graphics::
+/// image::Image`] (via its already-resolved indirect ref) inside a
+/// widget-local Form XObject whose content stream stretches the image
+/// to fill `[0 0 bbox_w bbox_h]`. The XObject's indirect reference
+/// becomes the `/MK /I` entry on the widget annotation; viewers draw
+/// the icon inside the widget's rectangle.
+pub(crate) struct IconAppearanceXObject {
+    pub(crate) xobject_ref: Ref,
+    pub(crate) image_ref: Ref,
+    pub(crate) bbox_w: f32,
+    pub(crate) bbox_h: f32,
+}
+
 /// The set of Form XObjects produced by widget appearance generation
 /// for one annotation. Consumed by [`Annotation::serialize`] after the
 /// annotation dict has been finalised — every stream becomes one
@@ -64,13 +362,71 @@ pub(crate) struct AppearanceJob {
     pub(crate) on: AppearanceStream,
     /// "Off" state stream — `Some` only for checkbox / radio.
     pub(crate) off: Option<AppearanceStream>,
+    /// Pushbutton icon-appearance Form XObjects. The `normal` slot
+    /// (`/MK /I`) is populated when the widget was decorated via
+    /// [`WidgetAnnotation::with_icon_appearance`]; the `rollover`
+    /// (`/MK /RI`) and `alternate` (`/MK /IX`) slots are populated
+    /// when the embedder authored
+    /// [`AppearanceCharacteristics::rollover_icon`] or
+    /// [`AppearanceCharacteristics::alternate_icon`].
+    pub(crate) icons: WidgetIconXObjects,
+}
+
+/// Pre-resolved indirect references to the embedded `Image` objects
+/// backing a widget annotation's `/MK /I`, `/MK /RI`, and `/MK /IX`
+/// entries. Resolved in [`Annotation::serialize`] before the annotation
+/// dict starts writing because `register_image` needs mutable access
+/// to the [`ChunkContainer`].
+#[derive(Default, Clone, Copy)]
+pub(crate) struct WidgetIconRefs {
+    /// `/MK /I` — normal-state icon image ref.
+    pub(crate) normal: Option<Ref>,
+    /// `/MK /RI` — rollover-state icon image ref.
+    pub(crate) rollover: Option<Ref>,
+    /// `/MK /IX` — alternate (down-state) icon image ref.
+    pub(crate) alternate: Option<Ref>,
+}
+
+impl WidgetIconRefs {
+    /// Whether every icon slot is `None` — used to short-circuit the
+    /// pushbutton arm's per-state Form XObject allocation when the
+    /// widget carries no icon.
+    fn is_empty(&self) -> bool {
+        self.normal.is_none() && self.rollover.is_none() && self.alternate.is_none()
+    }
+}
+
+/// The set of icon Form XObjects emitted by the pushbutton path —
+/// one per populated entry in [`WidgetIconRefs`]. Each Form XObject
+/// wraps the registered image and is referenced from the widget
+/// annotation's `/MK` dictionary at the corresponding key.
+#[derive(Default)]
+pub(crate) struct WidgetIconXObjects {
+    /// `/MK /I` icon Form XObject.
+    pub(crate) normal: Option<IconAppearanceXObject>,
+    /// `/MK /RI` icon Form XObject.
+    pub(crate) rollover: Option<IconAppearanceXObject>,
+    /// `/MK /IX` icon Form XObject.
+    pub(crate) alternate: Option<IconAppearanceXObject>,
 }
 
 /// An annotation.
 pub struct Annotation {
     pub(crate) annotation_type: AnnotationType,
     pub(crate) alt: Option<String>,
-    pub(crate) struct_parent: Option<i32>,
+    /// `/StructParent` key (PDF 1.3+, ISO 32000-2 §14.7.5.4 / ISO
+    /// 14289-1 §7.18.1). Populated automatically by
+    /// [`crate::page::Page::add_tagged_annotation`] when the annotation
+    /// participates in the structure tree; callers using the untagged
+    /// [`crate::page::Page::add_annotation`] entry point may set this
+    /// directly via [`Annotation::with_struct_parent`] when they have
+    /// allocated the struct-parent slot themselves. The field is also
+    /// exposed for `pub(crate)` mutation from the structure-tree
+    /// builder, which back-fills the value when the tag tree resolves
+    /// the annotation's `/StructElem` parent. Keeping the slot public
+    /// for read access lets embedders implementing their own structure
+    /// trees verify the wired value.
+    pub struct_parent: Option<i32>,
     pub(crate) location: Option<Location>,
 }
 
@@ -130,9 +486,55 @@ impl Annotation {
         }
     }
 
+    /// Create a new file-attachment annotation per ISO 32000-2
+    /// §12.5.6.15.
+    ///
+    /// The annotation pins an [`EmbeddedFile`] to a page rectangle and
+    /// displays one of the predefined `/Name` icons
+    /// ([`FileAttachmentIcon`]). When the user activates the icon a
+    /// conforming reader presents the embedded file for opening or
+    /// saving. The underlying file specification dictionary is
+    /// registered as an indirect object (and deduplicated by content
+    /// hash) so multiple annotations on the same payload share one
+    /// FileSpec.
+    ///
+    /// The alt text may be required by certain export profiles (e.g.
+    /// PDF/UA). See [`FileAttachmentAnnotation`] for the available
+    /// fields.
+    pub fn new_file_attachment(
+        annotation: FileAttachmentAnnotation,
+        alt_text: Option<String>,
+    ) -> Self {
+        Self {
+            annotation_type: AnnotationType::FileAttachment(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
+        self
+    }
+
+    /// Set the `/StructParent` entry — the integer key into the
+    /// document's `/StructTreeRoot /ParentTree` that resolves to the
+    /// structure element this annotation belongs to (ISO 32000-2
+    /// §14.7.5.4 / ISO 14289-1 §7.18.1). PDF/UA-1 requires every
+    /// annotation appearing inside a `/StructElem` to carry the
+    /// corresponding `/StructParent`; conforming readers thread the
+    /// reverse pointer to surface the annotation as an `OBJR` leaf
+    /// under the tag tree.
+    ///
+    /// Most callers obtain this value implicitly by calling
+    /// [`crate::page::Page::add_tagged_annotation`]; embedders that
+    /// allocate the slot themselves (e.g. when feeding a custom
+    /// structure-tree builder) may set it directly. Passing the value
+    /// twice is harmless — the later call wins.
+    pub fn with_struct_parent(mut self, struct_parent: i32) -> Self {
+        self.struct_parent = Some(struct_parent);
         self
     }
 }
@@ -174,6 +576,17 @@ impl From<WidgetAnnotation> for Annotation {
     fn from(value: WidgetAnnotation) -> Self {
         Self {
             annotation_type: AnnotationType::Widget(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<FileAttachmentAnnotation> for Annotation {
+    fn from(value: FileAttachmentAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::FileAttachment(value),
             alt: None,
             struct_parent: None,
             location: None,
@@ -265,14 +678,100 @@ impl Annotation {
             }
         }
 
+        // Pre-resolve any pushbutton icon-appearance image refs *before*
+        // the annotation dict starts writing — `register_image` needs
+        // mutable access to `chunk_container`, which the annotation
+        // dict's `&mut Chunk` would otherwise hold exclusively. The
+        // resulting `Ref`s are threaded into `serialize_type` so the
+        // widget's `/MK /I`, `/MK /RI`, and `/MK /IX` entries can name
+        // the freshly-registered images. krilla deduplicates by image
+        // hash, so multiple widgets sharing one `Image` clone resolve
+        // to the same indirect reference.
+        let widget_icon_refs: WidgetIconRefs = {
+            #[cfg(feature = "raster-images")]
+            {
+                // Only pushbutton widgets consume the `/MK /I`, `/RI`,
+                // `/IX` icon refs (the PushButton arm is the sole
+                // reader). Registering the images for any other field
+                // kind would emit orphaned XObjects that nothing
+                // references, so gate the whole block on the widget
+                // being a pushbutton and otherwise yield the default.
+                if let AnnotationType::Widget(w) = &self.annotation_type {
+                    let is_pushbutton = matches!(
+                        &w.field,
+                        WidgetField::Button(ButtonField {
+                            kind: ButtonKind::PushButton,
+                            ..
+                        })
+                    );
+                    if is_pushbutton {
+                        let normal = w
+                            .icon_image
+                            .as_ref()
+                            .map(|image| sc.register_image(chunk_container, image.clone()));
+                        let (rollover, alternate) = w
+                            .appearance_characteristics
+                            .as_ref()
+                            .map(|mk| {
+                                (
+                                    mk.rollover_icon.as_ref().map(|image| {
+                                        sc.register_image(chunk_container, image.clone())
+                                    }),
+                                    mk.alternate_icon.as_ref().map(|image| {
+                                        sc.register_image(chunk_container, image.clone())
+                                    }),
+                                )
+                            })
+                            .unwrap_or((None, None));
+                        WidgetIconRefs {
+                            normal,
+                            rollover,
+                            alternate,
+                        }
+                    } else {
+                        WidgetIconRefs::default()
+                    }
+                } else {
+                    WidgetIconRefs::default()
+                }
+            }
+            #[cfg(not(feature = "raster-images"))]
+            {
+                WidgetIconRefs::default()
+            }
+        };
+
+        // FileAttachment annotations need to register their
+        // [`EmbeddedFile`] *before* the annotation dict opens so the
+        // resulting `Ref` can be written into `/FS`. The embedded-file
+        // FileSpec is itself an indirect object that wants mutable
+        // access to `chunk_container`; the annotation dict otherwise
+        // borrows `chunk.non_stream.annotations` for the entire
+        // `serialize_type` call. Pre-resolve here so the borrow chain
+        // stays acyclic.
+        let file_spec_ref: Option<Ref> = match &self.annotation_type {
+            AnnotationType::FileAttachment(f) => {
+                Some(sc.register_cacheable(chunk_container, f.file.clone()))
+            }
+            _ => None,
+        };
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)
             .start::<pdf_writer::writers::Annotation>();
 
+        // Wire the pre-resolved FileSpec ref onto the annotation dict
+        // before delegating to `serialize_type`. The FileAttachment
+        // branch consumes the ref via `file_spec_ref` in its own
+        // closure; other annotation types ignore it.
+        if let Some(fs_ref) = file_spec_ref {
+            annotation.pair(Name(b"FS"), fs_ref);
+        }
+
         let appearance_job = self
             .annotation_type
-            .serialize_type(sc, &mut annotation, page_height)?;
+            .serialize_type(sc, &mut annotation, page_height, widget_icon_refs)?;
 
         // Link annotations get /F Print only when borderless (nothing visible
         // leaks into print) or when a validator forces it (PDF/A); a link with a
@@ -384,12 +883,78 @@ impl Annotation {
 /// referenced from the widget annotation's `/AP` entry. Each XObject
 /// carries a widget-local `/BBox` (`[0 0 w h]`) and a `/Resources`
 /// dict containing `/Font /Helv <helv_ref>` when the content stream
-/// references Helvetica.
+/// references Helvetica. When the widget carries a pushbutton
+/// icon-appearance (`/MK /I`), an additional Form XObject is emitted
+/// that wraps the registered image — its `/Resources /XObject /Im0`
+/// names the image ref and the content stream stretches it across the
+/// widget's bbox.
 fn emit_appearance_xobjects(chunk: &mut Chunk, job: AppearanceJob) {
     write_form_xobject(chunk, &job.on, job.helv_ref);
     if let Some(off) = job.off {
         write_form_xobject(chunk, &off, job.helv_ref);
     }
+    if let Some(icon) = job.icons.normal {
+        write_icon_form_xobject(chunk, &icon);
+    }
+    if let Some(icon) = job.icons.rollover {
+        write_icon_form_xobject(chunk, &icon);
+    }
+    if let Some(icon) = job.icons.alternate {
+        write_icon_form_xobject(chunk, &icon);
+    }
+}
+
+/// Build an [`IconAppearanceXObject`] when both the source image ref
+/// and an allocated Form XObject ref are present. Returns `None` when
+/// either is absent (i.e. the embedder did not author this icon
+/// slot).
+fn icon_appearance_xobject(
+    image_ref: Option<Ref>,
+    xobject_ref: Option<Ref>,
+    bbox_w: f32,
+    bbox_h: f32,
+) -> Option<IconAppearanceXObject> {
+    match (image_ref, xobject_ref) {
+        (Some(image_ref), Some(xobject_ref)) => Some(IconAppearanceXObject {
+            xobject_ref,
+            image_ref,
+            bbox_w,
+            bbox_h,
+        }),
+        _ => None,
+    }
+}
+
+/// Emit a pushbutton icon-appearance Form XObject. The content stream
+/// is `q <bbox_w> 0 0 <bbox_h> 0 0 cm /Im0 Do Q` — a single image draw
+/// stretched to fill the widget's bbox. `/Resources /XObject /Im0`
+/// names the registered image ref; the `/MK /I` entry on the widget
+/// dict references this Form XObject directly.
+fn write_icon_form_xobject(chunk: &mut Chunk, icon: &IconAppearanceXObject) {
+    use std::fmt::Write as _;
+    let mut content = String::with_capacity(48);
+    // The image's intrinsic coordinate system is `1 x 1`; the matrix
+    // scales it to fill `[0 0 bbox_w bbox_h]` so the icon stretches
+    // across the widget rectangle. Authors needing fit / preserve-
+    // aspect-ratio behaviour drive `/IF` via the embedder; krilla's
+    // current surface emits a bare image draw.
+    writeln!(
+        &mut content,
+        "q\n{:.4} 0 0 {:.4} 0 0 cm\n/Im0 Do\nQ",
+        icon.bbox_w, icon.bbox_h,
+    )
+    .unwrap();
+
+    let mut xobj = chunk.form_xobject(icon.xobject_ref, content.as_bytes());
+    xobj.bbox(pdf_writer::Rect::new(0.0, 0.0, icon.bbox_w, icon.bbox_h));
+    {
+        let mut resources = xobj.resources();
+        let mut xobjects = resources.x_objects();
+        xobjects.pair(Name(b"Im0"), icon.image_ref);
+        xobjects.finish();
+        resources.finish();
+    }
+    xobj.finish();
 }
 
 fn write_form_xobject(chunk: &mut Chunk, stream: &AppearanceStream, helv_ref: Ref) {
@@ -422,6 +987,8 @@ pub enum AnnotationType {
     Markup(MarkupAnnotation),
     /// A widget annotation (AcroForm interactive form field).
     Widget(WidgetAnnotation),
+    /// A file-attachment annotation (ISO 32000-2 §12.5.6.15).
+    FileAttachment(FileAttachmentAnnotation),
 }
 
 impl AnnotationType {
@@ -432,6 +999,7 @@ impl AnnotationType {
             AnnotationType::Text(t) => t.rect,
             AnnotationType::Markup(m) => m.rect,
             AnnotationType::Widget(w) => w.rect,
+            AnnotationType::FileAttachment(f) => f.rect,
         }
     }
 
@@ -447,6 +1015,8 @@ impl AnnotationType {
             AnnotationType::Text(t) => t.color.as_ref(),
             AnnotationType::Markup(m) => m.color.as_ref(),
             AnnotationType::Widget(_) => None,
+            // FileAttachment annotations carry no `/C` colour entry.
+            AnnotationType::FileAttachment(_) => None,
         }
     }
 
@@ -455,12 +1025,16 @@ impl AnnotationType {
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
+        widget_icon_refs: WidgetIconRefs,
     ) -> KrillaResult<Option<AppearanceJob>> {
         match self {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
             AnnotationType::Text(t) => t.serialize_type(sc, annotation, page_height),
             AnnotationType::Markup(m) => m.serialize_type(sc, annotation, page_height),
-            AnnotationType::Widget(w) => w.serialize_type(sc, annotation, page_height),
+            AnnotationType::Widget(w) => {
+                w.serialize_type(sc, annotation, page_height, widget_icon_refs)
+            }
+            AnnotationType::FileAttachment(f) => f.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -531,12 +1105,54 @@ impl LinkBorder {
     }
 }
 
+/// `/H` highlight mode on a [`LinkAnnotation`] (ISO 32000-2 §12.5.6.5
+/// Table 176, mirrored on widget annotations by ISO 32000-2 §12.5.6.19
+/// Table 191). Determines the visual effect the conforming reader
+/// applies while the user holds the pointer button over the annotation.
+///
+/// `/H` is optional per ISO 32000-2 Table 176 (default `/I` Invert);
+/// PDF/UA-1 §7.18.5 requires links to be tagged (ISO 32000-1
+/// 14.8.4.4.2, Link element) and to carry a `/Contents` alternate
+/// description (14.9.3), but imposes no `/H` requirement. Most viewers
+/// default to `/H /I` (Invert) when the entry is missing; krilla
+/// writes the explicit value when one is set, otherwise omits the
+/// entry and relies on the viewer default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum LinkHighlight {
+    /// `/H /N` — no highlighting effect.
+    None,
+    /// `/H /I` — invert the contents of the annotation rectangle.
+    /// Most PDF viewers treat this as the implicit default when the
+    /// `/H` entry is absent.
+    #[default]
+    Invert,
+    /// `/H /O` — invert the annotation's border (outline only).
+    Outline,
+    /// `/H /P` — display the annotation rectangle as if it had been
+    /// pushed below the surface of the page.
+    Push,
+}
+
+impl LinkHighlight {
+    /// Project onto the pdf-writer enum used by the `/H` writer.
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::HighlightEffect {
+        use pdf_writer::types::HighlightEffect;
+        match self {
+            Self::None => HighlightEffect::None,
+            Self::Invert => HighlightEffect::Invert,
+            Self::Outline => HighlightEffect::Outline,
+            Self::Push => HighlightEffect::Push,
+        }
+    }
+}
+
 /// A link annotation.
 pub struct LinkAnnotation {
     pub(crate) rect: Rect,
     pub(crate) quad_points: Option<Vec<Quadrilateral>>,
     pub(crate) target: Target,
     pub(crate) border: Option<LinkBorder>,
+    pub(crate) highlight: Option<LinkHighlight>,
 }
 
 impl LinkAnnotation {
@@ -550,6 +1166,7 @@ impl LinkAnnotation {
             quad_points: None,
             target,
             border: None,
+            highlight: None,
         }
     }
 
@@ -591,6 +1208,7 @@ impl LinkAnnotation {
             quad_points: Some(quad_points),
             target,
             border: None,
+            highlight: None,
         }
     }
 
@@ -601,6 +1219,17 @@ impl LinkAnnotation {
             border: Some(border),
             ..self
         }
+    }
+
+    /// Set the `/H` highlight mode (ISO 32000-2 §12.5.6.5 Table 176).
+    /// `/H` is optional (default `/I` Invert); PDF/UA-1 §7.18.5
+    /// requires links to be tagged and to carry a `/Contents`
+    /// alternate description, but imposes no `/H` requirement. When
+    /// unset, krilla omits the `/H` entry and viewers fall back to
+    /// their implicit default (`/I` Invert across most viewers).
+    pub fn with_highlight(mut self, highlight: LinkHighlight) -> Self {
+        self.highlight = Some(highlight);
+        self
     }
 
     fn serialize_type(
@@ -622,6 +1251,16 @@ impl LinkAnnotation {
             self.border.as_ref().map_or(0.0, |x| x.width),
             None,
         );
+
+        // ISO 32000-2 §12.5.6.5 `/H` — explicit highlight mode
+        // (Table 176, default `/I` Invert). krilla writes the
+        // explicit value when the embedder has called
+        // `with_highlight(...)`. Without an explicit value the entry
+        // is omitted and conforming readers default to `/H /I`
+        // (Invert).
+        if let Some(highlight) = self.highlight {
+            annotation.highlight(highlight.to_pdf());
+        }
 
         if let Some(border) = &self.border {
             write_color(annotation, &border.color);
@@ -1006,6 +1645,175 @@ impl MarkupAnnotation {
 
         if let Some(color) = &self.color {
             write_color(annotation, color);
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        Ok(None)
+    }
+}
+
+/// Icon glyph for a [`FileAttachmentAnnotation`] (`/Name` entry,
+/// ISO 32000-2 §12.5.6.15 Table 187). Viewers display the
+/// corresponding pre-defined glyph at the annotation rectangle;
+/// activating it opens or saves the embedded file.
+///
+/// The default ([`Self::PushPin`]) matches the ISO 32000-2
+/// "shall be one of" defaulting behaviour — when `/Name` is absent
+/// most viewers fall back to PushPin.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum FileAttachmentIcon {
+    /// `/Graph` — a small bar-chart icon.
+    Graph,
+    /// `/Paperclip` — a paperclip icon.
+    Paperclip,
+    /// `/PushPin` — a push-pin icon. Default.
+    #[default]
+    PushPin,
+    /// `/Tag` — a luggage-tag icon.
+    Tag,
+}
+
+impl FileAttachmentIcon {
+    fn to_pdf(self) -> pdf_writer::types::AnnotationIcon<'static> {
+        use pdf_writer::types::AnnotationIcon;
+        match self {
+            FileAttachmentIcon::Graph => AnnotationIcon::Graph,
+            FileAttachmentIcon::Paperclip => AnnotationIcon::Paperclip,
+            FileAttachmentIcon::PushPin => AnnotationIcon::PushPin,
+            FileAttachmentIcon::Tag => AnnotationIcon::Tag,
+        }
+    }
+}
+
+/// A file-attachment annotation per ISO 32000-2 §12.5.6.15.
+///
+/// File-attachment annotations pin an [`EmbeddedFile`] to a page
+/// rectangle and display one of the predefined `/Name` icons
+/// ([`FileAttachmentIcon`]). When the user activates the icon a
+/// conforming reader presents the embedded file for opening or
+/// saving.
+///
+/// The annotation's `/FS` entry is an indirect reference to a file
+/// specification dictionary; krilla registers the [`EmbeddedFile`]
+/// via [`crate::serialize::SerializeContext::register_cacheable`],
+/// so multiple annotations sharing one payload (same path / mime /
+/// data hash) dedupe onto a single FileSpec object. The annotation
+/// does NOT automatically participate in the document catalogue's
+/// `/Names /EmbeddedFiles` name tree — that channel is reserved for
+/// document-level attachments registered via
+/// [`crate::document::Document::embed_file`]. An author that wants
+/// both a document-level entry and a page-level annotation pointing
+/// at the same payload must call both APIs; the deduplication cache
+/// guarantees a single FileSpec dict.
+///
+/// PDF/A-1 (ISO 19005-1 §6.5.2) forbids the `FileAttachment`
+/// subtype outright; PDF/A-2 and later permit it. krilla emits the
+/// annotation under every non-PDF/A-1 validator; the rejection is
+/// documented for PDF/A-1 in `configure/PDF_A1.md` (no code-side
+/// block — the validator's `forbids_annotations` path is PDF/X-1a
+/// only, and PDF/A-1's rejection of FileAttachment is left to the
+/// embedder to enforce).
+///
+/// Build with [`FileAttachmentAnnotation::new`] and the chainable
+/// setter methods; wrap into an [`Annotation`] via
+/// [`Annotation::new_file_attachment`] or
+/// [`From<FileAttachmentAnnotation>`].
+pub struct FileAttachmentAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) file: EmbeddedFile,
+    pub(crate) icon: FileAttachmentIcon,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl FileAttachmentAnnotation {
+    /// Create a new file-attachment annotation with the given
+    /// bounding rectangle, embedded file and `/Name` icon.
+    ///
+    /// `rect` is in user-space (page) coordinates; krilla applies the
+    /// same page-root transform as the other annotation kinds. The
+    /// `file` is registered as a deduplicated indirect FileSpec
+    /// object at serialisation time.
+    pub fn new(rect: Rect, file: EmbeddedFile, icon: FileAttachmentIcon) -> Self {
+        Self {
+            rect,
+            file,
+            icon,
+            contents: None,
+            title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the pop-up shown when
+    /// the user hovers over or activates the annotation. If the
+    /// embedder also sets an `alt_text` on [`Annotation::new_file_attachment`]
+    /// the outer alt-text wins (it is written after `/Contents` here).
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the pop-up. Typically
+    /// the author's name.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2
+    /// §7.9.4 (e.g. `D:20260515120000Z`). The caller is responsible
+    /// for constructing a syntactically valid date string; krilla
+    /// emits the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last
+    /// modified, formatted as a PDF date string per ISO 32000-2
+    /// §7.9.4. The caller is responsible for constructing a
+    /// syntactically valid date string; krilla emits the value
+    /// verbatim as a literal string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.15 — `/Subtype /FileAttachment`. The
+        // `/FS` entry has already been written by the outer
+        // [`Annotation::serialize`] using the indirect ref returned
+        // by `register_cacheable`.
+        annotation.subtype(pdf_writer::types::AnnotationType::FileAttachment);
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        annotation.icon(self.icon.to_pdf());
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
         }
 
         write_annotation_dates(
@@ -1618,6 +2426,34 @@ pub struct WidgetAnnotation {
     /// for numeric range bounds. The action may reject the change by
     /// setting `event.rc = false` so the viewer reverts the field.
     pub(crate) validate_action: Option<Action>,
+    /// `/MK /I` — pushbutton icon appearance (ISO 32000-2 §12.5.6.19
+    /// Table 192). When set, krilla emits a Form XObject wrapping
+    /// the image and threads its indirect reference into the
+    /// widget's `/MK` dictionary. The image draws into the widget's
+    /// `/BBox [0 0 w h]` so the viewer fills the button area with
+    /// the icon. Only meaningful for pushbutton widgets
+    /// (`<input type="image">`); krilla silently ignores the value
+    /// on other field types.
+    #[cfg(feature = "raster-images")]
+    pub(crate) icon_image: Option<crate::graphics::image::Image>,
+    /// `/DA` — default appearance string (ISO 32000-2 §12.7.4.3 Table
+    /// 228). Overrides krilla's built-in `/Helv 10 Tf 0 g` fallback
+    /// so the widget can reference a specific font and colour. The
+    /// string is written verbatim as a PDF byte string; the embedder
+    /// is responsible for escaping. Only meaningful for variable-text
+    /// fields (`/Tx`, `/Ch`); krilla writes the value on Text and
+    /// Choice widgets and ignores it elsewhere.
+    pub(crate) default_appearance: Option<String>,
+    /// `/MK` (Appearance Characteristics) supplementary entries —
+    /// ISO 32000-2 §12.5.6.19 Table 192. Carries `/BC`, `/BG`, `/R`,
+    /// `/RC`, `/AC`. The existing `/MK /CA` (caption) and `/MK /I`
+    /// (icon) entries the pushbutton path emits compose with these —
+    /// when both this field and the pushbutton path contribute, the
+    /// serialiser writes a single `/MK` dict carrying every populated
+    /// entry. `None` (the constructor default) suppresses the
+    /// extension entirely; pushbutton widgets still emit their
+    /// existing `/CA` + `/I` entries when applicable.
+    pub(crate) appearance_characteristics: Option<AppearanceCharacteristics>,
 }
 
 impl WidgetAnnotation {
@@ -1639,6 +2475,10 @@ impl WidgetAnnotation {
             keystroke_action: None,
             format_action: None,
             validate_action: None,
+            #[cfg(feature = "raster-images")]
+            icon_image: None,
+            default_appearance: None,
+            appearance_characteristics: None,
         }
     }
 
@@ -1703,11 +2543,67 @@ impl WidgetAnnotation {
         self
     }
 
+    /// Attach an icon appearance image to a pushbutton widget
+    /// (`<input type="image">`). The image surfaces as `/MK /I` on the
+    /// widget annotation per ISO 32000-2 §12.5.6.19 Table 192; PDF
+    /// viewers draw the icon inside the widget's `/BBox`.
+    ///
+    /// krilla registers the image once and wraps it in a Form XObject
+    /// at serialisation time; multiple widgets pointing at the same
+    /// `Image` clone share the underlying image resource. The icon
+    /// entry is only meaningful for pushbutton fields (`WidgetField::
+    /// Button(ButtonField { kind: ButtonKind::PushButton, .. })`);
+    /// other widget kinds silently ignore the value.
+    #[cfg(feature = "raster-images")]
+    pub fn with_icon_appearance(mut self, image: crate::graphics::image::Image) -> Self {
+        self.icon_image = Some(image);
+        self
+    }
+
+    /// Override the widget's `/DA` (default appearance) string for
+    /// variable-text fields (`/Tx`, `/Ch`) — ISO 32000-2 §12.7.4.3
+    /// Table 228. The supplied size and colour operators are honoured,
+    /// but the font token is normalised to `/Helv` (the only font the
+    /// AcroForm `/DR` binds) so the emitted `/DA`, the baked appearance
+    /// stream and the `/DR` resolve to the same resource — §12.7.4.3
+    /// requires the `/DA` font to "match a resource name in the Font
+    /// entry of the default resource dictionary". For example,
+    /// `/Courier 14 Tf 1 0 0 rg` bakes at 14 pt red on `/Helv`. When
+    /// unset, krilla falls back to its built-in `/Helv 10 Tf 0 g`
+    /// default. The embedder is responsible for supplying a
+    /// syntactically valid `/DA` operator sequence.
+    pub fn with_default_appearance(mut self, da: impl Into<String>) -> Self {
+        self.default_appearance = Some(da.into());
+        self
+    }
+
+    /// Attach the widget's `/MK` (Appearance Characteristics)
+    /// supplementary entries — ISO 32000-2 §12.5.6.19 Table 192. The
+    /// supplied structure carries `/BC` (border colour), `/BG`
+    /// (background colour), `/R` (rotation), `/RC` (rollover caption),
+    /// `/AC` (down caption), `/RI` (rollover icon), `/IX` (alternate
+    /// (down) icon), `/IF` (icon fit dictionary), and `/TP` (text
+    /// position) entries; krilla composes the supplied entries with
+    /// the pushbutton path's existing `/CA` (caption) and `/I`
+    /// (normal-state icon) entries so a single `/MK` dictionary
+    /// surfaces every populated field. `/RC`, `/AC`, `/RI`, `/IX`,
+    /// `/IF`, and `/TP` are meaningful only for pushbutton widgets
+    /// per the spec; the serialiser writes them verbatim when set and
+    /// viewers ignore the surplus on other field types. Passing an
+    /// empty [`AppearanceCharacteristics`] (every slot `None`) is a
+    /// no-op: krilla still recognises the call but omits the `/MK`
+    /// extension at serialisation time.
+    pub fn with_appearance_characteristics(mut self, mk: AppearanceCharacteristics) -> Self {
+        self.appearance_characteristics = Some(mk);
+        self
+    }
+
     fn serialize_type(
         &self,
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
+        widget_icon_refs: WidgetIconRefs,
     ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(pdf_writer::types::AnnotationType::Widget);
 
@@ -1735,7 +2631,17 @@ impl WidgetAnnotation {
         // elsewhere). A minimal default appearance — Helvetica 10pt
         // black — matches what Acrobat falls back to when /DA is
         // missing but `/NeedAppearances true` is set at the catalogue.
+        // Callers may override via `with_default_appearance(...)` to
+        // request a specific text size / colour; the font token is
+        // normalised to `/Helv` (the only font bound in the AcroForm
+        // /DR) when the /DA entry is written. The override is consulted
+        // on Text and Choice arms; other field types ignore the slot.
         const DEFAULT_APPEARANCE: &[u8] = b"/Helv 10 Tf 0 g";
+        let da_bytes: &[u8] = self
+            .default_appearance
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(DEFAULT_APPEARANCE);
 
         let bbox_w = self.rect.width();
         let bbox_h = self.rect.height();
@@ -1747,6 +2653,19 @@ impl WidgetAnnotation {
         let helv_ref = sc.standard_helvetica_ref();
         let job: AppearanceJob;
 
+        // `/MK` (Appearance Characteristics) dictionary contributions
+        // accumulated across the field-type arms. The PushButton arm
+        // sets `pushbutton_caption` to a non-empty string when the
+        // button carries a label, and populates the
+        // `pushbutton_icon_xobject_refs` triple with the per-icon-state
+        // Form XObject indirect refs allocated for `/I`, `/RI`, `/IX`.
+        // These supplement `self.appearance_characteristics`; after the
+        // match we emit a single `/MK` dictionary carrying every
+        // populated entry, or nothing when every contribution is empty
+        // (ISO 32000-2 §12.5.6.19 Table 192).
+        let mut pushbutton_caption: Option<&str> = None;
+        let mut pushbutton_icon_xobject_refs = WidgetIconRefs::default();
+
         // Field-type names (`/Tx`, `/Btn`, `/Ch`) and checkbox/radio
         // state names (`/Yes`, `/Off`) are pinned by ISO 32000-2
         // §12.7.4 and emitted as PDF name objects. `pdf_writer`
@@ -1757,7 +2676,15 @@ impl WidgetAnnotation {
             WidgetField::Text(text) => {
                 annotation.pair(Name(b"FT"), Name(b"Tx"));
                 annotation.pair(Name(b"Ff"), text.flags.to_bits() as i32);
-                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
+                // Normalise the `/DA` font token to `/Helv` (the only
+                // font the AcroForm `/DR` binds) via `da_appearance_ops`,
+                // preserving the caller's size/colour, so the field
+                // `/DA`, the baked appearance and `/DR` agree (ISO
+                // 32000-2 §12.7.4.3: the `/DA` font "shall match a
+                // resource name in the Font entry of the default resource
+                // dictionary").
+                let field_da = da_appearance_ops(da_bytes);
+                annotation.pair(Name(b"DA"), Str(&field_da));
                 annotation.pair(Name(b"V"), TextStr(&text.value));
                 annotation.pair(Name(b"DV"), TextStr(&text.default_value));
                 if let Some(max_len) = text.max_length {
@@ -1775,6 +2702,7 @@ impl WidgetAnnotation {
                         uses_helvetica: true,
                     },
                     off: None,
+                    icons: WidgetIconXObjects::default(),
                 };
             }
             WidgetField::Button(button) => {
@@ -1823,6 +2751,7 @@ impl WidgetAnnotation {
                                 content: build_empty_box_content(bbox_w, bbox_h),
                                 uses_helvetica: false,
                             }),
+                            icons: WidgetIconXObjects::default(),
                         };
                     }
                     ButtonKind::Radio => {
@@ -1859,20 +2788,61 @@ impl WidgetAnnotation {
                                 content: build_radio_off_content(bbox_w, bbox_h),
                                 uses_helvetica: false,
                             }),
+                            icons: WidgetIconXObjects::default(),
                         };
                     }
                     ButtonKind::PushButton => {
-                        // Pushbuttons have no persistent value. /MK /CA
-                        // gives Acrobat a label to draw — written as a
-                        // best-effort caption derived from the HTML
-                        // element's text content.
+                        // Pushbuttons have no persistent value. /MK
+                        // carries the optional caption (/CA, ISO
+                        // 32000-2 §12.5.6.19 Table 192) and the icon
+                        // family (/I, /RI, /IX — same table). HTML
+                        // `<input type="image">` routes the normal-state
+                        // image through
+                        // `WidgetAnnotation::with_icon_appearance`; the
+                        // rollover (`/RI`) and alternate (`/IX`) images
+                        // ride along on
+                        // `AppearanceCharacteristics::{rollover_icon,
+                        // alternate_icon}`. The caption is the alt-text
+                        // fallback for viewers that cannot decode the
+                        // icon (or while the image is loading). The /MK
+                        // dict itself is written by a single
+                        // `write_mk_dictionary` pass after the match so
+                        // the supplementary entries threaded through
+                        // `appearance_characteristics` (/BC, /BG, /R,
+                        // /RC, /AC, /IF, /TP) compose with the caption
+                        // / icon family into one merged `/MK`
+                        // dictionary.
+                        let icon_xobject_refs = WidgetIconRefs {
+                            normal: widget_icon_refs.normal.map(|_| sc.new_ref()),
+                            rollover: widget_icon_refs.rollover.map(|_| sc.new_ref()),
+                            alternate: widget_icon_refs.alternate.map(|_| sc.new_ref()),
+                        };
                         if !button.caption.is_empty() {
-                            let mut mk = annotation.insert(Name(b"MK")).dict();
-                            mk.pair(Name(b"CA"), TextStr(&button.caption));
-                            mk.finish();
+                            pushbutton_caption = Some(button.caption.as_str());
                         }
+                        pushbutton_icon_xobject_refs = icon_xobject_refs;
                         let ap_ref = sc.new_ref();
                         write_ap_single(annotation, ap_ref);
+                        let icons = WidgetIconXObjects {
+                            normal: icon_appearance_xobject(
+                                widget_icon_refs.normal,
+                                icon_xobject_refs.normal,
+                                bbox_w,
+                                bbox_h,
+                            ),
+                            rollover: icon_appearance_xobject(
+                                widget_icon_refs.rollover,
+                                icon_xobject_refs.rollover,
+                                bbox_w,
+                                bbox_h,
+                            ),
+                            alternate: icon_appearance_xobject(
+                                widget_icon_refs.alternate,
+                                icon_xobject_refs.alternate,
+                                bbox_w,
+                                bbox_h,
+                            ),
+                        };
                         job = AppearanceJob {
                             helv_ref,
                             on: AppearanceStream {
@@ -1883,6 +2853,7 @@ impl WidgetAnnotation {
                                 uses_helvetica: true,
                             },
                             off: None,
+                            icons,
                         };
                     }
                 }
@@ -1924,6 +2895,7 @@ impl WidgetAnnotation {
                         content: build_radio_off_content(bbox_w, bbox_h),
                         uses_helvetica: false,
                     }),
+                    icons: WidgetIconXObjects::default(),
                 };
             }
             WidgetField::Signature(_) => {
@@ -1981,13 +2953,18 @@ impl WidgetAnnotation {
                         uses_helvetica: false,
                     },
                     off: None,
+                    icons: WidgetIconXObjects::default(),
                 };
             }
             WidgetField::Choice(choice) => {
                 annotation.pair(Name(b"FT"), Name(b"Ch"));
                 annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
-                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
-                // /V and /DV emission follows ISO 32000-2 §12.7.4.4:
+                // Normalise the `/DA` font token to `/Helv` (see the Text
+                // arm) so the field `/DA`, the baked appearance and the
+                // AcroForm `/DR` agree (ISO 32000-2 §12.7.4.3).
+                let field_da = da_appearance_ops(da_bytes);
+                annotation.pair(Name(b"DA"), Str(&field_da));
+                // /V and /DV emission follows ISO 32000-2 §12.7.5.4:
                 // empty → omit; one entry → string literal; two or more
                 // → array of strings (MultiSelect, bit 22). Single-
                 // select callers are expected to pass a one-element
@@ -2050,9 +3027,25 @@ impl WidgetAnnotation {
                         uses_helvetica: true,
                     },
                     off: None,
+                    icons: WidgetIconXObjects::default(),
                 };
             }
         }
+
+        // `/MK` (Appearance Characteristics) — ISO 32000-2 §12.5.6.19
+        // Table 192. Merges the per-field-type contributions
+        // (`/CA`, `/I`, `/RI`, `/IX` populated by the PushButton arm)
+        // with the supplementary entries the embedder authored via
+        // `with_appearance_characteristics` (`/BC`, `/BG`, `/R`, `/RC`,
+        // `/AC`, `/IF`, `/TP`). Suppressed entirely when no entry is
+        // populated so the `/MK` slot stays absent from the annotation
+        // dictionary, matching the spec's "optional" behaviour.
+        write_mk_dictionary(
+            annotation,
+            pushbutton_caption,
+            pushbutton_icon_xobject_refs,
+            self.appearance_characteristics.as_ref(),
+        );
 
         // `/AA` additional-actions dictionary (ISO 32000-2 §12.7.4
         // Table 230). Emitted only when at least one of the
@@ -2101,9 +3094,211 @@ impl WidgetAnnotation {
     }
 }
 
+/// Write the `/MK` (Appearance Characteristics) dictionary for an
+/// AcroForm widget annotation per ISO 32000-2 §12.5.6.19 Table 192.
+///
+/// Combines the pushbutton-arm-emitted entries (`/CA` caption, `/I`
+/// normal-state icon Form XObject reference, `/RI` rollover icon ref,
+/// `/IX` alternate (down) icon ref) with the supplementary entries the
+/// embedder authored via
+/// [`WidgetAnnotation::with_appearance_characteristics`] — `/BC` border
+/// colour, `/BG` background colour, `/R` rotation, `/RC` rollover
+/// caption, `/AC` alternate (down) caption, `/IF` icon fit
+/// dictionary, `/TP` text position keyword. When every contribution
+/// is empty the dictionary is omitted entirely so the `/MK` slot
+/// stays absent from the annotation dict (matching the spec's
+/// optional treatment).
+fn write_mk_dictionary(
+    annotation: &mut pdf_writer::writers::Annotation,
+    pushbutton_caption: Option<&str>,
+    pushbutton_icon_refs: WidgetIconRefs,
+    appearance: Option<&AppearanceCharacteristics>,
+) {
+    let any_appearance_entry = appearance.is_some_and(|mk| mk.has_mk_dict_entry());
+    if pushbutton_caption.is_none() && pushbutton_icon_refs.is_empty() && !any_appearance_entry {
+        return;
+    }
+
+    let mut mk = annotation.insert(Name(b"MK")).dict();
+    if let Some(caption) = pushbutton_caption {
+        mk.pair(Name(b"CA"), TextStr(caption));
+    }
+    if let Some(icon_ref) = pushbutton_icon_refs.normal {
+        mk.pair(Name(b"I"), icon_ref);
+    }
+    if let Some(icon_ref) = pushbutton_icon_refs.rollover {
+        mk.pair(Name(b"RI"), icon_ref);
+    }
+    if let Some(icon_ref) = pushbutton_icon_refs.alternate {
+        mk.pair(Name(b"IX"), icon_ref);
+    }
+    if let Some(mk_extras) = appearance {
+        if let Some(colour) = &mk_extras.border_color {
+            write_mk_colour_entry(&mut mk, Name(b"BC"), colour);
+        }
+        if let Some(colour) = &mk_extras.background_color {
+            write_mk_colour_entry(&mut mk, Name(b"BG"), colour);
+        }
+        if let Some(rotation) = mk_extras.rotation {
+            mk.pair(Name(b"R"), rotation.degrees());
+        }
+        if let Some(rc) = &mk_extras.rollover_caption {
+            mk.pair(Name(b"RC"), TextStr(rc));
+        }
+        if let Some(ac) = &mk_extras.down_caption {
+            mk.pair(Name(b"AC"), TextStr(ac));
+        }
+        if let Some(icon_fit) = mk_extras.icon_fit {
+            write_mk_icon_fit(&mut mk, &icon_fit);
+        }
+    }
+    // `/TP` text position (ISO 32000-2 §12.5.6.19 Table 192). An explicit
+    // value from the appearance characteristics always wins. Otherwise a
+    // pushbutton carrying an icon but no caption would have its icon
+    // suppressed by the spec default `/TP 0` (no icon; caption only), so
+    // default it to `/TP 1` (no caption; icon only) to keep the icon
+    // visible under both the baked appearance and `/MK`-driven
+    // regeneration.
+    let effective_text_position = appearance
+        .and_then(|mk_extras| mk_extras.text_position)
+        .or_else(|| {
+            (pushbutton_icon_refs.normal.is_some() && pushbutton_caption.is_none())
+                .then_some(TextPosition::IconOnly)
+        });
+    if let Some(tp) = effective_text_position {
+        mk.pair(Name(b"TP"), tp.to_pdf_integer());
+    }
+    mk.finish();
+}
+
+/// Write the `/IF` (Icon Fit) sub-dictionary inside the `/MK` dict
+/// per ISO 32000-2 §12.5.6.19 Table 250. Every entry has a spec
+/// default; krilla emits each entry verbatim so round-trip embedders
+/// can observe the chosen values without inferring them from
+/// omission.
+fn write_mk_icon_fit(mk: &mut pdf_writer::Dict, icon_fit: &IconFit) {
+    let mut sub = mk.insert(Name(b"IF")).dict();
+    sub.pair(Name(b"SW"), Name(icon_fit.scale_when.to_pdf_name()));
+    sub.pair(Name(b"S"), Name(icon_fit.scale_type.to_pdf_name()));
+    // `/A` is a two-element array of percentages clamped to [0.0, 1.0].
+    {
+        let mut align = sub.insert(Name(b"A")).array();
+        align.item(icon_fit.align_x.clamp(0.0, 1.0));
+        align.item(icon_fit.align_y.clamp(0.0, 1.0));
+        align.finish();
+    }
+    sub.pair(Name(b"FB"), icon_fit.fit_bounds);
+    sub.finish();
+}
+
+/// Convert a CIE 1976 L*a*b* colour to normalised sRGB in `[0.0, 1.0]`.
+///
+/// Annotation `/C` and `/MK` `/BC` / `/BG` arrays are device-space by
+/// element count and require components in `[0.0, 1.0]` (ISO 32000-2
+/// §12.5.2 / §12.5.6.19 Table 192). L*a*b* components (L ∈ [0, 100],
+/// a, b ∈ [-100, 100]) fall outside that range, and a three-element
+/// array is interpreted as DeviceRGB, so the raw components would be
+/// clamped to a wildly wrong colour. Convert through CIE XYZ to sRGB
+/// first, anchoring on the colour's own white point (no chromatic
+/// adaptation — `/MK` / `/C` calibrated colour is a niche path) and
+/// applying the standard sRGB companding curve.
+fn lab_to_srgb(white_point: [f32; 3], lab: [f32; 3]) -> [f32; 3] {
+    let [l, a, b] = lab;
+    // L*a*b* -> CIE XYZ (ISO 32000-2 §8.6.5.4; CIE 15 inverse transform).
+    let fy = (l + 16.0) / 116.0;
+    let fx = fy + a / 500.0;
+    let fz = fy - b / 200.0;
+    let inverse = |t: f32| {
+        const DELTA: f32 = 6.0 / 29.0;
+        if t > DELTA {
+            t * t * t
+        } else {
+            3.0 * DELTA * DELTA * (t - 4.0 / 29.0)
+        }
+    };
+    let [xn, yn, zn] = white_point;
+    let x = xn * inverse(fx);
+    let y = yn * inverse(fy);
+    let z = zn * inverse(fz);
+    // CIE XYZ -> linear sRGB (IEC 61966-2-1, D65 primaries).
+    let lr = 3.2406 * x - 1.5372 * y - 0.4986 * z;
+    let lg = -0.9689 * x + 1.8758 * y + 0.0415 * z;
+    let lb = 0.0557 * x - 0.2040 * y + 1.0570 * z;
+    // Linear -> gamma-companded sRGB, clamped into the legal range.
+    let compand = |c: f32| {
+        let c = c.clamp(0.0, 1.0);
+        if c <= 0.003_130_8 {
+            12.92 * c
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    };
+    [compand(lr), compand(lg), compand(lb)]
+}
+
+/// Write one `/BC` or `/BG` colour entry inside the `/MK` dictionary
+/// per ISO 32000-2 §12.5.6.19 Table 192.
+///
+/// The PDF spec scopes `/MK` colour entries to device-space arrays —
+/// 0, 1, 3, or 4 numeric components selecting "no colour" /
+/// DeviceGray / DeviceRGB / DeviceCMYK respectively. krilla projects
+/// the supplied [`Color`] onto the matching array length:
+/// [`RegularColor::Luma`] -> one-component DeviceGray;
+/// [`RegularColor::Rgb`] -> three-component DeviceRGB;
+/// [`RegularColor::Cmyk`] -> four-component DeviceCMYK;
+/// [`RegularColor::IccBased`] -> three-component DeviceRGB (the
+/// authored components verbatim — `/MK` is device-space only and
+/// ICC profiles cannot ride along the entry). Special colours
+/// (Separation, DeviceN) fall back to a single 0.0 entry (a
+/// well-formed "no colour" array) because they have no device-space
+/// representation suitable for an unannotated number array; the
+/// embedder is expected to author a device-space border / background
+/// when this matters.
+fn write_mk_colour_entry(
+    mk: &mut pdf_writer::Dict,
+    key: Name<'static>,
+    colour: &Color,
+) {
+    let mut array = mk.insert(key).array();
+    match colour {
+        Color::Regular(regular) => match regular {
+            RegularColor::Luma(luma) => {
+                array.item(luma.to_pdf_color());
+            }
+            RegularColor::Rgb(rgb) => {
+                for component in rgb.to_pdf_color() {
+                    array.item(component);
+                }
+            }
+            RegularColor::Cmyk(cmyk) => {
+                for component in cmyk.to_pdf_color() {
+                    array.item(component);
+                }
+            }
+            RegularColor::IccBased { components, .. } => {
+                for &component in components {
+                    array.item(component);
+                }
+            }
+        },
+        Color::Special(_) => {
+            // Separation / DeviceN have no device-space scalar form
+            // that survives an unannotated `/MK` number array, so they
+            // fall back to a single-component `[0]` entry. Per Table
+            // 192 a one-element array is DeviceGray, so this renders as
+            // opaque black — a visible fallback, not "no colour".
+            // Embedders needing a Separation / DeviceN border or
+            // background should supply a Form XObject `/N` appearance
+            // instead.
+            array.item(0.0_f32);
+        }
+    }
+    array.finish();
+}
+
 /// Write a `/V` or `/DV` entry on a choice-field widget annotation.
 ///
-/// Cardinality drives the PDF object kind per ISO 32000-2 §12.7.4.4:
+/// Cardinality drives the PDF object kind per ISO 32000-2 §12.7.5.4:
 /// an empty vector omits the entry, a single value emits a string
 /// literal, and two or more values emit an array of strings (only
 /// meaningful when the MultiSelect flag, bit 22, is set on the
@@ -3447,6 +4642,818 @@ mod tests {
         assert!(
             !contains(&pdf, b"/Ff 98304"),
             "pushbutton+radio combination must not be set on a radio group",
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // `/MK` Appearance Characteristics
+    // (`/BC`, `/BG`, `/R`, `/RC`, `/AC`) per ISO 32000-2 §12.5.6.19
+    // Table 192 and §12.7.4.3.
+    // -------------------------------------------------------------------
+
+    fn text_widget_with_appearance(mk: AppearanceCharacteristics) -> Vec<u8> {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "field", text)
+            .with_appearance_characteristics(mk);
+        finish_with(Annotation::new_widget(widget, None))
+    }
+
+    #[test]
+    fn widget_mk_border_color_devicergb_emits_three_component_array() {
+        let mk = AppearanceCharacteristics {
+            border_color: Some(Color::from(rgb::Color::new(255, 0, 0))),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        // /BC carries [r g b] in [0.0, 1.0] — `255` -> `1` (printed
+        // without a trailing decimal by pdf-writer).
+        assert!(
+            contains(&pdf, b"/BC [1 0 0]"),
+            "expected /BC [1 0 0] DeviceRGB array, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_background_color_devicegray_emits_single_component_array() {
+        use crate::color::luma;
+        let mk = AppearanceCharacteristics {
+            background_color: Some(Color::from(luma::Color::new(0))),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        // /BG carries [g] in [0.0, 1.0] for DeviceGray.
+        assert!(
+            contains(&pdf, b"/BG [0]"),
+            "expected /BG [0] DeviceGray array, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_background_color_devicecmyk_emits_four_component_array() {
+        use crate::color::cmyk;
+        let mk = AppearanceCharacteristics {
+            background_color: Some(Color::from(cmyk::Color::new(255, 0, 0, 0))),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        // /BG carries [c m y k] in [0.0, 1.0] for DeviceCMYK.
+        assert!(
+            contains(&pdf, b"/BG [1 0 0 0]"),
+            "expected /BG [1 0 0 0] DeviceCMYK array, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_border_color_lab_converts_to_srgb() {
+        use crate::color::LabParams;
+        // Raw L*a*b* components (53.2, -40, 30) are outside the [0.0, 1.0]
+        // range /MK /BC mandates (ISO 32000-2 §12.5.6.19 Table 192), and a
+        // three-element array is read as DeviceRGB, so krilla must convert
+        // to normalised sRGB rather than emit the raw triple.
+        let params = LabParams {
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: None,
+            range: None,
+        };
+        let lab = Color::from(RegularColor::lab(params, [53.2, -40.0, 30.0]));
+        let mk = AppearanceCharacteristics {
+            border_color: Some(lab),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        let slice = mk_dictionary_slice(&pdf);
+        // Extract the `/BC [ … ]` array and assert every component is a
+        // normalised sRGB value in [0.0, 1.0] — never a raw, out-of-range
+        // L*a*b* component.
+        let start = slice.find("/BC [").expect("missing /BC array");
+        let body = &slice[start + "/BC [".len()..];
+        let end = body.find(']').expect("unterminated /BC array");
+        let components: Vec<f32> = body[..end]
+            .split_whitespace()
+            .map(|t| t.parse::<f32>().expect("non-numeric /BC component"))
+            .collect();
+        assert_eq!(components.len(), 3, "expected a DeviceRGB triple: {slice}");
+        for c in components {
+            assert!(
+                (0.0..=1.0).contains(&c),
+                "/BC component {c} out of [0,1]: {slice}"
+            );
+        }
+    }
+
+    #[test]
+    fn widget_mk_rotation_quarter_emits_r_90() {
+        let mk = AppearanceCharacteristics {
+            rotation: Some(Rotation::Quarter),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(
+            contains(&pdf, b"/R 90"),
+            "expected /R 90 rotation entry, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_rotation_half_emits_r_180() {
+        let mk = AppearanceCharacteristics {
+            rotation: Some(Rotation::Half),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(
+            contains(&pdf, b"/R 180"),
+            "expected /R 180 rotation entry, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_rotation_three_quarter_emits_r_270() {
+        let mk = AppearanceCharacteristics {
+            rotation: Some(Rotation::ThreeQuarter),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(
+            contains(&pdf, b"/R 270"),
+            "expected /R 270 rotation entry, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_rollover_caption_emits_rc_string() {
+        // /RC is meaningful for pushbutton widgets per Table 192.
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: "Go".into(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let mk = AppearanceCharacteristics {
+            rollover_caption: Some("Hover".into()),
+            ..Default::default()
+        };
+        let widget = WidgetAnnotation::new(widget_rect(), "submit", button)
+            .with_appearance_characteristics(mk);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(
+            contains(&pdf, b"/RC (Hover)"),
+            "expected /RC (Hover) rollover caption, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+        // The existing /CA (caption) and the new /RC must coexist in
+        // the same /MK dict so the pushbutton path's contribution
+        // composes with the appearance-characteristics path.
+        assert!(
+            contains(&pdf, b"/CA (Go)"),
+            "/CA must still emit alongside /RC"
+        );
+    }
+
+    #[test]
+    fn widget_mk_down_caption_emits_ac_string() {
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: "Go".into(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let mk = AppearanceCharacteristics {
+            down_caption: Some("Pressed".into()),
+            ..Default::default()
+        };
+        let widget = WidgetAnnotation::new(widget_rect(), "submit", button)
+            .with_appearance_characteristics(mk);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(
+            contains(&pdf, b"/AC (Pressed)"),
+            "expected /AC (Pressed) down caption, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_without_appearance_characteristics_omits_mk_on_non_pushbutton() {
+        // The /MK extension is opt-in; a text widget with no
+        // appearance characteristics must not emit /MK (PushButton
+        // is the only field type that emits /MK via the caption /
+        // icon path).
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "no-mk", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(
+            !contains(&pdf, b"/MK <<"),
+            "/MK must be absent when no appearance characteristics are set"
+        );
+    }
+
+    #[test]
+    fn widget_mk_icon_fit_proportional_emits_if_dict() {
+        let mk = AppearanceCharacteristics {
+            icon_fit: Some(IconFit {
+                scale_when: ScaleWhen::ContentBiggerThanRect,
+                scale_type: ScaleType::Proportional,
+                align_x: 0.25,
+                align_y: 0.75,
+                fit_bounds: true,
+            }),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(
+            contains(&pdf, b"/IF <<"),
+            "expected /IF sub-dictionary, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+        // /SW selects when to scale.
+        assert!(contains(&pdf, b"/SW /B"), "expected /SW /B inside /IF");
+        // /S selects how to scale.
+        assert!(contains(&pdf, b"/S /P"), "expected /S /P inside /IF");
+        // /A array carries [align_x align_y]. pdf-writer pretty-prints
+        // floats without trailing zeros; assert the substring.
+        assert!(
+            contains(&pdf, b"/A [0.25 0.75]"),
+            "expected /A [0.25 0.75] inside /IF, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+        assert!(contains(&pdf, b"/FB true"), "expected /FB true inside /IF");
+    }
+
+    #[test]
+    fn widget_mk_text_position_caption_below_icon_emits_tp_2() {
+        let mk = AppearanceCharacteristics {
+            text_position: Some(TextPosition::CaptionBelowIcon),
+            ..Default::default()
+        };
+        let pdf = text_widget_with_appearance(mk);
+        assert!(
+            contains(&pdf, b"/TP 2"),
+            "expected /TP 2 inside /MK, body was {:?}",
+            mk_dictionary_slice(&pdf)
+        );
+    }
+
+    #[test]
+    fn widget_mk_text_position_full_range_round_trips() {
+        // Walk through every TextPosition keyword and assert the
+        // matching integer reaches the /MK dict. The match arm in
+        // `TextPosition::to_pdf_integer` is the only mapping under
+        // test; this guards against future renumbering breaking the
+        // public surface.
+        let cases: &[(TextPosition, &[u8])] = &[
+            (TextPosition::CaptionOnly, b"/TP 0"),
+            (TextPosition::IconOnly, b"/TP 1"),
+            (TextPosition::CaptionBelowIcon, b"/TP 2"),
+            (TextPosition::CaptionAboveIcon, b"/TP 3"),
+            (TextPosition::CaptionRightOfIcon, b"/TP 4"),
+            (TextPosition::CaptionLeftOfIcon, b"/TP 5"),
+            (TextPosition::CaptionOverlaidOnIcon, b"/TP 6"),
+        ];
+        for (tp, needle) in cases {
+            let mk = AppearanceCharacteristics {
+                text_position: Some(*tp),
+                ..Default::default()
+            };
+            let pdf = text_widget_with_appearance(mk);
+            assert!(
+                contains(&pdf, needle),
+                "expected {:?} for {:?}",
+                std::str::from_utf8(needle).unwrap_or("<non-utf8>"),
+                tp
+            );
+        }
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_mk_rollover_icon_emits_ri_ref_and_form_xobject() {
+        use crate::graphics::image::Image;
+
+        let image = Image::from_rgba8(vec![255, 0, 0, 255], 1, 1);
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let mk = AppearanceCharacteristics {
+            rollover_icon: Some(image),
+            ..Default::default()
+        };
+        let widget = WidgetAnnotation::new(widget_rect(), "btn", button)
+            .with_appearance_characteristics(mk);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        // /RI <n> 0 R — the indirect reference token.
+        let mk_pos = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+            .expect("/MK dict not found");
+        let mk_tail = &pdf[mk_pos..];
+        let ri_in_mk = mk_tail
+            .windows(b"/RI ".len())
+            .position(|w| w == b"/RI ")
+            .expect("missing /RI entry inside /MK dict");
+        let after_ri = &mk_tail[ri_in_mk + b"/RI ".len()..];
+        assert!(
+            after_ri.iter().take_while(|b| b.is_ascii_digit()).count() > 0,
+            "/RI must be followed by a numeric ref id"
+        );
+        // The rollover-icon Form XObject draws the image as /Im0.
+        assert!(
+            contains(&pdf, b"/Im0 Do"),
+            "missing image draw in rollover-icon Form XObject content stream"
+        );
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_mk_alternate_icon_emits_ix_ref_and_form_xobject() {
+        use crate::graphics::image::Image;
+
+        let image = Image::from_rgba8(vec![0, 255, 0, 255], 1, 1);
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let mk = AppearanceCharacteristics {
+            alternate_icon: Some(image),
+            ..Default::default()
+        };
+        let widget = WidgetAnnotation::new(widget_rect(), "btn", button)
+            .with_appearance_characteristics(mk);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        let mk_pos = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+            .expect("/MK dict not found");
+        let mk_tail = &pdf[mk_pos..];
+        let ix_in_mk = mk_tail
+            .windows(b"/IX ".len())
+            .position(|w| w == b"/IX ")
+            .expect("missing /IX entry inside /MK dict");
+        let after_ix = &mk_tail[ix_in_mk + b"/IX ".len()..];
+        assert!(
+            after_ix.iter().take_while(|b| b.is_ascii_digit()).count() > 0,
+            "/IX must be followed by a numeric ref id"
+        );
+        assert!(
+            contains(&pdf, b"/Im0 Do"),
+            "missing image draw in alternate-icon Form XObject content stream"
+        );
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_mk_three_icon_states_emit_distinct_refs() {
+        use crate::graphics::image::Image;
+
+        let normal_image = Image::from_rgba8(vec![255, 0, 0, 255], 1, 1);
+        let rollover_image = Image::from_rgba8(vec![0, 255, 0, 255], 1, 1);
+        let alternate_image = Image::from_rgba8(vec![0, 0, 255, 255], 1, 1);
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let mk = AppearanceCharacteristics {
+            rollover_icon: Some(rollover_image),
+            alternate_icon: Some(alternate_image),
+            ..Default::default()
+        };
+        let widget = WidgetAnnotation::new(widget_rect(), "btn", button)
+            .with_icon_appearance(normal_image)
+            .with_appearance_characteristics(mk);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        // All three icon entries must appear in the /MK dict.
+        let mk_pos = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+            .expect("/MK dict not found");
+        let mk_tail = &pdf[mk_pos..];
+        assert!(
+            mk_tail.windows(b"/I ".len()).any(|w| w == b"/I "),
+            "missing /I entry"
+        );
+        assert!(
+            mk_tail.windows(b"/RI ".len()).any(|w| w == b"/RI "),
+            "missing /RI entry"
+        );
+        assert!(
+            mk_tail.windows(b"/IX ".len()).any(|w| w == b"/IX "),
+            "missing /IX entry"
+        );
+    }
+
+    /// Slice the bytes from the `/MK <<` opener to the matching `>>`
+    /// so test failure messages show the dictionary body. The
+    /// pretty-printed PDF emitted under `pretty: true` keeps each
+    /// entry on its own line; the slice is bounded to the next
+    /// `>>` token to avoid pulling in the rest of the annotation
+    /// dictionary.
+    fn mk_dictionary_slice(pdf: &[u8]) -> String {
+        let Some(start) = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+        else {
+            return "<no /MK dict>".to_string();
+        };
+        let tail = &pdf[start..];
+        let end = tail
+            .windows(2)
+            .position(|w| w == b">>")
+            .map(|p| p + 2)
+            .unwrap_or(tail.len().min(256));
+        String::from_utf8_lossy(&tail[..end]).into_owned()
+    }
+
+    // -------------------------------------------------------------------
+    // fork-extension setters: `/H`, `/StructParent`,
+    // `/DA` override, `/MK /I`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn link_annotation_with_highlight_invert_emits_h_i() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        )
+        .with_highlight(LinkHighlight::Invert);
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(contains(&pdf, b"/H /I"), "missing /H /I");
+    }
+
+    #[test]
+    fn link_annotation_with_highlight_push_emits_h_p() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        )
+        .with_highlight(LinkHighlight::Push);
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(contains(&pdf, b"/H /P"), "missing /H /P");
+    }
+
+    #[test]
+    fn link_annotation_without_highlight_omits_h() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(!contains(&pdf, b"/H /"), "unexpected /H entry on link without highlight");
+    }
+
+    #[test]
+    fn annotation_with_struct_parent_emits_structparent_entry() {
+        let text = TextAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
+        let annotation = Annotation::new_text(text, Some("alt".into())).with_struct_parent(7);
+        let pdf = finish_with(annotation);
+        assert!(
+            contains(&pdf, b"/StructParent 7"),
+            "missing /StructParent 7"
+        );
+    }
+
+    #[test]
+    fn widget_text_default_appearance_normalises_font_to_helv() {
+        // A custom `/DA` controls the text size and colour, but its font
+        // token is normalised to `/Helv` — the only font bound in the
+        // AcroForm `/DR` — so the field `/DA`, the baked appearance and
+        // `/DR` agree (ISO 32000-2 §12.7.4.3: the `/DA` font "shall match
+        // a resource name in the Font entry of the default resource
+        // dictionary").
+        let text = WidgetField::Text(TextField {
+            value: "deadbeef".into(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "hex", text)
+            .with_default_appearance("/Courier 14 Tf 1 0 0 rg");
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        // Size (14) and colour (red) preserved; font normalised to /Helv.
+        assert!(
+            contains(&pdf, b"/DA (/Helv 14 Tf 1 0 0 rg)"),
+            "expected /DA font normalised to /Helv with size/colour preserved"
+        );
+        // The unresolvable /Courier font resource must not leak into /DA.
+        assert!(
+            !contains(&pdf, b"/Courier"),
+            "custom /DA font resource must be normalised away, not emitted"
+        );
+    }
+
+    #[test]
+    fn widget_text_without_default_appearance_falls_back_to_helvetica() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "untitled", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(
+            contains(&pdf, b"/DA (/Helv 10 Tf 0 g)"),
+            "missing default Helvetica /DA"
+        );
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_pushbutton_with_icon_appearance_emits_mk_i() {
+        use crate::graphics::image::Image;
+
+        // Construct a 2x2 RGBA image directly from raw pixels — avoids
+        // taking a hard dependency on a PNG fixture file. Four 8-bit
+        // RGBA samples (red, green, blue, transparent) give a
+        // deterministic test image.
+        let image = Image::from_rgba8(
+            vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                0, 0, 0, 0, // transparent
+            ],
+            2,
+            2,
+        );
+
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: "Go".into(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "submit", button)
+            .with_icon_appearance(image);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // /MK dict carries both /CA caption and /I icon ref.
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(contains(&pdf, b"/CA (Go)"), "missing /CA caption inside /MK");
+        // /I <n> 0 R — the indirect reference token. We assert the
+        // `/I ` substring followed by digits + ` 0 R`.
+        let mk_pos = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+            .expect("/MK dict not found");
+        let mk_tail = &pdf[mk_pos..];
+        let i_in_mk = mk_tail
+            .windows(b"/I ".len())
+            .position(|w| w == b"/I ")
+            .expect("missing /I entry inside /MK dict");
+        let after_i = &mk_tail[i_in_mk + b"/I ".len()..];
+        assert!(
+            after_i.iter().take_while(|b| b.is_ascii_digit()).count() > 0,
+            "/I must be followed by a numeric ref id"
+        );
+        // The icon Form XObject's content stream draws the image as
+        // /Im0; assert the content-stream marker is present somewhere
+        // in the document.
+        assert!(
+            contains(&pdf, b"/Im0 Do"),
+            "missing image draw in icon Form XObject content stream"
+        );
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_pushbutton_icon_without_caption_defaults_tp_icon_only() {
+        use crate::graphics::image::Image;
+        // An icon-only pushbutton (no caption, no explicit /TP). The spec
+        // default /TP 0 (no icon; caption only, ISO 32000-2 §12.5.6.19
+        // Table 192) would suppress the icon, so krilla defaults /TP to 1
+        // (no caption; icon only) to keep it visible.
+        let image = Image::from_rgba8(vec![255, 0, 0, 255], 1, 1);
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: String::new(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let widget =
+            WidgetAnnotation::new(widget_rect(), "img", button).with_icon_appearance(image);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(
+            contains(&pdf, b"/TP 1"),
+            "icon-only pushbutton must default /TP to 1 (icon only)"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // `FileAttachment` annotation per ISO 32000-2 §12.5.6.15.
+    // -------------------------------------------------------------------
+
+    fn sample_embedded_file(path: &str) -> EmbeddedFile {
+        use crate::interchange::embed::{AssociationKind, MimeType};
+        use crate::metadata::DateTime;
+        EmbeddedFile {
+            path: path.into(),
+            mime_type: MimeType::new("application/octet-stream"),
+            description: Some("payload".into()),
+            association_kind: AssociationKind::Supplement,
+            data: crate::Data::from(vec![0x42_u8, 0x4f, 0x4d, 0x42]),
+            modification_date: Some(DateTime::new(2026)),
+            compress: Some(false),
+            location: None,
+            embed_location: crate::interchange::embed::EmbedLocation::Before,
+        }
+    }
+
+    fn file_attachment_pdf(icon: FileAttachmentIcon, path: &str) -> Vec<u8> {
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 30.0, 30.0).unwrap(),
+            sample_embedded_file(path),
+            icon,
+        )
+        .with_contents("payload description");
+        finish_with(Annotation::new_file_attachment(
+            annotation,
+            Some("attachment alt".into()),
+        ))
+    }
+
+    #[test]
+    fn file_attachment_pushpin_emits_subtype_name_and_fs() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::PushPin, "payload.bin");
+        assert!(
+            contains(&pdf, b"/Subtype /FileAttachment"),
+            "missing /Subtype /FileAttachment"
+        );
+        assert!(contains(&pdf, b"/Name /PushPin"), "missing /Name /PushPin");
+        // The annotation's /FS entry resolves to the FileSpec dict's
+        // indirect ref. The FileSpec carries the file's `/F` path.
+        assert!(contains(&pdf, b"/FS "), "missing /FS indirect reference");
+        assert!(
+            contains(&pdf, b"(payload.bin)"),
+            "missing FileSpec /F path entry"
+        );
+    }
+
+    #[test]
+    fn file_attachment_paperclip_emits_paperclip_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Paperclip, "clip.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(
+            contains(&pdf, b"/Name /Paperclip"),
+            "missing /Name /Paperclip"
+        );
+    }
+
+    #[test]
+    fn file_attachment_graph_emits_graph_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Graph, "chart.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(contains(&pdf, b"/Name /Graph"), "missing /Name /Graph");
+    }
+
+    #[test]
+    fn file_attachment_tag_emits_tag_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Tag, "tag.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(contains(&pdf, b"/Name /Tag"), "missing /Name /Tag");
+    }
+
+    #[test]
+    fn file_attachment_default_icon_is_pushpin() {
+        // Default constructor on the enum is PushPin per ISO 32000-2
+        // §12.5.6.15 default behaviour.
+        let icon = FileAttachmentIcon::default();
+        assert!(matches!(icon, FileAttachmentIcon::PushPin));
+    }
+
+    #[test]
+    fn file_attachment_from_trait_wraps_without_alt() {
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 5.0, 5.0).unwrap(),
+            sample_embedded_file("bare.bin"),
+            FileAttachmentIcon::PushPin,
+        );
+        let wrapped: Annotation = annotation.into();
+        assert!(matches!(
+            wrapped.annotation_type,
+            AnnotationType::FileAttachment(_)
+        ));
+        assert!(wrapped.alt.is_none());
+    }
+
+    #[test]
+    fn file_attachment_two_annotations_same_file_share_filespec() {
+        // Two FileAttachment annotations pointing at byte-identical
+        // EmbeddedFiles must dedupe onto a single FileSpec indirect
+        // object. The annotations still get distinct indirect refs;
+        // their /FS entries name the same FileSpec.
+        let file = sample_embedded_file("shared.bin");
+        let a1 = FileAttachmentAnnotation::new(
+            Rect::from_xywh(10.0, 10.0, 20.0, 20.0).unwrap(),
+            file.clone(),
+            FileAttachmentIcon::PushPin,
+        );
+        let a2 = FileAttachmentAnnotation::new(
+            Rect::from_xywh(50.0, 50.0, 20.0, 20.0).unwrap(),
+            file,
+            FileAttachmentIcon::Paperclip,
+        );
+
+        let settings = crate::SerializeSettings {
+            pretty: true,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page =
+            document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        page.add_annotation(Annotation::new_file_attachment(a1, Some("alt".into())));
+        page.add_annotation(Annotation::new_file_attachment(a2, Some("alt".into())));
+        page.finish();
+        let pdf = document
+            .finish()
+            .expect("document serialisation should succeed");
+
+        // Print the PDF (for debug) and inspect.
+        if std::env::var_os("KRILLA_DUMP_PDF").is_some() {
+            eprintln!(
+                "PDF bytes: {}",
+                String::from_utf8_lossy(&pdf)
+            );
+        }
+
+        // The FileSpec dict is registered through `register_cacheable`,
+        // which dedupes by content hash. We assert that:
+        //
+        // 1. The PDF contains exactly one `/Type /Filespec` dictionary.
+        // 2. Both annotations exist (PushPin + Paperclip icons).
+        //
+        // We do NOT assert on the path literal occurrence count: the
+        // FileSpec emits the path twice (`/F (path)` plus `/UF
+        // <textstr>` under PDF 1.7+ which encodes to (path) too); the
+        // metric that matters is the FileSpec object count.
+        let filespec_count = pdf
+            .windows(b"/Type /Filespec".len())
+            .filter(|w| w == b"/Type /Filespec")
+            .count();
+        assert_eq!(
+            filespec_count, 1,
+            "FileSpec should be deduplicated to a single indirect object; \
+             got {filespec_count} /Type /Filespec dictionaries"
+        );
+
+        // Both annotations are present (Paperclip + PushPin /Name
+        // entries).
+        assert!(contains(&pdf, b"/Name /PushPin"));
+        assert!(contains(&pdf, b"/Name /Paperclip"));
+    }
+
+    #[test]
+    fn file_attachment_contents_field_emitted_when_no_alt() {
+        // When the embedder does not provide an outer alt-text, the
+        // inner `with_contents(...)` value survives as the annotation's
+        // /Contents entry. (When both are set, the subtype's own contents
+        // owns the single /Contents key and the alt text is not written —
+        // see `annotation_alt_and_contents_emit_single_contents_key`.)
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 5.0, 5.0).unwrap(),
+            sample_embedded_file("notes.bin"),
+            FileAttachmentIcon::Tag,
+        )
+        .with_contents("inner description");
+        let pdf = finish_with(Annotation::new_file_attachment(annotation, None));
+        assert!(
+            contains(&pdf, b"(inner description)"),
+            "inner /Contents must survive when no outer alt-text is set"
         );
     }
 }

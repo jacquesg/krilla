@@ -5,10 +5,11 @@
 use std::fmt::Display;
 
 use crate::tagging::{
-    Attr, BBox, BlockAlign, BorderStyle, ColumnDimensions, GlyphOrientationVertical, Identifier,
-    IdentifierInner, IdentifierType, InlineAlign, LayoutAttr, LineHeight, ListAttr, ListNumbering,
-    NaiveRgbColor, Node, Placement, Sides, StructAttr, TableAttr, TableHeaderScope, TagGroup,
-    TagId, TagKind, TagTree, TextAlign, TextDecorationType, WritingMode,
+    Attr, BBox, BlockAlign, BorderStyle, ColumnDimensions, FormAttr, FormFieldRole, FormFieldState,
+    GlyphOrientationVertical, Identifier, IdentifierInner, IdentifierType, InlineAlign, LayoutAttr,
+    LineHeight, ListAttr, ListNumbering, NaiveRgbColor, Node, Placement, Sides, StructAttr,
+    TableAttr, TableHeaderScope, TagGroup, TagId, TagKind, TagTree, TextAlign, TextDecorationType,
+    WritingMode,
 };
 
 /// Helper trait for indented output.
@@ -174,6 +175,7 @@ impl Output for TagKind {
 
 impl Output for Attr {
     fn output_indent(&self, f: &mut impl std::fmt::Write, indent: Indent) -> std::fmt::Result {
+        use FormAttr::*;
         use LayoutAttr::*;
         use ListAttr::*;
         use StructAttr::*;
@@ -214,6 +216,11 @@ impl Output for Attr {
                 }
                 RowSpan(rowspan) => writeln!(f, "/RowSpan: {}", rowspan.get()),
                 ColSpan(colspan) => writeln!(f, "/ColSpan: {}", colspan.get()),
+            },
+            Attr::Form(form_attr) => match form_attr {
+                Role(role) => writeln!(f, "/Role: {}", role.display()),
+                Checked(state) => writeln!(f, "/Checked: {}", state.display()),
+                Name(name) => writeln!(f, "/Desc: {name:?}"),
             },
             Attr::Layout(layout_attr) => match layout_attr {
                 Placement(placement) => writeln!(f, "/Placement: {}", placement.display()),
@@ -359,6 +366,30 @@ impl Output for TableHeaderScope {
             TableHeaderScope::Row => write!(f, "Row"),
             TableHeaderScope::Column => write!(f, "Column"),
             TableHeaderScope::Both => write!(f, "Both"),
+        }
+    }
+}
+
+impl ValueOutput for FormFieldRole {}
+impl Output for FormFieldRole {
+    fn output_indent(&self, f: &mut impl std::fmt::Write, _: Indent) -> std::fmt::Result {
+        match self {
+            FormFieldRole::Button => write!(f, "Button"),
+            FormFieldRole::CheckBox => write!(f, "CheckBox"),
+            FormFieldRole::RadioButton => write!(f, "RadioButton"),
+            FormFieldRole::TextField => write!(f, "TextField"),
+            FormFieldRole::ListBox => write!(f, "ListBox"),
+        }
+    }
+}
+
+impl ValueOutput for FormFieldState {}
+impl Output for FormFieldState {
+    fn output_indent(&self, f: &mut impl std::fmt::Write, _: Indent) -> std::fmt::Result {
+        match self {
+            FormFieldState::Off => write!(f, "Off"),
+            FormFieldState::On => write!(f, "On"),
+            FormFieldState::Mixed => write!(f, "Mixed"),
         }
     }
 }

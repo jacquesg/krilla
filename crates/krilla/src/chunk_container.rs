@@ -1,5 +1,6 @@
 use pdf_writer::{Chunk, Finish, Name, Pdf, Ref, Str, TextStr};
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::sync::OnceLock;
 use xmp_writer::{RenditionClass, XmpWriter};
 
@@ -293,6 +294,80 @@ impl ChunkContainer {
             ocg.intent(layer.intent.to_pdf_writer());
         }
 
+        // G64 — emit one indirect `/S /JavaScript` action dictionary
+        // per document-level script (`Metadata::document_javascript`)
+        // and one per catalogue-level event script
+        // (`Metadata::document_event_script`). The refs are allocated
+        // here from the same final-numbering counter as the layer /
+        // metadata refs, so they don't collide with chunk-renumbered
+        // refs. Both sets are referenced from inside the catalog block
+        // (named-JavaScript entries land on `/Names /JavaScript`,
+        // event-keyed entries on `/AA /WC` / `/WS` / `/DS` / `/WP` /
+        // `/DP`). ISO 32000-2 §12.6.4.17 (JavaScript action) plus
+        // §12.6.3 Table 200 (catalogue additional-actions).
+        let document_js_refs: Vec<(String, Ref)> = metadata
+            .document_javascripts
+            .iter()
+            .map(|(name, source)| {
+                let ref_ = remapped_ref.bump();
+                let mut action = pdf.indirect(ref_).start::<pdf_writer::writers::Action>();
+                action
+                    .action_type(pdf_writer::types::ActionType::JavaScript)
+                    .js_string(TextStr(source));
+                action.finish();
+                (name.clone(), ref_)
+            })
+            .collect();
+
+        let document_event_refs: Vec<(crate::interchange::metadata::DocumentEvent, Ref)> = metadata
+            .document_event_scripts
+            .iter()
+            .map(|(event, source)| {
+                let ref_ = remapped_ref.bump();
+                let mut action = pdf.indirect(ref_).start::<pdf_writer::writers::Action>();
+                action
+                    .action_type(pdf_writer::types::ActionType::JavaScript)
+                    .js_string(TextStr(source));
+                action.finish();
+                (*event, ref_)
+            })
+            .collect();
+
+        // Register the JavaScript / catalog-additional-action /
+        // non-standard-named-action conformance errors before the catalog is
+        // written (ISO 32000-2 §12.6). PDF/A-1/-2/-3 forbid JavaScript actions,
+        // every PDF/A part forbids the catalog `/AA` and non-standard named
+        // actions, and PDF/X forbids them all; `register_validation_error`
+        // filters through the active validators, so unconditional registration
+        // here is correct.
+        if !metadata.document_javascripts.is_empty() {
+            sc.register_validation_error(ValidationError::ContainsJavaScriptAction(None));
+        }
+        if !metadata.document_event_scripts.is_empty() {
+            sc.register_validation_error(ValidationError::ContainsCatalogAdditionalActions(None));
+            sc.register_validation_error(ValidationError::ContainsJavaScriptAction(None));
+        }
+        if let Some(open_action) = metadata.open_action.as_ref() {
+            use crate::interchange::metadata::{NamedAction, OpenAction};
+            match open_action {
+                OpenAction::JavaScript(_) => {
+                    sc.register_validation_error(ValidationError::ContainsJavaScriptAction(None));
+                }
+                OpenAction::Named(named)
+                    if !matches!(
+                        named,
+                        NamedAction::NextPage
+                            | NamedAction::PrevPage
+                            | NamedAction::FirstPage
+                            | NamedAction::LastPage
+                    ) =>
+                {
+                    sc.register_validation_error(ValidationError::NonStandardNamedAction(None));
+                }
+                _ => {}
+            }
+        }
+
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
         // useful to not write a document catalog if we don't actually need it for the test.
@@ -485,12 +560,97 @@ impl ChunkContainer {
                 catalog.outlines(remapper[&ol.0]);
             }
 
+            // G5b — `/OpenAction` document action (ISO 32000-2
+            // §12.6.4.3). Two flavours are supported (see
+            // `Metadata::open_action`):
+            //
+            // - `OpenAction::GoToPage { page_index, zoom }` — the
+            //   direct-link `[<page-ref> <destination>]` form. The
+            //   destination flavour is mapped through `OpenZoom`;
+            //   out-of-range page indices are clamped at the caller
+            //   boundary, so resolving against `page_infos()` here
+            //   is infallible-by-construction.
+            // - `OpenAction::Named(NamedAction)` — the named-action
+            //   form `<< /Type /Action /S /Named /N /<name> >>`
+            //   (ISO 32000-2 §12.6.4.12 Table 216). Used to raise
+            //   the viewer's print dialog on open
+            //   (NamedAction::Print).
+            if let Some(open_action) = metadata.open_action {
+                use crate::interchange::metadata::{OpenAction, OpenZoom};
+                use crate::serialize::PageInfo;
+                match open_action {
+                    OpenAction::GoToPage { page_index, zoom } => {
+                        let page_info = sc.page_infos().get(page_index).expect(
+                            "Metadata::open_action page_index out of range; \
+                             the embedder must clamp before calling",
+                        );
+                        let page_ref = match page_info {
+                            PageInfo::Krilla { ref_, .. } => *ref_,
+                            PageInfo::Pdf { ref_, .. } => *ref_,
+                        };
+                        let mut array = catalog
+                            .deref_mut()
+                            .insert(Name(b"OpenAction"))
+                            .array();
+                        array.item(page_ref);
+                        match zoom {
+                            OpenZoom::Xyz(zoom) => {
+                                array.item(Name(b"XYZ"));
+                                array.item(pdf_writer::Null);
+                                array.item(pdf_writer::Null);
+                                array.item(zoom);
+                            }
+                            OpenZoom::FitPage => {
+                                array.item(Name(b"Fit"));
+                            }
+                            OpenZoom::FitHorizontalToWidth => {
+                                array.item(Name(b"FitH"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitVerticalToHeight => {
+                                array.item(Name(b"FitV"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitBoundingBox => {
+                                array.item(Name(b"FitB"));
+                            }
+                            OpenZoom::FitBoundingBoxHorizontal => {
+                                array.item(Name(b"FitBH"));
+                                array.item(pdf_writer::Null);
+                            }
+                            OpenZoom::FitBoundingBoxVertical => {
+                                array.item(Name(b"FitBV"));
+                                array.item(pdf_writer::Null);
+                            }
+                        }
+                        array.finish();
+                    }
+                    OpenAction::Named(named) => {
+                        // `<< /Type /Action /S /Named /N /<name> >>`
+                        // per ISO 32000-2 §12.6.4.12 Table 216. pdf-writer
+                        // does not expose a Named ActionType today so
+                        // the dictionary is written directly.
+                        let mut dict = catalog
+                            .deref_mut()
+                            .insert(Name(b"OpenAction"))
+                            .dict();
+                        dict.pair(Name(b"Type"), Name(b"Action"));
+                        dict.pair(Name(b"S"), Name(b"Named"));
+                        dict.pair(Name(b"N"), named.to_name());
+                        dict.finish();
+                    }
+                }
+            }
+
             let settings = sc.serialize_settings();
             let validators = settings.validators();
             let write_embedded_files = self.non_stream.embedded_files.len() != 0
                 || validators.requires_embedded_files_when_empty();
 
-            if !named_destinations.is_empty() || write_embedded_files {
+            if !named_destinations.is_empty()
+                || write_embedded_files
+                || !document_js_refs.is_empty()
+            {
                 // Cannot use pdf-writer API here because it requires Ref's, while
                 // we write our destinations directly into the array.
                 let mut names = catalog.names();
@@ -534,6 +694,27 @@ impl ChunkContainer {
                     for (name, (ref_, _location)) in &embedded_files {
                         embedded_name_entries.insert(Str(name.as_bytes()), remapper[ref_]);
                     }
+                }
+
+                // G64 — `/Names /JavaScript` name tree (ISO 32000-2
+                // §12.6.4.17). Document-level JavaScript actions
+                // declared via `Metadata::document_javascript`. Each
+                // entry is written as a leaf-level (`/Names [key val
+                // ...]`) name tree; the keys MUST be sorted lexically
+                // per ISO 32000-1 §7.9.6 so a single leaf node is
+                // valid. Author duplicates are pre-deduplicated at
+                // the Metadata builder boundary.
+                if !document_js_refs.is_empty() {
+                    let mut js_name_tree = names.javascript();
+                    let mut js_entries = js_name_tree.names();
+
+                    let mut sorted: Vec<&(String, Ref)> = document_js_refs.iter().collect();
+                    sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+                    for (name, ref_) in sorted {
+                        js_entries.insert(Str(name.as_bytes()), *ref_);
+                    }
+                    js_entries.finish();
+                    js_name_tree.finish();
                 }
             }
 
@@ -629,6 +810,42 @@ impl ChunkContainer {
                 default.name(TextStr("Default"));
                 default.finish();
                 oc.finish();
+            }
+
+            // G64 — catalogue-level `/AA` additional-actions
+            // dictionary (ISO 32000-2 §12.6.3 Table 200). One slot
+            // per event keyword (`/WC`, `/WS`, `/DS`, `/WP`, `/DP`)
+            // pointing at the indirect JavaScript-action dict
+            // written above. pdf-writer exposes typed setters for
+            // each catalogue-level event; we emit them by indirect
+            // reference rather than building a fresh action dict
+            // inline so the actions can be shared with future
+            // viewer-side callers that need a stable ref.
+            if !document_event_refs.is_empty() {
+                use crate::interchange::metadata::DocumentEvent;
+                let mut aa = catalog.additional_actions();
+                for (event, ref_) in &document_event_refs {
+                    let key: &[u8] = match event {
+                        DocumentEvent::WillClose => b"WC",
+                        DocumentEvent::WillSave => b"WS",
+                        DocumentEvent::DidSave => b"DS",
+                        DocumentEvent::WillPrint => b"WP",
+                        DocumentEvent::DidPrint => b"DP",
+                    };
+                    // `pdf-writer` does not expose a typed setter for
+                    // a Ref reference on the catalogue `/AA` keys
+                    // (each `cat_before_close()` / `cat_before_save()`
+                    // / etc. starts a fresh inline `Action` writer).
+                    // We need the indirect-ref shape so the action
+                    // dict can be shared and validators that crawl
+                    // `/Names /JavaScript` plus `/AA` see one source
+                    // of truth. The deref escape hatch keeps the
+                    // emitted bytes spec-conformant (`/AA /<KEY>` is
+                    // either an inline dict or an indirect ref per
+                    // ISO 32000-2 §12.6.3).
+                    aa.deref_mut().pair(Name(key), *ref_);
+                }
+                aa.finish();
             }
 
             catalog.finish();
