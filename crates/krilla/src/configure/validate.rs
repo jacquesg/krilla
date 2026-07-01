@@ -340,6 +340,23 @@ pub struct Validators {
 }
 
 impl Validators {
+    /// Whether any active validator forbids `/AcroForm /NeedAppearances true`.
+    ///
+    /// Every PDF/A part requires form-field appearance streams to be present
+    /// (so `NeedAppearances` must be absent or false), and the accessibility
+    /// profiles require concrete appearances too. krilla always emits a real
+    /// `/AP /N` for its widgets, so suppressing the flag under these
+    /// validators loses nothing.
+    pub(crate) fn prohibits_need_appearances(self) -> bool {
+        // PDF/A and PDF/UA require baked appearance streams, and PDF/X-6/-6p
+        // forbid `/NeedAppearances true` outright (ISO 15930-9 §6.13.1). krilla
+        // always writes an `/AP /N` for every widget, so the flag is never
+        // needed, but it must be actively suppressed under these validators.
+        self.a.is_some()
+            || self.ua.is_some()
+            || matches!(self.x, Some(Prepress::X6 | Prepress::X6P))
+    }
+
     /// Returns a filtered `Validators` containing only validators that prohibit the given error,
     /// or `None` if no validator prohibits it.
     pub fn prohibits(self, error: &ValidationError) -> Option<Self> {

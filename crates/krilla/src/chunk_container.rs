@@ -205,6 +205,9 @@ impl ChunkContainer {
 
         let named_destinations = sc.global_objects.named_destinations.take();
         let embedded_files = sc.global_objects.embedded_files.take();
+        let widget_fields = sc.global_objects.widget_fields.take();
+        let calculate_order_fields = sc.global_objects.calculate_order_fields.take();
+        let helvetica_ref = sc.global_objects.standard_helvetica_font;
 
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
@@ -215,7 +218,48 @@ impl ChunkContainer {
             || self.non_stream.destination_profiles.is_some()
             || self.non_stream.struct_tree_root.is_some()
         {
-            let meta_ref = if sc.serialize_settings().xmp_metadata {
+            // Raw-XMP override: when the caller supplied a verbatim XMP
+            // packet via `Metadata::raw_xmp`, write those bytes into the
+            // `/Metadata` stream instead of finishing the in-memory
+            // [`XmpWriter`]. This is an explicit opt-in, so it forces the
+            // catalogue to carry a `/Metadata` entry even when
+            // `SerializeSettings::xmp_metadata` is `false`.
+            // When the document is encrypted but the caller disabled
+            // `encrypt_metadata`, the `/Metadata` stream body is written in the
+            // clear (inside an `unencrypted` scope) and carries an Identity
+            // `/Crypt` filter so conforming readers do not attempt to decrypt
+            // it (ISO 32000-2 §7.6.6). Otherwise it is written normally and is
+            // encrypted alongside every other stream when encryption is active.
+            let metadata_in_clear = sc
+                .serialize_settings()
+                .encryption
+                .as_ref()
+                .is_some_and(|e| !e.encrypt_metadata);
+            let write_metadata = |pdf: &mut Pdf, meta_ref: Ref, bytes: &[u8]| {
+                if metadata_in_clear {
+                    pdf.unencrypted(|pdf| {
+                        let mut stream = pdf.stream(meta_ref, bytes);
+                        stream
+                            .pair(Name(b"Type"), Name(b"Metadata"))
+                            .pair(Name(b"Subtype"), Name(b"XML"));
+                        stream.filter(pdf_writer::Filter::Crypt);
+                        let mut decode_parms = stream.insert(Name(b"DecodeParms")).dict();
+                        decode_parms
+                            .pair(Name(b"Type"), Name(b"CryptFilterDecodeParms"))
+                            .pair(Name(b"Name"), Name(b"Identity"));
+                        decode_parms.finish();
+                    });
+                } else {
+                    pdf.stream(meta_ref, bytes)
+                        .pair(Name(b"Type"), Name(b"Metadata"))
+                        .pair(Name(b"Subtype"), Name(b"XML"));
+                }
+            };
+            let meta_ref = if let Some(raw) = metadata.raw_xmp.as_deref() {
+                let meta_ref = remapped_ref.bump();
+                write_metadata(&mut pdf, meta_ref, raw);
+                Some(meta_ref)
+            } else if sc.serialize_settings().xmp_metadata {
                 let meta_ref = remapped_ref.bump();
                 let xmp_buf = xmp.finish(None);
                 pdf.stream(meta_ref, xmp_buf.as_bytes())
@@ -409,6 +453,25 @@ impl ChunkContainer {
                 for _ref in embedded_files.values() {
                     associated_files.item(remapper[_ref]).finish();
                 }
+            }
+
+            // AcroForm dictionary (ISO 32000-2 §12.7.3). Written whenever
+            // the document emitted at least one widget annotation. We do
+            // not currently emit `/AP` appearance streams; setting
+            // `/NeedAppearances true` directs conforming viewers
+            // (Acrobat in particular) to regenerate appearances from
+            // each field's `/V` and `/DA` on first save, which is the
+            // standard fallback for engines that emit field values
+            // without bundled appearances.
+            if !widget_fields.is_empty() {
+                let mut acro_form = catalog.insert(Name(b"AcroForm")).dict();
+                let mut fields = acro_form.insert(Name(b"Fields")).array();
+                for field_ref in &widget_fields {
+                    fields.item(remapper[field_ref]);
+                }
+                fields.finish();
+                acro_form.pair(Name(b"NeedAppearances"), true);
+                acro_form.finish();
             }
 
             catalog.finish();
