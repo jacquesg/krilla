@@ -1081,3 +1081,79 @@ fn tagging_missing_identifier_in_tree() {
 
     let _ = document.finish();
 }
+
+#[test]
+fn aside_emits_pdf_20_role_with_ssn_namespace() {
+    // Under PDF 2.0 the `Aside` role lives in the standard structure
+    // namespace (SSN) per ISO 32000-2 §14.8.4.3. The bytes must
+    // contain `/S /Aside` and reference the SSN URL `iso.org/pdf2/ssn`.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Aside));
+    let pdf = document_with(pretty(settings_25()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Aside"),
+        "/S /Aside missing from PDF 2.0 output for Tag::Aside"
+    );
+    assert!(
+        contains(&pdf, b"iso.org/pdf2/ssn"),
+        "PDF 2.0 SSN namespace URL missing from output containing Tag::Aside"
+    );
+}
+
+#[test]
+fn aside_falls_back_to_div_on_pdf_17() {
+    // PDF 1.7 has no `Aside` role; the compat path emits `/S /Div`
+    // (matching `StructRole2::Aside.compatibility_1_7(default)`).
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Aside));
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Div"),
+        "PDF 1.7 fallback for Tag::Aside should emit /S /Div"
+    );
+    assert!(
+        !contains(&pdf, b"/S /Aside"),
+        "Tag::Aside must not emit /S /Aside in PDF 1.7 output"
+    );
+}
+
+#[test]
+fn sub_emits_pdf_20_role_with_ssn_namespace() {
+    // Under PDF 2.0 the `Sub` role lives in the SSN per ISO 32000-2
+    // §14.8.4.6. The bytes must contain `/S /Sub` and reference the
+    // SSN URL.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Sub));
+    let pdf = document_with(pretty(settings_25()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Sub"),
+        "/S /Sub missing from PDF 2.0 output for Tag::Sub"
+    );
+    assert!(
+        contains(&pdf, b"iso.org/pdf2/ssn"),
+        "PDF 2.0 SSN namespace URL missing from output containing Tag::Sub"
+    );
+}
+
+#[test]
+fn sub_emits_custom_role_on_pdf_17() {
+    // PDF 1.7 has no `Sub` standard role; krilla emits a custom
+    // role `Sub` (custom_kind) and registers a `/Sub -> /Span`
+    // mapping in the document `/RoleMap`. This mirrors how `Strong`
+    // and `Em` are handled so the inline-level semantic survives.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Sub));
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Sub"),
+        "Tag::Sub must emit a custom /S /Sub element on PDF 1.7"
+    );
+    assert!(
+        contains(&pdf, b"/Sub /Span"),
+        "Tag::Sub must register /Sub -> /Span in the PDF 1.7 /RoleMap"
+    );
+}

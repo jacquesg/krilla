@@ -2106,6 +2106,11 @@ impl SerializeContext {
                     (b"Title".to_vec(), StructRole::P),
                     (b"Strong".to_vec(), StructRole::Span),
                     (b"Em".to_vec(), StructRole::Span),
+                    // `Sub` is PDF 2.0 only in the SSN; emitting it
+                    // as a custom kind on PDF 1.7 requires a /RoleMap
+                    // entry so legacy consumers can still treat the
+                    // subdivision as inline content.
+                    (b"Sub".to_vec(), StructRole::Span),
                 ];
                 for level in self.global_objects.custom_heading_roles.iter() {
                     let role2 = StructRole2::Heading(*level);

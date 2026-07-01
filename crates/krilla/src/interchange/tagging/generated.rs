@@ -15,6 +15,14 @@ pub enum TagKind {
     Section(Tag<kind::Section>),
     /// A generic block-level grouping element.
     Div(Tag<kind::Div>),
+    /// Content distinct from the surrounding content, such as a callout,
+    /// sidebar, commentary, or background information. PDF 2.0+.
+    ///
+    /// Maps to the `Aside` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.3). On PDF 1.7 documents it falls
+    /// back to `Div`, losing the aside semantic — only PDF 2.0+ output
+    /// (PDF/UA-2, WTPDF) carries the role faithfully.
+    Aside(Tag<kind::Aside>),
     /// A paragraph-level quote.
     BlockQuote(Tag<kind::BlockQuote>),
     /// An image or figure caption.
@@ -132,6 +140,15 @@ pub enum TagKind {
     Strong(Tag<kind::Strong>),
     /// Encloses content that is emphasized, most commonly *italic* text.
     Em(Tag<kind::Em>),
+    /// A subdivision inside a block-level element — typically the inline
+    /// subscript or superscript context exposed by HTML's `<sub>` and
+    /// `<sup>` elements. PDF 2.0+.
+    ///
+    /// Maps to the `Sub` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.6). On PDF 1.7 documents it falls
+    /// back to a custom role mapped to `Span`, keeping the inline-level
+    /// semantics for legacy consumers.
+    Sub(Tag<kind::Sub>),
 }
 
 impl TagKind {
@@ -142,6 +159,7 @@ impl TagKind {
             Self::Article(tag) => tag.as_any(),
             Self::Section(tag) => tag.as_any(),
             Self::Div(tag) => tag.as_any(),
+            Self::Aside(tag) => tag.as_any(),
             Self::BlockQuote(tag) => tag.as_any(),
             Self::Caption(tag) => tag.as_any(),
             Self::TOC(tag) => tag.as_any(),
@@ -177,6 +195,7 @@ impl TagKind {
             Self::Title(tag) => tag.as_any(),
             Self::Strong(tag) => tag.as_any(),
             Self::Em(tag) => tag.as_any(),
+            Self::Sub(tag) => tag.as_any(),
         }
     }
 
@@ -188,6 +207,7 @@ impl TagKind {
             Self::Article(tag) => tag.as_any_mut(),
             Self::Section(tag) => tag.as_any_mut(),
             Self::Div(tag) => tag.as_any_mut(),
+            Self::Aside(tag) => tag.as_any_mut(),
             Self::BlockQuote(tag) => tag.as_any_mut(),
             Self::Caption(tag) => tag.as_any_mut(),
             Self::TOC(tag) => tag.as_any_mut(),
@@ -223,6 +243,7 @@ impl TagKind {
             Self::Title(tag) => tag.as_any_mut(),
             Self::Strong(tag) => tag.as_any_mut(),
             Self::Em(tag) => tag.as_any_mut(),
+            Self::Sub(tag) => tag.as_any_mut(),
         }
     }
 
@@ -1524,6 +1545,16 @@ pub mod kind {
     #[derive(Clone, Debug, PartialEq)]
     pub struct Div;
 
+    /// Content distinct from the surrounding content, such as a callout,
+    /// sidebar, commentary, or background information. PDF 2.0+.
+    ///
+    /// Maps to the `Aside` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.3). On PDF 1.7 documents it falls
+    /// back to `Div`, losing the aside semantic — only PDF 2.0+ output
+    /// (PDF/UA-2, WTPDF) carries the role faithfully.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Aside;
+
     /// A paragraph-level quote.
     #[derive(Clone, Debug, PartialEq)]
     pub struct BlockQuote;
@@ -1711,6 +1742,17 @@ pub mod kind {
     #[derive(Clone, Debug, PartialEq)]
     pub struct Em;
 
+    /// A subdivision inside a block-level element — typically the inline
+    /// subscript or superscript context exposed by HTML's `<sub>` and
+    /// `<sup>` elements. PDF 2.0+.
+    ///
+    /// Maps to the `Sub` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.6). On PDF 1.7 documents it falls
+    /// back to a custom role mapped to `Span`, keeping the inline-level
+    /// semantics for legacy consumers.
+    #[derive(Clone, Debug, PartialEq)]
+    pub struct Sub;
+
 }
 
 impl From<Tag<kind::Part>> for TagKind {
@@ -1851,6 +1893,71 @@ impl Tag<kind::Div> {
     /// A generic block-level grouping element.
     #[allow(non_upper_case_globals)]
     pub const Div: Tag<kind::Div> = Tag::new();
+
+    /// The number of columns in the grouping element.
+    pub fn column_count(&self) -> Option<NonZeroU32> {
+        self.inner.get_layout(LayoutAttr::COLUMN_COUNT).map(LayoutAttr::unwrap_column_count)
+    }
+
+    /// Set the number of columns in the grouping element.
+    pub fn set_column_count(&mut self, column_count: Option<NonZeroU32>) {
+        self.inner.set_or_remove_layout(LayoutAttr::COLUMN_COUNT, column_count.map(LayoutAttr::ColumnCount));
+    }
+
+    /// Set the number of columns in the grouping element.
+    pub fn with_column_count(mut self, column_count: Option<NonZeroU32>) -> Self {
+        self.set_column_count(column_count);
+        self
+    }
+
+    /// The width of the gaps between columns in the grouping element.
+    pub fn column_gap(&self) -> Option<&ColumnDimensions> {
+        self.inner.get_layout(LayoutAttr::COLUMN_GAP).map(LayoutAttr::unwrap_column_gap)
+    }
+
+    /// Set the width of the gaps between columns in the grouping element.
+    pub fn set_column_gap(&mut self, column_gap: Option<ColumnDimensions>) {
+        self.inner.set_or_remove_layout(LayoutAttr::COLUMN_GAP, column_gap.map(LayoutAttr::ColumnGap));
+    }
+
+    /// Set the width of the gaps between columns in the grouping element.
+    pub fn with_column_gap(mut self, column_gap: Option<ColumnDimensions>) -> Self {
+        self.set_column_gap(column_gap);
+        self
+    }
+
+    /// The width of the columns in the grouping element.
+    pub fn column_widths(&self) -> Option<&ColumnDimensions> {
+        self.inner.get_layout(LayoutAttr::COLUMN_WIDTHS).map(LayoutAttr::unwrap_column_widths)
+    }
+
+    /// Set the width of the columns in the grouping element.
+    pub fn set_column_widths(&mut self, column_widths: Option<ColumnDimensions>) {
+        self.inner.set_or_remove_layout(LayoutAttr::COLUMN_WIDTHS, column_widths.map(LayoutAttr::ColumnWidths));
+    }
+
+    /// Set the width of the columns in the grouping element.
+    pub fn with_column_widths(mut self, column_widths: Option<ColumnDimensions>) -> Self {
+        self.set_column_widths(column_widths);
+        self
+    }
+}
+
+impl From<Tag<kind::Aside>> for TagKind {
+    fn from(value: Tag<kind::Aside>) -> Self {
+        Self::Aside(value)
+    }
+}
+impl Tag<kind::Aside> {
+    /// Content distinct from the surrounding content, such as a callout,
+    /// sidebar, commentary, or background information. PDF 2.0+.
+    ///
+    /// Maps to the `Aside` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.3). On PDF 1.7 documents it falls
+    /// back to `Div`, losing the aside semantic — only PDF 2.0+ output
+    /// (PDF/UA-2, WTPDF) carries the role faithfully.
+    #[allow(non_upper_case_globals)]
+    pub const Aside: Tag<kind::Aside> = Tag::new();
 
     /// The number of columns in the grouping element.
     pub fn column_count(&self) -> Option<NonZeroU32> {
@@ -4114,6 +4221,24 @@ impl Tag<kind::Em> {
     /// Encloses content that is emphasized, most commonly *italic* text.
     #[allow(non_upper_case_globals)]
     pub const Em: Tag<kind::Em> = Tag::new();
+}
+
+impl From<Tag<kind::Sub>> for TagKind {
+    fn from(value: Tag<kind::Sub>) -> Self {
+        Self::Sub(value)
+    }
+}
+impl Tag<kind::Sub> {
+    /// A subdivision inside a block-level element — typically the inline
+    /// subscript or superscript context exposed by HTML's `<sub>` and
+    /// `<sup>` elements. PDF 2.0+.
+    ///
+    /// Maps to the `Sub` structure role in the PDF 2.0 standard structure
+    /// namespace (ISO 32000-2 §14.8.4.6). On PDF 1.7 documents it falls
+    /// back to a custom role mapped to `Span`, keeping the inline-level
+    /// semantics for legacy consumers.
+    #[allow(non_upper_case_globals)]
+    pub const Sub: Tag<kind::Sub> = Tag::new();
 }
 
 #[derive(Clone, Debug, PartialEq)]
