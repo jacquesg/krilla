@@ -61,5 +61,10 @@ zune-jpeg = "0.5.5"
 # hayro-write pulls pdf-writer from crates.io; redirect every crate in the tree
 # (krilla included) onto the bloudraadpdf fork so the whole graph shares one
 # pdf-writer with the layers + AES-256 encryption additions.
+#
+# jacquesg/resvg feat/moegoe exposes PositionedGlyph.byte_idx (the logical
+# source offset) so krilla-svg can emit /ActualText in reading order for
+# RTL / bidi SVG text. Not upstream.
 [patch.crates-io]
 pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "3241e28b47c497bb8af9e9e88a0dadefccbb016b" }
+usvg = { git = "https://github.com/jacquesg/resvg", rev = "d7e643fe51a91208020cf13e792586545974afbc" }

@@ -2274,8 +2274,7 @@ checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
 [[package]]
 name = "usvg"
 version = "0.47.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d46cf96c5f498d36b7a9693bc6a7075c0bb9303189d61b2249b0dc3d309c07de"
+source = "git+https://github.com/jacquesg/resvg?rev=d7e643fe51a91208020cf13e792586545974afbc#d7e643fe51a91208020cf13e792586545974afbc"
 dependencies = [
  "base64",
  "data-url",
