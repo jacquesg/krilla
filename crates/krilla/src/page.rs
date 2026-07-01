@@ -218,6 +218,10 @@ pub struct Page<'a> {
     num_mcids: i32,
     annotations: Vec<Annotation>,
     radio_groups: Vec<RadioGroupPayload>,
+    /// Optional `/Thumb` thumbnail image ref (ISO 32000-2 §12.3.4).
+    /// Populated lazily via [`Page::set_thumbnail`]; emitted into the
+    /// page dictionary during serialisation.
+    thumbnail_ref: Option<Ref>,
 }
 
 /// Internal record produced by [`Page::add_radio_group`] — the
@@ -253,6 +257,7 @@ impl<'a> Page<'a> {
             page_stream: Stream::empty(),
             annotations: vec![],
             radio_groups: vec![],
+            thumbnail_ref: None,
         }
     }
 
@@ -336,6 +341,30 @@ impl<'a> Page<'a> {
         }
     }
 
+    /// Attach a `/Thumb` thumbnail image to this page
+    /// (ISO 32000-2 §12.3.4).
+    ///
+    /// The supplied [`crate::graphics::image::Image`] is registered
+    /// with the document's image cache (so duplicate thumbnails
+    /// across pages share an XObject) and its indirect reference is
+    /// stashed on the page; serialisation writes it into the page
+    /// dictionary's `/Thumb` slot per the spec. Thumbnails must be
+    /// in `/DeviceRGB`, `/DeviceGray`, or an indexed colour space
+    /// based on one of those — krilla does not enforce the
+    /// constraint at attach time (an out-of-spec thumbnail would be
+    /// rejected by the active validator at finalise time).
+    ///
+    /// Calling this method more than once on the same page replaces
+    /// the previous thumbnail. To clear, pass a freshly constructed
+    /// image; the prior ref is dropped (the XObject itself remains
+    /// in the cache and will only be garbage-collected when the
+    /// document is finalised).
+    #[cfg(feature = "raster-images")]
+    pub fn set_thumbnail(&mut self, image: crate::graphics::image::Image) {
+        let image_ref = self.sc.register_image(self.chunk_container, image);
+        self.thumbnail_ref = Some(image_ref);
+    }
+
     /// Get the surface of the page to draw on. Calling this multiple times
     /// on the same page will reset any previous drawings.
     pub fn surface(&mut self) -> Surface<'_> {
@@ -414,13 +443,14 @@ impl Drop for Page<'_> {
         let annotations = std::mem::take(&mut self.annotations);
         let radio_groups = std::mem::take(&mut self.radio_groups);
         let page_settings = std::mem::take(&mut self.page_settings);
+        let thumbnail_ref = self.thumbnail_ref.take();
 
         let struct_parent = self
             .sc
             .register_page_struct_parent(self.page_index, self.num_mcids);
 
         let stream = std::mem::replace(&mut self.page_stream, Stream::empty());
-        let page = InternalPage::new(
+        let mut page = InternalPage::new(
             stream,
             self.sc,
             annotations,
@@ -429,6 +459,7 @@ impl Drop for Page<'_> {
             page_settings,
             self.page_index,
         );
+        page.thumbnail_ref = thumbnail_ref;
         self.sc.register_page(page);
     }
 }
@@ -470,6 +501,10 @@ pub(crate) struct InternalPage {
     pub bbox: Rect,
     pub annotations: Vec<Annotation>,
     pub radio_groups: Vec<RadioGroupPayload>,
+    /// `/Thumb` thumbnail image ref (ISO 32000-2 §12.3.4).
+    /// Populated from `Page::set_thumbnail`; emitted into the page
+    /// dictionary during `InternalPage::serialize`.
+    pub thumbnail_ref: Option<Ref>,
 }
 
 impl InternalPage {
@@ -513,6 +548,9 @@ impl InternalPage {
             radio_groups,
             page_settings,
             page_index,
+            // Populated post-construction by `Page::drop` from the
+            // value set via `Page::set_thumbnail`.
+            thumbnail_ref: None,
         }
     }
 
@@ -795,6 +833,15 @@ impl InternalPage {
                     sc.location,
                 ));
             }
+        }
+
+        // `/Thumb` thumbnail image (ISO 32000-2 §12.3.4). The ref
+        // was allocated by `Page::set_thumbnail` via
+        // `SerializeContext::register_image`, so the XObject chunk
+        // is already queued for emission on the image-cache pipeline
+        // — we only need to pair the page dict to its ref here.
+        if let Some(thumb_ref) = self.thumbnail_ref {
+            page.thumbnail(thumb_ref);
         }
 
         page.parent(sc.page_tree_ref());
