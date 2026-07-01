@@ -548,6 +548,10 @@ impl TagKind {
             Self::Article(_) => write_kind_1_7(sc, struct_elem, StructRole::Art, ns),
             Self::Section(_) => write_kind_compat(sc, struct_elem, StructRole2::Sect, ns),
             Self::Div(_) => write_kind_compat(sc, struct_elem, StructRole2::Div, ns),
+            // `Aside` is PDF 2.0 only in the SSN. On PDF 1.7 the
+            // role downgrades to `Div` via `write_kind_compat`,
+            // matching `StructRole2::Aside.compatibility_1_7(...)`.
+            Self::Aside(_) => write_kind_compat(sc, struct_elem, StructRole2::Aside, ns),
             Self::BlockQuote(_) => write_kind_1_7(sc, struct_elem, StructRole::BlockQuote, ns),
             Self::Caption(_) => write_kind_compat(sc, struct_elem, StructRole2::Caption, ns),
             Self::TOC(_) => write_kind_1_7(sc, struct_elem, StructRole::TOC, ns),
@@ -593,7 +597,7 @@ impl TagKind {
                     }
                     struct_elem.custom_kind(role2.to_name(&mut [0; 6]));
                 } else {
-                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or_else(|| sc.pdf2_namespaces().ssn_ref);
                     struct_elem.kind_2(role2, ns_ref);
                 }
             }
@@ -601,7 +605,7 @@ impl TagKind {
                 if pdf_version < PdfVersion::Pdf20 {
                     struct_elem.custom_kind(Name(b"Strong"));
                 } else {
-                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or_else(|| sc.pdf2_namespaces().ssn_ref);
                     struct_elem.kind_2(StructRole2::Strong, ns_ref);
                 }
             }
@@ -609,8 +613,21 @@ impl TagKind {
                 if pdf_version < PdfVersion::Pdf20 {
                     struct_elem.custom_kind(Name(b"Em"));
                 } else {
-                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or_else(|| sc.pdf2_namespaces().ssn_ref);
                     struct_elem.kind_2(StructRole2::Em, ns_ref);
+                }
+            }
+            // `Sub` is PDF 2.0 only in the SSN. On PDF 1.7 we emit
+            // a custom role rather than downgrade to `Div`/`Span`,
+            // mirroring the `Strong`/`Em` pattern so the inline-level
+            // semantic survives the role-map registration even on
+            // pre-2.0 consumers.
+            Self::Sub(_) => {
+                if pdf_version < PdfVersion::Pdf20 {
+                    struct_elem.custom_kind(Name(b"Sub"));
+                } else {
+                    let ns_ref = ns.unwrap_or_else(|| sc.pdf2_namespaces().ssn_ref);
+                    struct_elem.kind_2(StructRole2::Sub, ns_ref);
                 }
             }
         };
@@ -622,6 +639,7 @@ impl TagKind {
             Self::Article(_) => PdfVersion::Pdf14,
             Self::Section(_) => PdfVersion::Pdf14,
             Self::Div(_) => PdfVersion::Pdf14,
+            Self::Aside(_) => PdfVersion::Pdf14,
             Self::BlockQuote(_) => PdfVersion::Pdf14,
             Self::Caption(_) => PdfVersion::Pdf14,
             Self::TOC(_) => PdfVersion::Pdf14,
@@ -660,6 +678,7 @@ impl TagKind {
             Self::Title(_) => PdfVersion::Pdf14,
             Self::Strong(_) => PdfVersion::Pdf14,
             Self::Em(_) => PdfVersion::Pdf14,
+            Self::Sub(_) => PdfVersion::Pdf14,
         }
     }
 
@@ -676,10 +695,16 @@ impl TagKind {
 /// indirect ref of the namespace dictionary krilla allocates at
 /// document level. Returns `None` if the caller did not set an
 /// override; the per-kind writers then use their default binding.
-fn resolve_ns_override(sc: &SerializeContext, ns: Option<TagNamespace>) -> Option<Ref> {
+///
+/// Takes `&mut SerializeContext` because resolving `Pdf2Ssn` or
+/// `Krilla` may need to lazily allocate the namespace refs on first
+/// call (see `SerializeContext::pdf2_namespaces`). Custom-handle
+/// lookups never allocate.
+fn resolve_ns_override(sc: &mut SerializeContext, ns: Option<TagNamespace>) -> Option<Ref> {
     ns.map(|ns| match ns {
-        TagNamespace::Pdf2Ssn => sc.pdf2_ns.ssn_ref,
-        TagNamespace::Krilla => sc.pdf2_ns.krilla_ref,
+        TagNamespace::Pdf2Ssn => sc.pdf2_namespaces().ssn_ref,
+        TagNamespace::Krilla => sc.pdf2_namespaces().krilla_ref,
+        TagNamespace::Custom(handle) => sc.custom_namespace_ref(handle),
     })
 }
 
@@ -712,7 +737,7 @@ fn write_kind_compat(
         let compat = role.compatibility_1_7(RoleMapOpts::default());
         struct_elem.kind(compat.role());
     } else {
-        let ns_ref = ns_override.unwrap_or(sc.pdf2_ns.ssn_ref);
+        let ns_ref = ns_override.unwrap_or_else(|| sc.pdf2_namespaces().ssn_ref);
         struct_elem.kind_2(role, ns_ref);
     }
 }
@@ -727,7 +752,7 @@ fn write_kind_custom(
 ) {
     struct_elem.custom_kind(name);
     if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf20 {
-        let ns_ref = ns_override.unwrap_or(sc.pdf2_ns.krilla_ref);
+        let ns_ref = ns_override.unwrap_or_else(|| sc.pdf2_namespaces().krilla_ref);
         struct_elem.namespace(ns_ref);
     }
 }

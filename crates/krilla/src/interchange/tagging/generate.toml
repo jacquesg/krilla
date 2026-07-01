@@ -23,6 +23,19 @@ optional = [
   "Layout::ColumnGap",
   "Layout::ColumnWidths",
 ]
+# Content distinct from the surrounding content, such as a callout,
+# sidebar, commentary, or background information. PDF 2.0+.
+#
+# Maps to the `Aside` structure role in the PDF 2.0 standard structure
+# namespace (ISO 32000-2 §14.8.4.3). On PDF 1.7 documents it falls
+# back to `Div`, losing the aside semantic — only PDF 2.0+ output
+# (PDF/UA-2, WTPDF) carries the role faithfully.
+[Tag.Aside]
+optional = [
+  "Layout::ColumnCount",
+  "Layout::ColumnGap",
+  "Layout::ColumnWidths",
+]
 # A paragraph-level quote.
 [Tag.BlockQuote]
 # An image or figure caption.
@@ -365,6 +378,15 @@ optional = [
 [Tag.Strong]
 # Encloses content that is emphasized, most commonly *italic* text.
 [Tag.Em]
+# A subdivision inside a block-level element — typically the inline
+# subscript or superscript context exposed by HTML's `<sub>` and
+# `<sup>` elements. PDF 2.0+.
+#
+# Maps to the `Sub` structure role in the PDF 2.0 standard structure
+# namespace (ISO 32000-2 §14.8.4.6). On PDF 1.7 documents it falls
+# back to a custom role mapped to `Span`, keeping the inline-level
+# semantics for legacy consumers.
+[Tag.Sub]
 
 [Attr.Struct]
 # The tag id.

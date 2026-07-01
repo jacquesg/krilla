@@ -29,6 +29,34 @@ pub enum EmbedError {
     MissingMimeType,
 }
 
+/// Logical placement of an embedded file within the catalogue's
+/// `/AF` associated-files array.
+///
+/// Controls only the order of entries in the catalogue's `/AF` array
+/// (ISO 32000-2 §14.13): every `Before` attachment is emitted ahead
+/// of every `After` attachment, and the original insertion order is
+/// preserved within each partition. The `/AF` array records the
+/// semantic association of files with the document and carries no
+/// normative presentation semantics, so this ordering does not by
+/// itself dictate how a viewer surfaces the attachments.
+///
+/// The `/Names /EmbeddedFiles` name tree — from which an interactive
+/// PDF processor populates its attachment panel (ISO 32000-2 §14.13.2
+/// NOTE 3) — is kept alphabetically sorted per ISO 32000-1 §7.9.6 and
+/// is unaffected by this setting.
+///
+/// Default is [`EmbedLocation::Before`].
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+pub enum EmbedLocation {
+    /// Attachment is positioned before the host document in
+    /// the catalogue's `/AF` array. Default.
+    #[default]
+    Before,
+    /// Attachment is positioned after the host document in the
+    /// catalogue's `/AF` array.
+    After,
+}
+
 /// An embedded file.
 #[derive(Debug, Clone, Hash)]
 pub struct EmbeddedFile {
@@ -48,8 +76,14 @@ pub struct EmbeddedFile {
     /// original file already has compression). If `None`, krilla will use its own logic
     /// for determining whether to compress the file or not.
     pub compress: Option<bool>,
-    /// The location of the embedded file.
+    /// The error-reporting location of the embedded file
+    /// (krilla's source-position [`Location`] tracker, not written
+    /// into the PDF). See [`EmbeddedFile::with_location`].
     pub location: Option<Location>,
+    /// Position of the attachment in the catalogue's `/AF` array
+    /// relative to the host document. See [`EmbedLocation`] and
+    /// [`EmbeddedFile::with_embed_location`].
+    pub embed_location: EmbedLocation,
 }
 
 impl EmbeddedFile {
@@ -71,6 +105,26 @@ impl EmbeddedFile {
     /// caller chose. It is not written into the PDF.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
+        self
+    }
+
+    /// Get the attachment's logical placement in the catalogue's
+    /// `/AF` array.
+    pub fn embed_location(&self) -> EmbedLocation {
+        self.embed_location
+    }
+
+    /// Set the attachment's logical placement in the catalogue's
+    /// `/AF` array. See [`EmbedLocation`] for the partitioning
+    /// semantics. Default is [`EmbedLocation::Before`].
+    pub fn set_embed_location(&mut self, location: EmbedLocation) {
+        self.embed_location = location;
+    }
+
+    /// Set the attachment's logical placement in the catalogue's
+    /// `/AF` array (consuming `self`).
+    pub fn with_embed_location(mut self, location: EmbedLocation) -> Self {
+        self.embed_location = location;
         self
     }
 }

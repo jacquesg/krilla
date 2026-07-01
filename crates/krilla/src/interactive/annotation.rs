@@ -251,6 +251,16 @@ impl Annotation {
                             );
                         }
                     }
+                    crate::color::RegularColor::IccBased { .. } => {
+                        // An IccBased annotation colour cannot be ICC-wrapped in
+                        // the raw `/C` array, so its N=3 components emit as
+                        // DeviceRGB — characterised like RGB under the intent.
+                        if !sc.serialize_settings().pdfx_output_intent_is_rgb() {
+                            sc.register_validation_error(ValidationError::AnnotationContainsRgb(
+                                self.location,
+                            ));
+                        }
+                    }
                 }
             }
         }
@@ -1593,6 +1603,21 @@ pub struct WidgetAnnotation {
     pub(crate) field: WidgetField,
     pub(crate) hidden: bool,
     pub(crate) tooltip: Option<String>,
+    /// `/AA /K` — keystroke action. Fires before a value change is
+    /// committed; typically wired to `AFDate_KeystrokeEx(fmt)` /
+    /// `AFTime_Keystroke(fmt)` / `AFNumber_Keystroke(...)` so the
+    /// viewer rejects out-of-range characters as the user types.
+    pub(crate) keystroke_action: Option<Action>,
+    /// `/AA /F` — format action. Fires before the value is displayed;
+    /// typically `AFDate_FormatEx(fmt)` / `AFTime_Format(fmt)` /
+    /// `AFNumber_Format(...)` so the field re-renders the canonical
+    /// formatted value.
+    pub(crate) format_action: Option<Action>,
+    /// `/AA /V` — validate action. Fires after a value change has
+    /// been committed; typically `AFRange_Validate(true, min, true, max)`
+    /// for numeric range bounds. The action may reject the change by
+    /// setting `event.rc = false` so the viewer reverts the field.
+    pub(crate) validate_action: Option<Action>,
 }
 
 impl WidgetAnnotation {
@@ -1611,6 +1636,9 @@ impl WidgetAnnotation {
             field,
             hidden: false,
             tooltip: None,
+            keystroke_action: None,
+            format_action: None,
+            validate_action: None,
         }
     }
 
@@ -1637,6 +1665,41 @@ impl WidgetAnnotation {
     /// the parent's value alongside `/T` and `/FT`.
     pub fn with_tooltip(mut self, tooltip: impl Into<String>) -> Self {
         self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    /// Set the widget's `/AA /K` (keystroke) additional action —
+    /// per ISO 32000-2 §12.6.3 Table 199. Fires before a value change
+    /// is committed; the action may reject the change by setting
+    /// `event.rc = false`.
+    ///
+    /// Typical use: `Action::JavaScript(JavaScriptAction::new(
+    /// "AFDate_KeystrokeEx(\"yyyy-mm-dd\");"))` to validate keystrokes
+    /// against an ISO date format. Passing `None` to a future setter
+    /// would clear the slot; the present builder is additive and is
+    /// expected to be called at most once per slot.
+    pub fn with_keystroke_action(mut self, action: Action) -> Self {
+        self.keystroke_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /F` (format) additional action —
+    /// per ISO 32000-2 §12.6.3 Table 199. Fires before the field's
+    /// value is rendered so the action may rewrite it (e.g. reformat
+    /// a date as `dd/mm/yyyy`). Typical use: the corresponding
+    /// `AFDate_FormatEx` / `AFTime_Format` / `AFNumber_Format` helper.
+    pub fn with_format_action(mut self, action: Action) -> Self {
+        self.format_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /V` (validate) additional action —
+    /// per ISO 32000-2 §12.6.3 Table 199. Fires after the value has
+    /// been committed; the action may set `event.rc = false` to
+    /// revert. Typical use: `AFRange_Validate(true, min, true, max)`
+    /// on a numeric or range field.
+    pub fn with_validate_action(mut self, action: Action) -> Self {
+        self.validate_action = Some(action);
         self
     }
 
@@ -1989,6 +2052,49 @@ impl WidgetAnnotation {
                     off: None,
                 };
             }
+        }
+
+        // `/AA` additional-actions dictionary (ISO 32000-2 §12.7.4
+        // Table 230). Emitted only when at least one of the
+        // form-field action slots — keystroke (`/K`), format (`/F`),
+        // validate (`/V`) — is populated; the dict is otherwise
+        // omitted because an empty `/AA` is meaningless to viewers.
+        // Each populated slot gets its own action sub-dictionary
+        // routed through `Action::serialize`, which selects the
+        // correct `/S` action type (`/JavaScript`, `/GoTo`, `/URI`,
+        // …) and writes the type-specific payload.
+        //
+        // Radio-group child widgets inherit `/AA` from their parent
+        // group (the AcroForm field-tree rule for terminal-field
+        // entries per §12.7.4.1) so suppress the slot when this
+        // widget is a radio-group child — emitting `/AA` here would
+        // override the inherited value with one tied to a child
+        // annotation that the viewer addresses by its `/AS` state.
+        if !is_radio_group_child
+            && (self.keystroke_action.is_some()
+                || self.format_action.is_some()
+                || self.validate_action.is_some())
+        {
+            // A widget/field `/AA` additional-actions dictionary is forbidden
+            // outright by the "Trigger events" clause of PDF/A-1/-2/-3 and by
+            // every PDF/X revision (ISO 15930-9 §6.14.3); PDF/A-4 permits it.
+            // Register the conformance error at the single point where the
+            // dictionary is emitted, independent of the action types inside.
+            sc.register_validation_error(ValidationError::ContainsWidgetAdditionalActions(None));
+            let mut aa = annotation.insert(Name(b"AA")).dict();
+            if let Some(action) = &self.keystroke_action {
+                let action_writer = aa.insert(Name(b"K")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            if let Some(action) = &self.format_action {
+                let action_writer = aa.insert(Name(b"F")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            if let Some(action) = &self.validate_action {
+                let action_writer = aa.insert(Name(b"V")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            aa.finish();
         }
 
         Ok(Some(job))
@@ -2392,6 +2498,17 @@ fn write_color(annotation: &mut pdf_writer::writers::Annotation, color: &Color) 
         crate::color::RegularColor::Luma(gray) => {
             annotation.color_gray(gray.to_pdf_color());
         }
+        // PDF 32000-2 §12.5.2 `/C` entries on annotations are
+        // device-space only (1, 3 or 4 components — DeviceGray /
+        // DeviceRGB / DeviceCMYK). An ICC-based wide-gamut paint
+        // has no ICC engine inside krilla, so the source components
+        // are written verbatim as a DeviceRGB triple. Authoring a
+        // wide-gamut paint on an annotation surface is a niche edge
+        // case (annotation appearance streams handle gamut more
+        // precisely than the `/C` colour entry).
+        crate::color::RegularColor::IccBased { components, .. } => {
+            annotation.color_rgb(components[0], components[1], components[2]);
+        }
     }
 }
 
@@ -2399,6 +2516,7 @@ fn write_color(annotation: &mut pdf_writer::writers::Annotation, color: &Color) 
 mod tests {
     use super::*;
     use crate::color::rgb;
+    use crate::interactive::action::JavaScriptAction;
     use crate::document::Document;
     use crate::geom::Point;
     use crate::page::PageSettings;
@@ -3058,6 +3176,93 @@ mod tests {
         let annotation: Annotation = widget.into();
         assert!(matches!(annotation.annotation_type, AnnotationType::Widget(_)));
         assert!(annotation.alt.is_none());
+    }
+
+    fn empty_text_widget(partial: &str) -> WidgetAnnotation {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        WidgetAnnotation::new(widget_rect(), partial, text)
+    }
+
+    #[test]
+    fn widget_annotation_no_actions_omits_aa_dict() {
+        let widget = empty_text_widget("plain");
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(!contains(&pdf, b"/AA"), "/AA emitted on widget with no actions");
+    }
+
+    #[test]
+    fn widget_annotation_keystroke_action_emits_aa_k_javascript() {
+        let widget = empty_text_widget("dob").with_keystroke_action(Action::JavaScript(
+            JavaScriptAction::new("AFDate_KeystrokeEx(\"yyyy-mm-dd\");"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/K <<"), "missing /AA /K key");
+        assert!(contains(&pdf, b"/S /JavaScript"), "missing /S /JavaScript");
+        assert!(
+            contains(&pdf, b"AFDate_KeystrokeEx"),
+            "missing JS body"
+        );
+    }
+
+    #[test]
+    fn widget_annotation_format_action_emits_aa_f_javascript() {
+        let widget = empty_text_widget("dob").with_format_action(Action::JavaScript(
+            JavaScriptAction::new("AFDate_FormatEx(\"yyyy-mm-dd\");"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/F <<"), "missing /AA /F key");
+        assert!(contains(&pdf, b"AFDate_FormatEx"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_validate_action_emits_aa_v_javascript() {
+        let widget = empty_text_widget("score").with_validate_action(Action::JavaScript(
+            JavaScriptAction::new("AFRange_Validate(true, 0, true, 100);"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/V <<"), "missing /AA /V key");
+        assert!(contains(&pdf, b"AFRange_Validate"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_all_three_actions_emit_three_keys() {
+        let widget = empty_text_widget("dob")
+            .with_keystroke_action(Action::JavaScript(JavaScriptAction::new(
+                "AFDate_KeystrokeEx(\"yyyy-mm-dd\");",
+            )))
+            .with_format_action(Action::JavaScript(JavaScriptAction::new(
+                "AFDate_FormatEx(\"yyyy-mm-dd\");",
+            )))
+            .with_validate_action(Action::JavaScript(JavaScriptAction::new(
+                "/* validate stub */",
+            )));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/K <<"), "missing /K");
+        assert!(contains(&pdf, b"/F <<"), "missing /F");
+        assert!(contains(&pdf, b"/V <<"), "missing /V");
+    }
+
+    #[test]
+    fn widget_annotation_radio_group_child_suppresses_aa() {
+        // Radio-group children inherit /AA from the parent group per
+        // ISO 32000-2 §12.7.4.1. The /AA emitter therefore skips the
+        // slot on RadioGroupChild widgets even if a (mis-)configured
+        // setter populated it.
+        let group = RadioGroupField::new("preference", three_radio_children());
+        let pdf = finish_with_radio_group(group);
+        // No /AA on radio children — they have no setter wired
+        // through `add_radio_group`, but the suppression branch should
+        // still leave the document free of /AA dicts.
+        assert!(!contains(&pdf, b"/AA"), "/AA leaked onto radio-group children");
     }
 
     #[test]

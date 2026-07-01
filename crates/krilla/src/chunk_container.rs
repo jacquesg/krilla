@@ -524,16 +524,37 @@ impl ChunkContainer {
                     let mut embedded_files_name_tree = names.embedded_files();
                     let mut embedded_name_entries = embedded_files_name_tree.names();
 
-                    for (name, _ref) in &embedded_files {
-                        embedded_name_entries.insert(Str(name.as_bytes()), remapper[_ref]);
+                    // The PDF name tree MUST be alphabetically
+                    // sorted (ISO 32000-1 §7.9.6); the
+                    // `BTreeMap<String, _>` iteration order matches
+                    // that requirement directly. The per-attachment
+                    // `EmbedLocation` is ignored here — partitioning
+                    // is applied only to `/AF` (the explicitly
+                    // ordered array) below.
+                    for (name, (ref_, _location)) in &embedded_files {
+                        embedded_name_entries.insert(Str(name.as_bytes()), remapper[ref_]);
                     }
                 }
             }
 
             if !embedded_files.is_empty() && settings.supports_associated_files() {
                 let mut associated_files = catalog.insert(Name(b"AF")).array().typed();
-                for _ref in embedded_files.values() {
-                    associated_files.item(remapper[_ref]).finish();
+                // ISO 32000-2 §14.13: `/AF` is an array, not a name
+                // tree — the order it preserves is what surfaces in
+                // viewers that key the attachment panel off `/AF`.
+                // Partition: every `EmbedLocation::Before` entry is
+                // written ahead of every `EmbedLocation::After`
+                // entry, with alphabetical order preserved within
+                // each partition (BTreeMap iteration order).
+                for (_name, (ref_, location)) in &embedded_files {
+                    if matches!(location, crate::embed::EmbedLocation::Before) {
+                        associated_files.item(remapper[ref_]).finish();
+                    }
+                }
+                for (_name, (ref_, location)) in &embedded_files {
+                    if matches!(location, crate::embed::EmbedLocation::After) {
+                        associated_files.item(remapper[ref_]).finish();
+                    }
                 }
             }
 

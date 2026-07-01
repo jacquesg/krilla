@@ -14,8 +14,7 @@ use krilla::tagging::{
     SpanTag, TagGroup, TagTree,
 };
 use krilla::tagging::{
-    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace,
-    WritingMode,
+    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace, WritingMode,
 };
 use krilla::text::{Font, TextDirection};
 use krilla::{Document, SerializeSettings};
@@ -23,8 +22,8 @@ use krilla_macros::snapshot;
 use krilla_svg::{SurfaceExt, SvgSettings};
 
 use crate::{
-    green_fill, load_png_image, loc, rect_to_path, red_stroke, settings_1, settings_25,
-    NOTO_SANS, SVGS_PATH,
+    green_fill, load_png_image, loc, rect_to_path, red_stroke, settings_1, settings_25, NOTO_SANS,
+    SVGS_PATH,
 };
 
 pub trait SurfaceTaggingExt {
@@ -873,7 +872,9 @@ fn namespace_override_changes_pdf_20_bytes() {
         let mut document = Document::new_with(pretty(settings_25()));
         document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
         let mut tag_tree = TagTree::new();
-        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        tag_tree.push(TagGroup::new(
+            Tag::P.with_namespace(Some(TagNamespace::Krilla)),
+        ));
         document.set_tag_tree(tag_tree);
         document.finish().unwrap()
     };
@@ -913,7 +914,9 @@ fn namespace_override_ignored_on_pdf_17() {
         let mut document = Document::new_with(pretty(settings_1()));
         document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
         let mut tag_tree = TagTree::new();
-        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        tag_tree.push(TagGroup::new(
+            Tag::P.with_namespace(Some(TagNamespace::Krilla)),
+        ));
         document.set_tag_tree(tag_tree);
         document.finish().unwrap()
     };
@@ -921,6 +924,124 @@ fn namespace_override_ignored_on_pdf_17() {
     assert_eq!(
         default_doc, overridden_doc,
         "namespace override leaked into PDF 1.7 output — should be silently ignored below PDF 2.0"
+    );
+}
+
+// --- custom external namespaces (MathML, HTML 4, …) -----------------
+
+const MATHML_URI: &str = "http://www.w3.org/1998/Math/MathML";
+const HTML4_URI: &str = "http://www.w3.org/TR/REC-html40";
+
+#[test]
+fn register_namespace_emits_namespace_dict_under_pdf_20() {
+    let mut document = Document::new_with(pretty(settings_25()));
+    let _ = document.register_namespace(MATHML_URI);
+    document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::P));
+    document.set_tag_tree(tag_tree);
+    let pdf = document.finish().unwrap();
+
+    // The MathML URI must appear verbatim inside a Namespace
+    // dict, and the dict must be referenced from the catalogue's
+    // /Namespaces array. The URL is a UTF-16BE text string in
+    // PDF 2.0 tagged output; search for the ASCII bytes — they
+    // appear in clear because the URL is all ASCII.
+    assert!(
+        contains(&pdf, MATHML_URI.as_bytes()),
+        "MathML namespace URI missing from output",
+    );
+    assert!(
+        contains(&pdf, b"/Namespaces"),
+        "/Namespaces array missing from catalogue",
+    );
+}
+
+#[test]
+fn register_namespace_is_idempotent() {
+    let mut document = Document::new_with(pretty(settings_25()));
+    let h1 = document.register_namespace(MATHML_URI);
+    let h2 = document.register_namespace(MATHML_URI);
+    let h3 = document.register_namespace(HTML4_URI);
+    assert_eq!(
+        h1, h2,
+        "registering the same URI twice must return the same handle"
+    );
+    assert_ne!(h1, h3, "distinct URIs must return distinct handles");
+
+    document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::P));
+    document.set_tag_tree(tag_tree);
+    let pdf = document.finish().unwrap();
+
+    // Exactly one MathML Namespace dict — the second registration
+    // must not produce a duplicate.
+    let count = pdf
+        .windows(MATHML_URI.len())
+        .filter(|w| *w == MATHML_URI.as_bytes())
+        .count();
+    assert_eq!(
+        count, 1,
+        "MathML URI appears {count} times; expected exactly 1",
+    );
+}
+
+#[test]
+fn tag_with_custom_namespace_changes_bytes() {
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::Formula(None)));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let bound_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        let mathml = document.register_namespace(MATHML_URI);
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        // Bind the Formula tag to MathML rather than the SSN.
+        tag_tree.push(TagGroup::new(
+            Tag::Formula(None).with_namespace(Some(TagNamespace::Custom(mathml))),
+        ));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_ne!(
+        default_doc, bound_doc,
+        "Tag::with_namespace(Custom(mathml)) must change the emitted bytes",
+    );
+    assert!(
+        contains(&bound_doc, MATHML_URI.as_bytes()),
+        "MathML URI missing from the bound document",
+    );
+    assert!(
+        !contains(&default_doc, MATHML_URI.as_bytes()),
+        "MathML URI leaked into the default document (no registration)",
+    );
+}
+
+#[test]
+fn register_namespace_silently_dropped_on_pdf_17() {
+    // PDF 1.7 has no namespace model; the registration must not
+    // affect the produced bytes.
+    let no_ns_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        document.finish().unwrap()
+    };
+    let with_ns_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        let _ = document.register_namespace(MATHML_URI);
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        document.finish().unwrap()
+    };
+    assert_eq!(
+        no_ns_doc, with_ns_doc,
+        "register_namespace must not affect the bytes of a PDF 1.7 document",
     );
 }
 
@@ -965,4 +1086,80 @@ fn tagging_missing_identifier_in_tree() {
     document.set_tag_tree(tag_tree);
 
     let _ = document.finish();
+}
+
+#[test]
+fn aside_emits_pdf_20_role_with_ssn_namespace() {
+    // Under PDF 2.0 the `Aside` role lives in the standard structure
+    // namespace (SSN) per ISO 32000-2 §14.8.4.3. The bytes must
+    // contain `/S /Aside` and reference the SSN URL `iso.org/pdf2/ssn`.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Aside));
+    let pdf = document_with(pretty(settings_25()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Aside"),
+        "/S /Aside missing from PDF 2.0 output for Tag::Aside"
+    );
+    assert!(
+        contains(&pdf, b"iso.org/pdf2/ssn"),
+        "PDF 2.0 SSN namespace URL missing from output containing Tag::Aside"
+    );
+}
+
+#[test]
+fn aside_falls_back_to_div_on_pdf_17() {
+    // PDF 1.7 has no `Aside` role; the compat path emits `/S /Div`
+    // (matching `StructRole2::Aside.compatibility_1_7(default)`).
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Aside));
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Div"),
+        "PDF 1.7 fallback for Tag::Aside should emit /S /Div"
+    );
+    assert!(
+        !contains(&pdf, b"/S /Aside"),
+        "Tag::Aside must not emit /S /Aside in PDF 1.7 output"
+    );
+}
+
+#[test]
+fn sub_emits_pdf_20_role_with_ssn_namespace() {
+    // Under PDF 2.0 the `Sub` role lives in the SSN per ISO 32000-2
+    // §14.8.4.6. The bytes must contain `/S /Sub` and reference the
+    // SSN URL.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Sub));
+    let pdf = document_with(pretty(settings_25()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Sub"),
+        "/S /Sub missing from PDF 2.0 output for Tag::Sub"
+    );
+    assert!(
+        contains(&pdf, b"iso.org/pdf2/ssn"),
+        "PDF 2.0 SSN namespace URL missing from output containing Tag::Sub"
+    );
+}
+
+#[test]
+fn sub_emits_custom_role_on_pdf_17() {
+    // PDF 1.7 has no `Sub` standard role; krilla emits a custom
+    // role `Sub` (custom_kind) and registers a `/Sub -> /Span`
+    // mapping in the document `/RoleMap`. This mirrors how `Strong`
+    // and `Em` are handled so the inline-level semantic survives.
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(TagGroup::new(Tag::Sub));
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/S /Sub"),
+        "Tag::Sub must emit a custom /S /Sub element on PDF 1.7"
+    );
+    assert!(
+        contains(&pdf, b"/Sub /Span"),
+        "Tag::Sub must register /Sub -> /Span in the PDF 1.7 /RoleMap"
+    );
 }

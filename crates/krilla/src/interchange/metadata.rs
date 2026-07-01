@@ -382,13 +382,30 @@ impl Metadata {
             return;
         }
 
-        // The Info dict must be created if PDF/X requires the trapping entry,
-        // or if the caller explicitly set a trapping value even outside PDF/X
-        // (so the XMP and Info-dict paths agree).
-        let needs_pdfx_info =
-            config.validators().requires_trapping_metadata() || self.trapped.is_some();
+        // PDF/X (ISO 15930-*) mandates `/GTS_PDFXVersion` and `/Trapped` in
+        // the Info dictionary even on PDF 2.0 (ISO 15930-9 still requires
+        // them despite the general PDF 2.0 Info-dict deprecation). Force
+        // the dict to be written under any PDF/X validator. A caller-set
+        // `/Trapped` value also forces emission outside PDF/X so the Info
+        // and XMP streams stay in agreement.
+        let requires_pdfx_info = config.validators().is_pdf_x()
+            || config.validators().requires_trapping_metadata()
+            || self.trapped.is_some();
 
-        if self.has_document_info() || needs_pdfx_info {
+        // Under PDF 2.0 the per-field string entries (title, producer,
+        // etc.) are deprecated and not written — only `creation_date`
+        // and the PDF/X-mandated entries remain. Guard the ref bump
+        // with a version-aware will-write predicate so that a caller
+        // who sets `producer` (or any other deprecated field) on a
+        // PDF 2.0 document does not consume a ref without emitting a
+        // corresponding Info dict object.
+        let will_write = if config.version() < PdfVersion::Pdf20 {
+            self.has_document_info() || requires_pdfx_info || has_piece_info
+        } else {
+            self.creation_date.is_some() || requires_pdfx_info
+        };
+
+        if will_write {
             let ref_ = ref_.bump();
             let mut document_info = LazyCell::new(|| pdf.document_info(ref_));
 

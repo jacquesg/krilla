@@ -165,10 +165,16 @@ impl AnyTag {
 /// The PDF 2.0 namespace model (ISO 32000-2 §14.8.6) lets a
 /// structure-element name carry meaning relative to a declared
 /// namespace, so the same `Name` can be reused across vocabularies
-/// without collision. krilla declares two namespaces at the
-/// document level and binds every standard / custom tag to one of
-/// them; this enum addresses those two namespaces by name.
+/// without collision. krilla declares two namespaces at the document
+/// level and lets callers register additional ones for vocabularies
+/// like MathML, HTML, and PDF Math via
+/// [`Document::register_namespace`](crate::Document::register_namespace).
+///
+/// Marked `#[non_exhaustive]` because the namespace landscape will
+/// grow with new PDF profiles; downstream code should always
+/// include a default arm when matching.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum TagNamespace {
     /// The PDF 2.0 standard structure namespace (SSN), declared by
     /// `pdf-writer` via `Namespace::pdf_2_ns`. This is the default
@@ -182,7 +188,30 @@ pub enum TagNamespace {
     /// (`Datetime`, `Terms`, `Title`, `Strong`, `Em`, `Hn` for
     /// n ≥ 7 on PDF 1.7).
     Krilla,
+    /// A caller-registered external namespace identified by its
+    /// indirect ref (resolved from a
+    /// [`NamespaceHandle`](NamespaceHandle) returned by
+    /// [`Document::register_namespace`](crate::Document::register_namespace)).
+    /// Used to bind a structure element to vocabularies that PDF
+    /// 2.0 §14.8.6.3 allows but krilla does not declare itself —
+    /// MathML, HTML 4, PDF Math, &c. The handle is opaque; krilla
+    /// resolves it at serialise time to the indirect ref of the
+    /// `Namespace` dict it allocated for the URI.
+    Custom(NamespaceHandle),
 }
+
+/// An opaque handle to a custom external namespace, returned by
+/// [`Document::register_namespace`](crate::Document::register_namespace).
+/// Pass it via [`TagNamespace::Custom`] to bind a structure element
+/// to the matching namespace URI.
+///
+/// Handles are stable for the lifetime of the document; they are
+/// indexes into the document's internal namespace registry, not raw
+/// indirect refs. Registering the same URI twice returns the same
+/// handle — the on-disk PDF carries at most one `Namespace` dict
+/// per URI.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct NamespaceHandle(pub(crate) u32);
 
 /// An ordered set using ordinal numbers to sort and identify elements.
 #[derive(Clone, Debug, PartialEq)]

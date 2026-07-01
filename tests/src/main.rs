@@ -54,6 +54,7 @@ mod embed;
 mod encryption;
 mod font;
 mod graphic;
+mod icc_based;
 mod image;
 mod mask;
 mod metadata;

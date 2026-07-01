@@ -54,7 +54,9 @@ impl<const C: u8> Cacheable for ICCProfile<C> {
             .finish(&sc.serialize_settings());
 
         let mut icc_profile = chunk.icc_profile(root_ref, icc_stream.encoded_data());
-        icc_profile.n(C as i32).range([0.0, 1.0].repeat(C as usize));
+        icc_profile
+            .n(C as i32)
+            .range(self.metadata().color_space.range());
         icc_stream.write_filters(icc_profile.deref_mut().deref_mut());
         icc_profile.finish();
         chunk_container.streams.icc_profiles.push(chunk);
@@ -165,6 +167,22 @@ impl ICCColorSpace {
             ICCColorSpace::OneClr => 1,
             ICCColorSpace::ThreeClr => 3,
             ICCColorSpace::FourClr => 4,
+        }
+    }
+
+    /// The ICCBased `/Range` array for this colour space: the `2 × N`
+    /// values `[min0 max0 min1 max1 …]` that bound each component.
+    ///
+    /// Per ISO 32000-2:2020, 8.6.5.5, Table 68 ("Ranges for typical ICC
+    /// colour spaces") every space here uses the `[0.0 1.0]`-per-component
+    /// default except `L*a*b*`, whose components span `L*: [0 100]` and
+    /// `a*`/`b*: [-128 127]`. Table 65 requires the emitted `/Range` to
+    /// "match the information in the ICC profile", so a Lab-PCS profile
+    /// cannot be given the `[0 1]` default.
+    fn range(&self) -> Vec<f32> {
+        match self {
+            ICCColorSpace::Lab => vec![0.0, 100.0, -128.0, 127.0, -128.0, 127.0],
+            _ => [0.0, 1.0].repeat(usize::from(self.num_components())),
         }
     }
 }
