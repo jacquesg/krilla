@@ -298,6 +298,35 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Begin a `/Span` marked-content section carrying `/ActualText`
+    /// (`actual_text`, the reading-order text for the glyphs drawn until the
+    /// matching [`end_actual_text_content`](Self::end_actual_text_content)),
+    /// written directly into the content stream regardless of tagging mode.
+    ///
+    /// Unlike [`start_tagged`](Self::start_tagged), which routes through the
+    /// structure-tagging machinery and emits nothing on an untagged page,
+    /// this makes right-to-left / bidi-reordered text extract in logical
+    /// reading order from plain (untagged) PDFs — the glyphs are still drawn
+    /// in visual order, but `/ActualText` overrides extraction (ISO 32000-2
+    /// §14.9.4).
+    ///
+    /// Returns `false` (emitting nothing) when a marked-content section is
+    /// already open, since marked content does not nest here. Pass the
+    /// returned flag to [`end_actual_text_content`](Self::end_actual_text_content).
+    #[must_use]
+    pub fn begin_actual_text_content(&mut self, actual_text: &str) -> bool {
+        self.bd.get_mut().try_begin_actual_text_content(actual_text)
+    }
+
+    /// End a content-stream `/ActualText` span opened by
+    /// [`begin_actual_text_content`](Self::begin_actual_text_content).
+    /// `started` is the flag that call returned; a `false` flag is a no-op.
+    pub fn end_actual_text_content(&mut self, started: bool) {
+        if started {
+            self.bd.get_mut().end_marked_content();
+        }
+    }
+
     fn outline_glyphs(
         &mut self,
         glyphs: &[impl Glyph],
