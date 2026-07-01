@@ -1206,6 +1206,7 @@ pub struct LinkBorder {
     pub(crate) width: f32,
     pub(crate) color: Color,
     pub(crate) style: Option<LinkBorderStyle>,
+    pub(crate) dash_array: Option<Vec<f32>>,
 }
 
 impl LinkBorder {
@@ -1214,7 +1215,12 @@ impl LinkBorder {
     /// `width`: The width of the border in pt.
     /// `color`: The color of the border.
     pub fn new(width: f32, color: Color) -> Self {
-        Self { width, color, style: None }
+        Self {
+            width,
+            color,
+            style: None,
+            dash_array: None,
+        }
     }
 
     /// Set the `/BS << /S … >>` style code. When set, the resulting
@@ -1224,6 +1230,27 @@ impl LinkBorder {
     /// array is emitted.
     pub fn with_style(mut self, style: LinkBorderStyle) -> Self {
         self.style = Some(style);
+        self
+    }
+
+    /// Override the `/BS /D` dash pattern array emitted when the
+    /// border style is [`LinkBorderStyle::Dashed`] (ISO 32000-2
+    /// §12.5.4 Table 168). Krilla's default emission is `[3 3]`,
+    /// which corresponds to a CSS `dashed` border; CSS `dotted`
+    /// link borders are conventionally projected onto a tighter
+    /// `[1 1]` pattern, and PDF generators may carry richer
+    /// patterns (`[2 1]`, `[4 2 1 2]`, …) sourced from CSS
+    /// `border-style`-equivalent author input.
+    ///
+    /// The override is honoured only when [`with_style`] has been
+    /// called with [`LinkBorderStyle::Dashed`]; other styles ignore
+    /// `/D` per the spec. The dash array must contain at least one
+    /// entry; an empty array is silently dropped at serialisation
+    /// time and falls back to the krilla default.
+    ///
+    /// [`with_style`]: Self::with_style
+    pub fn with_dash_array(mut self, dash_array: Vec<f32>) -> Self {
+        self.dash_array = Some(dash_array);
         self
     }
 }
@@ -1393,10 +1420,20 @@ impl LinkAnnotation {
             if let Some(style) = border.style {
                 let mut bs = annotation.border_style();
                 bs.width(border.width).style(style.to_pdf());
-                // Dashed borders need a `/D` pattern array (default
-                // `[3 3]`); other styles ignore the entry.
+                // Dashed borders need a `/D` pattern array; other
+                // styles ignore the entry. When the embedder has
+                // supplied an explicit pattern (e.g. `[1 1]` for a
+                // CSS `dotted` link border) honour it; otherwise
+                // fall back to the krilla default `[3 3]`.
                 if matches!(style, LinkBorderStyle::Dashed) {
-                    bs.dashes([3.0_f32, 3.0_f32]);
+                    match border.dash_array.as_deref() {
+                        Some(pattern) if !pattern.is_empty() => {
+                            bs.dashes(pattern.iter().copied());
+                        }
+                        _ => {
+                            bs.dashes([3.0_f32, 3.0_f32]);
+                        }
+                    }
                 }
                 bs.finish();
             }
@@ -6345,6 +6382,96 @@ mod tests {
         assert!(
             contains(&pdf, b"(inner description)"),
             "inner /Contents must survive when no outer alt-text is set"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // moegoe K19-emission — `LinkBorder::with_dash_array`. CSS `dotted`
+    // link borders project onto `/BS /D [1 1]` rather than the krilla
+    // default `[3 3]`. The setter lets the embedder override the dash
+    // pattern array per ISO 32000-2 §12.5.4 Table 168 so authors can
+    // distinguish CSS `dotted` (`[1 1]`) from CSS `dashed` (`[3 3]`)
+    // link borders, and carry richer patterns when the source PDF
+    // asks for them.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn link_border_dash_array_override_emits_custom_pattern() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Dashed)
+                .with_dash_array(vec![1.0_f32, 1.0_f32]),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("dotted".into())));
+
+        // The pretty serialiser writes `/D [1 1]` for the override.
+        // Accept either the exact form or `[1.0 1.0]` so the
+        // assertion does not fight pdf-writer's number formatter.
+        assert!(
+            contains(&pdf, b"/D [1 1]") || contains(&pdf, b"/D [1.0 1.0]"),
+            "custom /D [1 1] must appear when with_dash_array([1, 1]) is set"
+        );
+        assert!(
+            !contains(&pdf, b"/D [3 3]") && !contains(&pdf, b"/D [3.0 3.0]"),
+            "default /D [3 3] must not appear once an override has been supplied"
+        );
+    }
+
+    #[test]
+    fn link_border_dashed_without_override_keeps_default_pattern() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Dashed),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("dashed".into())));
+
+        assert!(
+            contains(&pdf, b"/D [3 3]") || contains(&pdf, b"/D [3.0 3.0]"),
+            "default /D [3 3] must survive when no override is supplied"
+        );
+    }
+
+    #[test]
+    fn link_border_dash_array_ignored_when_style_is_solid() {
+        // ISO 32000-2 §12.5.4 — the `/D` entry is meaningful only
+        // when `/S /D`. With `/S /S` (solid) the embedder's dash
+        // pattern is irrelevant and must not appear.
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Solid)
+                .with_dash_array(vec![1.0_f32, 1.0_f32]),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("solid".into())));
+        assert!(
+            !contains(&pdf, b"/D [1 1]") && !contains(&pdf, b"/D [1.0 1.0]"),
+            "custom /D pattern must not leak onto a Solid /BS entry"
         );
     }
 }
