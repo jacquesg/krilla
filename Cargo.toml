@@ -57,3 +57,9 @@ xmp-writer = "0.3.3"
 yoke = { version = "0.8.0", features = ["derive"] }
 png = "0.18.1"
 zune-jpeg = "0.5.5"
+
+# hayro-write pulls pdf-writer from crates.io; redirect every crate in the tree
+# (krilla included) onto the bloudraadpdf fork so the whole graph shares one
+# pdf-writer with the layers + AES-256 encryption additions.
+[patch.crates-io]
+pdf-writer = { git = "https://github.com/bloudraadpdf/pdf-writer", rev = "5fbb4ec5265983a961e0093b6e7614aeaf5838fa" }
