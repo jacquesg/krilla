@@ -20,6 +20,7 @@ use crate::graphics::color::{rgb, ColorSpace, ColourConversion};
 use crate::graphics::icc::{GenericICCProfile, ICCBasedColorSpace, ICCColorSpace, ICCProfile};
 #[cfg(feature = "raster-images")]
 use crate::graphics::image::Image;
+use crate::graphics::devicen::DeviceNColorSpace;
 use crate::graphics::separation::SeparationColorSpace;
 use crate::interactive::destination::{NamedDestination, XyzDestination};
 use crate::interchange::embed::EmbeddedFile;
@@ -1724,6 +1725,11 @@ impl SerializeContext {
             ColorSpace::Special(SpecialColorSpace::Separation(s)) => {
                 MaybeDeviceColorSpace::ColorSpace(
                     self.register_resourceable(chunk_container, SeparationColorSpace::new(s)),
+                )
+            }
+            ColorSpace::Special(SpecialColorSpace::DeviceN(s)) => {
+                MaybeDeviceColorSpace::ColorSpace(
+                    self.register_resourceable(chunk_container, DeviceNColorSpace::new(s)),
                 )
             }
         }
