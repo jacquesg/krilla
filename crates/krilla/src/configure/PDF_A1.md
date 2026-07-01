@@ -132,7 +132,7 @@ when a PostScript function is used. 🟢
 
 ## 6.5 Annotations
 
-6.5.2: krilla does not support any non-standard annotation types, nor `FileAttachment`, `Sound` or `Movie`. 🔵
+6.5.2: krilla supports `FileAttachment` annotations under non-PDF/A-1 validators (PDF/A-2 and later, baseline PDF, PDF/UA). PDF/A-1 forbids the subtype outright (ISO 19005-1 §6.5.2); embedders targeting PDF/A-1 must avoid attaching files. krilla does not support `Sound`, `Movie`, or other non-standard annotation subtypes. 🔵
 
 6.5.3: 
 - krilla never sets the CA key of annotation dictionaries. 🔵

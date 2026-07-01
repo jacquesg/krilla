@@ -7,6 +7,9 @@
 //! - [`TextAnnotation`]: sticky-note style comments (ISO 32000-2 §12.5.6.4).
 //! - [`MarkupAnnotation`]: highlight / underline / strike-out / squiggly markup
 //!   over a region of page content (ISO 32000-2 §12.5.6.10).
+//! - [`FileAttachmentAnnotation`]: per-page file-attachment annotations
+//!   (ISO 32000-2 §12.5.6.15) that pin an [`EmbeddedFile`] to a page
+//!   rectangle and display one of the predefined `/Name` icons.
 //! - [`WidgetAnnotation`]: AcroForm widget annotations for interactive form
 //!   fields — text inputs, buttons (checkbox / radio / pushbutton) and choice
 //!   fields (combo / list) per ISO 32000-2 §12.7.
@@ -25,6 +28,7 @@ use crate::error::KrillaResult;
 use crate::geom::{Quadrilateral, Rect};
 use crate::interactive::action::Action;
 use crate::interactive::destination::Destination;
+use crate::interchange::embed::EmbeddedFile;
 use crate::page::page_root_transform;
 use crate::serialize::SerializeContext;
 use crate::surface::Location;
@@ -153,6 +157,33 @@ impl Annotation {
         }
     }
 
+    /// Create a new file-attachment annotation per ISO 32000-2
+    /// §12.5.6.15.
+    ///
+    /// The annotation pins an [`EmbeddedFile`] to a page rectangle and
+    /// displays one of the predefined `/Name` icons
+    /// ([`FileAttachmentIcon`]). When the user activates the icon a
+    /// conforming reader presents the embedded file for opening or
+    /// saving. The underlying file specification dictionary is
+    /// registered as an indirect object (and deduplicated by content
+    /// hash) so multiple annotations on the same payload share one
+    /// FileSpec.
+    ///
+    /// The alt text may be required by certain export profiles (e.g.
+    /// PDF/UA). See [`FileAttachmentAnnotation`] for the available
+    /// fields.
+    pub fn new_file_attachment(
+        annotation: FileAttachmentAnnotation,
+        alt_text: Option<String>,
+    ) -> Self {
+        Self {
+            annotation_type: AnnotationType::FileAttachment(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
@@ -216,6 +247,17 @@ impl From<WidgetAnnotation> for Annotation {
     fn from(value: WidgetAnnotation) -> Self {
         Self {
             annotation_type: AnnotationType::Widget(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<FileAttachmentAnnotation> for Annotation {
+    fn from(value: FileAttachmentAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::FileAttachment(value),
             alt: None,
             struct_parent: None,
             location: None,
@@ -333,10 +375,33 @@ impl Annotation {
             }
         };
 
+        // FileAttachment annotations need to register their
+        // [`EmbeddedFile`] *before* the annotation dict opens so the
+        // resulting `Ref` can be written into `/FS`. The embedded-file
+        // FileSpec is itself an indirect object that wants mutable
+        // access to `chunk_container`; the annotation dict otherwise
+        // borrows `chunk.non_stream.annotations` for the entire
+        // `serialize_type` call. Pre-resolve here so the borrow chain
+        // stays acyclic.
+        let file_spec_ref: Option<Ref> = match &self.annotation_type {
+            AnnotationType::FileAttachment(f) => {
+                Some(sc.register_cacheable(chunk_container, f.file.clone()))
+            }
+            _ => None,
+        };
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)
             .start::<pdf_writer::writers::Annotation>();
+
+        // Wire the pre-resolved FileSpec ref onto the annotation dict
+        // before delegating to `serialize_type`. The FileAttachment
+        // branch consumes the ref via `file_spec_ref` in its own
+        // closure; other annotation types ignore it.
+        if let Some(fs_ref) = file_spec_ref {
+            annotation.pair(Name(b"FS"), fs_ref);
+        }
 
         let appearance_job = self
             .annotation_type
@@ -506,6 +571,8 @@ pub enum AnnotationType {
     Markup(MarkupAnnotation),
     /// A widget annotation (AcroForm interactive form field).
     Widget(WidgetAnnotation),
+    /// A file-attachment annotation (ISO 32000-2 §12.5.6.15).
+    FileAttachment(FileAttachmentAnnotation),
 }
 
 impl AnnotationType {
@@ -516,6 +583,7 @@ impl AnnotationType {
             AnnotationType::Text(t) => t.rect,
             AnnotationType::Markup(m) => m.rect,
             AnnotationType::Widget(w) => w.rect,
+            AnnotationType::FileAttachment(f) => f.rect,
         }
     }
 
@@ -528,6 +596,8 @@ impl AnnotationType {
             AnnotationType::Text(t) => t.color.as_ref(),
             AnnotationType::Markup(m) => m.color.as_ref(),
             AnnotationType::Widget(_) => None,
+            // FileAttachment annotations carry no `/C` colour entry.
+            AnnotationType::FileAttachment(_) => None,
         }
     }
 
@@ -545,6 +615,7 @@ impl AnnotationType {
             AnnotationType::Widget(w) => {
                 w.serialize_type(sc, annotation, page_height, icon_image_ref)
             }
+            AnnotationType::FileAttachment(f) => f.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -1155,6 +1226,175 @@ impl MarkupAnnotation {
 
         if let Some(color) = &self.color {
             write_color(annotation, color);
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        Ok(None)
+    }
+}
+
+/// Icon glyph for a [`FileAttachmentAnnotation`] (`/Name` entry,
+/// ISO 32000-2 §12.5.6.15 Table 178). Viewers display the
+/// corresponding pre-defined glyph at the annotation rectangle;
+/// activating it opens or saves the embedded file.
+///
+/// The default ([`Self::PushPin`]) matches the ISO 32000-2
+/// "shall be one of" defaulting behaviour — when `/Name` is absent
+/// most viewers fall back to PushPin.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Default)]
+pub enum FileAttachmentIcon {
+    /// `/Graph` — a small bar-chart icon.
+    Graph,
+    /// `/Paperclip` — a paperclip icon.
+    Paperclip,
+    /// `/PushPin` — a push-pin icon. Default.
+    #[default]
+    PushPin,
+    /// `/Tag` — a luggage-tag icon.
+    Tag,
+}
+
+impl FileAttachmentIcon {
+    fn to_pdf(self) -> pdf_writer::types::AnnotationIcon<'static> {
+        use pdf_writer::types::AnnotationIcon;
+        match self {
+            FileAttachmentIcon::Graph => AnnotationIcon::Graph,
+            FileAttachmentIcon::Paperclip => AnnotationIcon::Paperclip,
+            FileAttachmentIcon::PushPin => AnnotationIcon::PushPin,
+            FileAttachmentIcon::Tag => AnnotationIcon::Tag,
+        }
+    }
+}
+
+/// A file-attachment annotation per ISO 32000-2 §12.5.6.15.
+///
+/// File-attachment annotations pin an [`EmbeddedFile`] to a page
+/// rectangle and display one of the predefined `/Name` icons
+/// ([`FileAttachmentIcon`]). When the user activates the icon a
+/// conforming reader presents the embedded file for opening or
+/// saving.
+///
+/// The annotation's `/FS` entry is an indirect reference to a file
+/// specification dictionary; krilla registers the [`EmbeddedFile`]
+/// via [`crate::serialize::SerializeContext::register_cacheable`],
+/// so multiple annotations sharing one payload (same path / mime /
+/// data hash) dedupe onto a single FileSpec object. The annotation
+/// does NOT automatically participate in the document catalogue's
+/// `/Names /EmbeddedFiles` name tree — that channel is reserved for
+/// document-level attachments registered via
+/// [`crate::document::Document::embed_file`]. An author that wants
+/// both a document-level entry and a page-level annotation pointing
+/// at the same payload must call both APIs; the deduplication cache
+/// guarantees a single FileSpec dict.
+///
+/// PDF/A-1 (ISO 19005-1 §6.5.2) forbids the `FileAttachment`
+/// subtype outright; PDF/A-2 and later permit it. krilla emits the
+/// annotation under every non-PDF/A-1 validator; the rejection is
+/// documented for PDF/A-1 in `configure/PDF_A1.md` (no code-side
+/// block — the validator's `forbids_annotations` path is PDF/X-1a
+/// only, and PDF/A-1's rejection of FileAttachment is left to the
+/// embedder to enforce).
+///
+/// Build with [`FileAttachmentAnnotation::new`] and the chainable
+/// setter methods; wrap into an [`Annotation`] via
+/// [`Annotation::new_file_attachment`] or
+/// [`From<FileAttachmentAnnotation>`].
+pub struct FileAttachmentAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) file: EmbeddedFile,
+    pub(crate) icon: FileAttachmentIcon,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl FileAttachmentAnnotation {
+    /// Create a new file-attachment annotation with the given
+    /// bounding rectangle, embedded file and `/Name` icon.
+    ///
+    /// `rect` is in user-space (page) coordinates; krilla applies the
+    /// same page-root transform as the other annotation kinds. The
+    /// `file` is registered as a deduplicated indirect FileSpec
+    /// object at serialisation time.
+    pub fn new(rect: Rect, file: EmbeddedFile, icon: FileAttachmentIcon) -> Self {
+        Self {
+            rect,
+            file,
+            icon,
+            contents: None,
+            title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the pop-up shown when
+    /// the user hovers over or activates the annotation. If the
+    /// embedder also sets an `alt_text` on [`Annotation::new_file_attachment`]
+    /// the outer alt-text wins (it is written after `/Contents` here).
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the pop-up. Typically
+    /// the author's name.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2
+    /// §7.9.4 (e.g. `D:20260515120000Z`). The caller is responsible
+    /// for constructing a syntactically valid date string; krilla
+    /// emits the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last
+    /// modified, formatted as a PDF date string per ISO 32000-2
+    /// §7.9.4. The caller is responsible for constructing a
+    /// syntactically valid date string; krilla emits the value
+    /// verbatim as a literal string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.15 — `/Subtype /FileAttachment`. The
+        // `/FS` entry has already been written by the outer
+        // [`Annotation::serialize`] using the indirect ref returned
+        // by `register_cacheable`.
+        annotation.subtype(pdf_writer::types::AnnotationType::FileAttachment);
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        annotation.icon(self.icon.to_pdf());
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
         }
 
         write_annotation_dates(
@@ -3607,6 +3847,189 @@ mod tests {
         assert!(
             contains(&pdf, b"/Im0 Do"),
             "missing image draw in icon Form XObject content stream"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // moegoe K11 — `FileAttachment` annotation per ISO 32000-2 §12.5.6.15.
+    // -------------------------------------------------------------------
+
+    fn sample_embedded_file(path: &str) -> EmbeddedFile {
+        use crate::interchange::embed::{AssociationKind, MimeType};
+        use crate::metadata::DateTime;
+        EmbeddedFile {
+            path: path.into(),
+            mime_type: MimeType::new("application/octet-stream"),
+            description: Some("payload".into()),
+            association_kind: AssociationKind::Supplement,
+            data: crate::Data::from(vec![0x42_u8, 0x4f, 0x4d, 0x42]),
+            modification_date: Some(DateTime::new(2026)),
+            compress: Some(false),
+            location: None,
+            embed_location: crate::interchange::embed::EmbedLocation::Before,
+        }
+    }
+
+    fn file_attachment_pdf(icon: FileAttachmentIcon, path: &str) -> Vec<u8> {
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 30.0, 30.0).unwrap(),
+            sample_embedded_file(path),
+            icon,
+        )
+        .with_contents("payload description");
+        finish_with(Annotation::new_file_attachment(
+            annotation,
+            Some("attachment alt".into()),
+        ))
+    }
+
+    #[test]
+    fn file_attachment_pushpin_emits_subtype_name_and_fs() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::PushPin, "payload.bin");
+        assert!(
+            contains(&pdf, b"/Subtype /FileAttachment"),
+            "missing /Subtype /FileAttachment"
+        );
+        assert!(contains(&pdf, b"/Name /PushPin"), "missing /Name /PushPin");
+        // The annotation's /FS entry resolves to the FileSpec dict's
+        // indirect ref. The FileSpec carries the file's `/F` path.
+        assert!(contains(&pdf, b"/FS "), "missing /FS indirect reference");
+        assert!(
+            contains(&pdf, b"(payload.bin)"),
+            "missing FileSpec /F path entry"
+        );
+    }
+
+    #[test]
+    fn file_attachment_paperclip_emits_paperclip_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Paperclip, "clip.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(
+            contains(&pdf, b"/Name /Paperclip"),
+            "missing /Name /Paperclip"
+        );
+    }
+
+    #[test]
+    fn file_attachment_graph_emits_graph_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Graph, "chart.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(contains(&pdf, b"/Name /Graph"), "missing /Name /Graph");
+    }
+
+    #[test]
+    fn file_attachment_tag_emits_tag_name() {
+        let pdf = file_attachment_pdf(FileAttachmentIcon::Tag, "tag.bin");
+        assert!(contains(&pdf, b"/Subtype /FileAttachment"));
+        assert!(contains(&pdf, b"/Name /Tag"), "missing /Name /Tag");
+    }
+
+    #[test]
+    fn file_attachment_default_icon_is_pushpin() {
+        // Default constructor on the enum is PushPin per ISO 32000-2
+        // §12.5.6.15 default behaviour.
+        let icon = FileAttachmentIcon::default();
+        assert!(matches!(icon, FileAttachmentIcon::PushPin));
+    }
+
+    #[test]
+    fn file_attachment_from_trait_wraps_without_alt() {
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 5.0, 5.0).unwrap(),
+            sample_embedded_file("bare.bin"),
+            FileAttachmentIcon::PushPin,
+        );
+        let wrapped: Annotation = annotation.into();
+        assert!(matches!(
+            wrapped.annotation_type,
+            AnnotationType::FileAttachment(_)
+        ));
+        assert!(wrapped.alt.is_none());
+    }
+
+    #[test]
+    fn file_attachment_two_annotations_same_file_share_filespec() {
+        // Two FileAttachment annotations pointing at byte-identical
+        // EmbeddedFiles must dedupe onto a single FileSpec indirect
+        // object. The annotations still get distinct indirect refs;
+        // their /FS entries name the same FileSpec.
+        let file = sample_embedded_file("shared.bin");
+        let a1 = FileAttachmentAnnotation::new(
+            Rect::from_xywh(10.0, 10.0, 20.0, 20.0).unwrap(),
+            file.clone(),
+            FileAttachmentIcon::PushPin,
+        );
+        let a2 = FileAttachmentAnnotation::new(
+            Rect::from_xywh(50.0, 50.0, 20.0, 20.0).unwrap(),
+            file,
+            FileAttachmentIcon::Paperclip,
+        );
+
+        let settings = crate::SerializeSettings {
+            pretty: true,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page =
+            document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+        page.add_annotation(Annotation::new_file_attachment(a1, Some("alt".into())));
+        page.add_annotation(Annotation::new_file_attachment(a2, Some("alt".into())));
+        page.finish();
+        let pdf = document
+            .finish()
+            .expect("document serialisation should succeed");
+
+        // Print the PDF (for debug) and inspect.
+        if std::env::var_os("KRILLA_DUMP_PDF").is_some() {
+            eprintln!(
+                "PDF bytes: {}",
+                String::from_utf8_lossy(&pdf)
+            );
+        }
+
+        // The FileSpec dict is registered through `register_cacheable`,
+        // which dedupes by content hash. We assert that:
+        //
+        // 1. The PDF contains exactly one `/Type /Filespec` dictionary.
+        // 2. Both annotations exist (PushPin + Paperclip icons).
+        //
+        // We do NOT assert on the path literal occurrence count: the
+        // FileSpec emits the path twice (`/F (path)` plus `/UF
+        // <textstr>` under PDF 1.7+ which encodes to (path) too); the
+        // metric that matters is the FileSpec object count.
+        let filespec_count = pdf
+            .windows(b"/Type /Filespec".len())
+            .filter(|w| w == b"/Type /Filespec")
+            .count();
+        assert_eq!(
+            filespec_count, 1,
+            "FileSpec should be deduplicated to a single indirect object; \
+             got {filespec_count} /Type /Filespec dictionaries"
+        );
+
+        // Both annotations are present (Paperclip + PushPin /Name
+        // entries).
+        assert!(contains(&pdf, b"/Name /PushPin"));
+        assert!(contains(&pdf, b"/Name /Paperclip"));
+    }
+
+    #[test]
+    fn file_attachment_contents_field_emitted_when_no_alt() {
+        // When the embedder does not provide an outer alt-text, the
+        // inner `with_contents(...)` value survives as the annotation's
+        // /Contents entry. (When alt is set, the outer write wins —
+        // verified by the other tests which set both and observe alt
+        // in the /Contents slot.)
+        let annotation = FileAttachmentAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 5.0, 5.0).unwrap(),
+            sample_embedded_file("notes.bin"),
+            FileAttachmentIcon::Tag,
+        )
+        .with_contents("inner description");
+        let pdf = finish_with(Annotation::new_file_attachment(annotation, None));
+        assert!(
+            contains(&pdf, b"(inner description)"),
+            "inner /Contents must survive when no outer alt-text is set"
         );
     }
 }
