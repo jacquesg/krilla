@@ -8,6 +8,7 @@
 use pdf_writer::types::TrappingStatus;
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
+use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use xmp_writer::{CustomNamespace, LangId, Namespace, Timezone, XmpWriter};
 
@@ -62,6 +63,15 @@ pub struct Metadata {
     /// later value (the builder calls
     /// [`Metadata::custom_property`] with last-wins semantics).
     pub(crate) custom_properties: Vec<(String, String)>,
+    /// K15 — `/PieceInfo` catalogue entry (ISO 32000-2 §14.5).
+    /// Application-private metadata keyed by application name; each
+    /// value is a `(/LastModified, /Private)` pair. Empty map means
+    /// "no piece-info" (the catalogue entry is omitted).
+    pub(crate) piece_info: BTreeMap<String, PieceInfoEntry>,
+    /// K15 — `/LegalContent` catalogue entry (ISO 32000-2 §14.11.2).
+    /// `None` (default) emits no entry. A `LegalContent` value with
+    /// every field unset is treated the same as `None`.
+    pub(crate) legal_content: Option<LegalContent>,
 }
 
 /// PDF catalogue-level additional-action event keys (ISO 32000-2
@@ -328,6 +338,46 @@ impl Metadata {
         let source = source.into();
         self.document_event_scripts.retain(|(existing, _)| *existing != event);
         self.document_event_scripts.push((event, source));
+        self
+    }
+
+    /// Register a private `/PieceInfo` entry on the document
+    /// catalogue (ISO 32000-2 §14.5).
+    ///
+    /// The application name identifies the entry's owner; conforming
+    /// PDF consumers preserve unknown entries verbatim. `entry`
+    /// carries the `/LastModified` timestamp and an opaque
+    /// `/Private` byte payload the calling application is
+    /// responsible for serialising as well-formed PDF data.
+    ///
+    /// Duplicate `app` names retain the later value (last-wins) so
+    /// the surface is idempotent.
+    pub fn piece_info(
+        mut self,
+        app: impl Into<String>,
+        entry: PieceInfoEntry,
+    ) -> Self {
+        let app = app.into();
+        if app.is_empty() {
+            return self;
+        }
+        self.piece_info.insert(app, entry);
+        self
+    }
+
+    /// Attach a `/LegalContent` legal-attestation block to the
+    /// document catalogue (ISO 32000-2 §14.11.2).
+    ///
+    /// Calling this setter again replaces the previous block (a
+    /// document carries at most one legal-content dict). Supplying a
+    /// `LegalContent` value with every field unset is a no-op —
+    /// the catalogue entry is omitted in that case.
+    pub fn legal_content(mut self, content: LegalContent) -> Self {
+        if content.is_empty() {
+            self.legal_content = None;
+        } else {
+            self.legal_content = Some(content);
+        }
         self
     }
 
@@ -1075,6 +1125,173 @@ impl Duplex {
     }
 }
 
+/// Per-application entry for the document's `/PieceInfo` dictionary
+/// (ISO 32000-2 §14.5).
+///
+/// `/PieceInfo` lets authoring applications attach private,
+/// application-specific data to a PDF document; the entry is a
+/// dictionary keyed by application name with each value carrying a
+/// `/LastModified` timestamp plus a `/Private` slot the owning
+/// application uses to record its working data.
+///
+/// krilla's surface keeps the `/Private` payload as a flat
+/// `BTreeMap<String, String>` of name → text-string entries, which
+/// covers the common case where the owning application records a
+/// handful of named properties (e.g. an internal document version,
+/// a job identifier, an author preference). Each key becomes a PDF
+/// name token; each value is written as a PDF text string. More
+/// complex `/Private` shapes (streams, nested dictionaries, arrays)
+/// are deferred to a future surface — the existing `Metadata::raw_xmp`
+/// precedent shows where a byte-payload variant would slot in.
+#[derive(Clone, Debug)]
+pub struct PieceInfoEntry {
+    /// `/LastModified` — when the application last touched the
+    /// private data. PDF 1.3+ permits the entry to be absent; krilla
+    /// requires it because validators (and PDF/A) check it.
+    pub last_modified: DateTime,
+    /// `/Private` — application-private key/value pairs written
+    /// into a sub-dictionary on the entry. Empty map emits an empty
+    /// `<<>>` value (still valid PDF; preserves the `/LastModified`
+    /// timestamp on its own).
+    pub private: BTreeMap<String, String>,
+}
+
+/// `/LegalContent` legal-attestation dictionary (ISO 32000-2
+/// §14.11.2).
+///
+/// PDF supports a document-level legal-attestation block that
+/// enumerates which interactive behaviours (JavaScript, launch
+/// actions, multimedia annotations, etc.) the document depends on
+/// for its visual or interactive presentation. Conforming readers
+/// surface this metadata to viewers reviewing the legal authenticity
+/// of a PDF.
+///
+/// All fields are optional. Boolean fields default to `false`
+/// per the spec when absent; integer fields default to `0`. The
+/// `attestation` string is emitted as a PDF text string.
+#[derive(Default, Clone, Debug)]
+pub struct LegalContent {
+    /// `/JavaScriptActions` — the document contains JavaScript that
+    /// may modify its visual presentation.
+    pub javascript_actions: Option<bool>,
+    /// `/LaunchActions` — the document contains launch actions.
+    pub launch_actions: Option<bool>,
+    /// `/URIActions` — the document contains URI actions.
+    pub uri_actions: Option<bool>,
+    /// `/MovieActions` — the document contains movie actions.
+    pub movie_actions: Option<bool>,
+    /// `/SoundActions` — the document contains sound actions.
+    pub sound_actions: Option<bool>,
+    /// `/HiddenAnnotations` — the document contains hidden annotations.
+    pub hidden_annotations: Option<bool>,
+    /// `/ExternalRefXobjects` — the document references external
+    /// Form XObjects.
+    pub external_ref_xobjects: Option<bool>,
+    /// `/ExternalOPIdicts` — the document references external OPI
+    /// (Open Prepress Interface) dictionaries.
+    pub external_opi_dicts: Option<bool>,
+    /// `/NonEmbeddedFonts` — number of glyphs drawn from fonts that
+    /// are not embedded in the document.
+    pub non_embedded_fonts: Option<u32>,
+    /// `/OptionalContent` — number of visible elements that depend
+    /// on optional-content visibility state at view time.
+    pub optional_content: Option<u32>,
+    /// `/Attestation` — human-readable attestation string supplied
+    /// by the document originator.
+    pub attestation: Option<String>,
+}
+
+impl LegalContent {
+    /// Create a default `LegalContent` block with all fields unset.
+    /// Setters return `Self` for builder-style chaining.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `/Attestation` — supply the human-readable attestation
+    /// string.
+    pub fn attestation(mut self, text: impl Into<String>) -> Self {
+        self.attestation = Some(text.into());
+        self
+    }
+
+    /// `/JavaScriptActions` setter.
+    pub fn javascript_actions(mut self, present: bool) -> Self {
+        self.javascript_actions = Some(present);
+        self
+    }
+
+    /// `/LaunchActions` setter.
+    pub fn launch_actions(mut self, present: bool) -> Self {
+        self.launch_actions = Some(present);
+        self
+    }
+
+    /// `/URIActions` setter.
+    pub fn uri_actions(mut self, present: bool) -> Self {
+        self.uri_actions = Some(present);
+        self
+    }
+
+    /// `/MovieActions` setter.
+    pub fn movie_actions(mut self, present: bool) -> Self {
+        self.movie_actions = Some(present);
+        self
+    }
+
+    /// `/SoundActions` setter.
+    pub fn sound_actions(mut self, present: bool) -> Self {
+        self.sound_actions = Some(present);
+        self
+    }
+
+    /// `/HiddenAnnotations` setter.
+    pub fn hidden_annotations(mut self, present: bool) -> Self {
+        self.hidden_annotations = Some(present);
+        self
+    }
+
+    /// `/ExternalRefXobjects` setter.
+    pub fn external_ref_xobjects(mut self, present: bool) -> Self {
+        self.external_ref_xobjects = Some(present);
+        self
+    }
+
+    /// `/ExternalOPIdicts` setter.
+    pub fn external_opi_dicts(mut self, present: bool) -> Self {
+        self.external_opi_dicts = Some(present);
+        self
+    }
+
+    /// `/NonEmbeddedFonts` setter.
+    pub fn non_embedded_fonts(mut self, count: u32) -> Self {
+        self.non_embedded_fonts = Some(count);
+        self
+    }
+
+    /// `/OptionalContent` setter.
+    pub fn optional_content(mut self, count: u32) -> Self {
+        self.optional_content = Some(count);
+        self
+    }
+
+    /// Whether every field is unset (so the catalogue entry can be
+    /// omitted entirely).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.javascript_actions.is_none()
+            && self.launch_actions.is_none()
+            && self.uri_actions.is_none()
+            && self.movie_actions.is_none()
+            && self.sound_actions.is_none()
+            && self.hidden_annotations.is_none()
+            && self.external_ref_xobjects.is_none()
+            && self.external_opi_dicts.is_none()
+            && self.non_embedded_fonts.is_none()
+            && self.optional_content.is_none()
+            && self.attestation.is_none()
+    }
+}
+
 /// Page-box selector for `/ViewerPreferences` page-display and
 /// printing entries (ISO 32000-2 §12.4.4 Table 168).
 ///
@@ -1351,5 +1568,62 @@ mod tests {
     #[test]
     fn viewer_preferences_empty_by_default() {
         assert!(ViewerPreferences::new().is_empty());
+    }
+
+    #[test]
+    fn metadata_piece_info_builder_stores_entries() {
+        let entry = PieceInfoEntry {
+            last_modified: DateTime::new(2026).month(5).day(28),
+            private: {
+                let mut map = BTreeMap::new();
+                map.insert("DocVersion".to_string(), "1.2".to_string());
+                map
+            },
+        };
+        let metadata = Metadata::new().piece_info("MoegoeApp", entry);
+        assert!(metadata.piece_info.contains_key("MoegoeApp"));
+        let stored = &metadata.piece_info["MoegoeApp"];
+        assert_eq!(stored.private.get("DocVersion").map(String::as_str), Some("1.2"));
+    }
+
+    #[test]
+    fn metadata_piece_info_empty_app_is_ignored() {
+        let entry = PieceInfoEntry {
+            last_modified: DateTime::new(2026),
+            private: BTreeMap::new(),
+        };
+        let metadata = Metadata::new().piece_info("", entry);
+        assert!(metadata.piece_info.is_empty());
+    }
+
+    #[test]
+    fn legal_content_is_empty_when_all_fields_unset() {
+        let lc = LegalContent::new();
+        assert!(lc.is_empty());
+    }
+
+    #[test]
+    fn legal_content_setters_round_trip() {
+        let lc = LegalContent::new()
+            .javascript_actions(true)
+            .uri_actions(false)
+            .non_embedded_fonts(7)
+            .attestation("Authenticated by acme.example");
+        assert_eq!(lc.javascript_actions, Some(true));
+        assert_eq!(lc.uri_actions, Some(false));
+        assert_eq!(lc.non_embedded_fonts, Some(7));
+        assert_eq!(lc.attestation.as_deref(), Some("Authenticated by acme.example"));
+        assert!(!lc.is_empty());
+    }
+
+    #[test]
+    fn metadata_legal_content_empty_input_clears_the_slot() {
+        // First set a non-empty block, then call again with an empty
+        // one — the slot should be cleared so no `/LegalContent`
+        // entry is emitted.
+        let metadata = Metadata::new()
+            .legal_content(LegalContent::new().javascript_actions(true))
+            .legal_content(LegalContent::new());
+        assert!(metadata.legal_content.is_none());
     }
 }

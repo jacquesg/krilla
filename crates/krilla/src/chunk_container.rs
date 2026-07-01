@@ -902,6 +902,88 @@ impl ChunkContainer {
                 aa.finish();
             }
 
+            // K15 — `/PieceInfo` catalogue entry (ISO 32000-2 §14.5).
+            // Application-private metadata; one sub-dictionary per
+            // owning application name. Each value carries the
+            // `/LastModified` timestamp plus a `/Private` sub-
+            // dictionary holding the caller-supplied name → text
+            // entries.
+            {
+                // `self.metadata` was moved into the `metadata` local
+                // above; a defaulted metadata yields an empty
+                // `piece_info` and no `legal_content`, so nothing is
+                // emitted when the document carried no metadata object
+                // — matching the original `Some(metadata)` guard.
+                let metadata = &metadata;
+                if !metadata.piece_info.is_empty() {
+                    let mut pi = catalog
+                        .deref_mut()
+                        .insert(Name(b"PieceInfo"))
+                        .dict();
+                    for (app, entry) in &metadata.piece_info {
+                        let mut sub = pi.insert(Name(app.as_bytes())).dict();
+                        sub.pair(
+                            Name(b"LastModified"),
+                            crate::interchange::metadata::pdf_date(entry.last_modified),
+                        );
+                        let mut private = sub.insert(Name(b"Private")).dict();
+                        for (k, v) in &entry.private {
+                            private.pair(Name(k.as_bytes()), TextStr(v));
+                        }
+                        private.finish();
+                        sub.finish();
+                    }
+                    pi.finish();
+                }
+
+                // K15 — `/LegalContent` catalogue entry (ISO 32000-2
+                // §14.11.2). Document-level legal-attestation block;
+                // every field is optional and emitted only when set
+                // by the author.
+                if let Some(legal) = metadata.legal_content.as_ref() {
+                    if !legal.is_empty() {
+                        let mut lc = catalog
+                            .deref_mut()
+                            .insert(Name(b"LegalContent"))
+                            .dict();
+                        if let Some(v) = legal.javascript_actions {
+                            lc.pair(Name(b"JavaScriptActions"), v);
+                        }
+                        if let Some(v) = legal.launch_actions {
+                            lc.pair(Name(b"LaunchActions"), v);
+                        }
+                        if let Some(v) = legal.uri_actions {
+                            lc.pair(Name(b"URIActions"), v);
+                        }
+                        if let Some(v) = legal.movie_actions {
+                            lc.pair(Name(b"MovieActions"), v);
+                        }
+                        if let Some(v) = legal.sound_actions {
+                            lc.pair(Name(b"SoundActions"), v);
+                        }
+                        if let Some(v) = legal.hidden_annotations {
+                            lc.pair(Name(b"HiddenAnnotations"), v);
+                        }
+                        if let Some(v) = legal.external_ref_xobjects {
+                            lc.pair(Name(b"ExternalRefXobjects"), v);
+                        }
+                        if let Some(v) = legal.external_opi_dicts {
+                            lc.pair(Name(b"ExternalOPIdicts"), v);
+                        }
+                        if let Some(v) = legal.non_embedded_fonts {
+                            lc.pair(Name(b"NonEmbeddedFonts"), v as i32);
+                        }
+                        if let Some(v) = legal.optional_content {
+                            lc.pair(Name(b"OptionalContent"), v as i32);
+                        }
+                        if let Some(text) = legal.attestation.as_ref() {
+                            lc.pair(Name(b"Attestation"), TextStr(text));
+                        }
+                        lc.finish();
+                    }
+                }
+            }
+
             catalog.finish();
         }
 
