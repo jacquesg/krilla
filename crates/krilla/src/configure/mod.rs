@@ -251,6 +251,29 @@ mod tests {
     }
 
     #[test]
+    fn ua2_picks_pdf_2_0() {
+        let config = ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::UA2)
+            .finish()
+            .unwrap();
+        assert_eq!(config.version(), PdfVersion::Pdf20);
+    }
+
+    #[test]
+    fn ua2_rejects_pdf_1_7() {
+        assert!(matches!(
+            ConfigurationBuilder::new()
+                .with_accessibility_validator(Accessibility::UA2)
+                .with_version(PdfVersion::Pdf17)
+                .finish(),
+            Err(ConfigurationError::VersionDoesNotMatchValidatorsRange(
+                PdfVersion::Pdf17,
+                _
+            ))
+        ));
+    }
+
+    #[test]
     fn combined_archival_prepress_negotiates_version() {
         // PDF/A-2b (1.4..=1.7) + PDF/X-4 (1.6) -> 1.6.
         let config = ConfigurationBuilder::new()
@@ -266,6 +289,15 @@ mod tests {
         let config = ConfigurationBuilder::new()
             .with_archival_validator(Archival::A4)
             .with_prepress_validator(Prepress::X6)
+            .finish()
+            .unwrap();
+        assert_eq!(config.version(), PdfVersion::Pdf20);
+    }
+
+    #[test]
+    fn wtpdf_picks_pdf_2_0() {
+        let config = ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::WTPDF)
             .finish()
             .unwrap();
         assert_eq!(config.version(), PdfVersion::Pdf20);
@@ -342,5 +374,19 @@ mod tests {
                 "{archival:?} + {prepress:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn wtpdf_rejects_pdf_1_7() {
+        assert!(matches!(
+            ConfigurationBuilder::new()
+                .with_accessibility_validator(Accessibility::WTPDF)
+                .with_version(PdfVersion::Pdf17)
+                .finish(),
+            Err(ConfigurationError::VersionDoesNotMatchValidatorsRange(
+                PdfVersion::Pdf17,
+                _
+            ))
+        ));
     }
 }

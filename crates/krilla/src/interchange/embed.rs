@@ -16,6 +16,7 @@ use crate::Data;
 
 /// An error while embedding the file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EmbedError {
     /// The selected standard does not support embedding files.
     Existence,
@@ -81,6 +82,12 @@ impl Cacheable for EmbeddedFile {
         if let Some(mime_type) = &self.mime_type {
             embedded_file_stream.subtype(mime_type.0.to_pdf_name());
         } else {
+            // For an embedded file stream used as an associated file, /Subtype is
+            // required and defaults to "application/octet-stream" when the MIME type
+            // is unknown (ISO 32000-2 §7.11.4 Table 44, §14.13.2).
+            if sc.serialize_settings().supports_associated_files() {
+                embedded_file_stream.subtype("application/octet-stream".to_pdf_name());
+            }
             sc.register_validation_error(ValidationError::EmbeddedFile(
                 EmbedError::MissingMimeType,
                 self.location,
@@ -88,7 +95,11 @@ impl Cacheable for EmbeddedFile {
         }
 
         let mut params = embedded_file_stream.params();
-        params.size(self.data.as_ref().len() as i32);
+        // /Size is Optional (ISO 32000-2 §7.11.4 Table 45); skip it rather than
+        // writing a truncated value for embedded files larger than i32::MAX.
+        if let Ok(size) = i32::try_from(self.data.as_ref().len()) {
+            params.size(size);
+        }
 
         if let Some(date_time) = &self.modification_date {
             let date = pdf_date(*date_time);
@@ -120,7 +131,8 @@ impl Cacheable for EmbeddedFile {
         ef.finish();
 
         if sc.serialize_settings().supports_associated_files() {
-            file_spec.association_kind(self.association_kind.to_pdf());
+            let version = sc.serialize_settings().pdf_version();
+            file_spec.association_kind(self.association_kind.to_pdf(version));
         }
 
         if let Some(description) = self.description {
@@ -138,7 +150,15 @@ impl Cacheable for EmbeddedFile {
 }
 
 /// How an embedded file relates to the PDF document it is embedded in.
+///
+/// The first four variants and `Unspecified` are defined by PDF/A-3
+/// (ISO 19005-3) and have been available since PDF 1.7. The
+/// `EncryptedPayload`, `FormData`, and `Schema` variants were added by
+/// PDF 2.0 (ISO 32000-2 §7.11.3 Table 43); when one of these is used
+/// in a pre-2.0 file it is downgraded to `Unspecified` at serialisation
+/// time, since older readers will not recognise the keyword.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+#[non_exhaustive]
 pub enum AssociationKind {
     /// The PDF document was created from this source file.
     Source,
@@ -148,18 +168,44 @@ pub enum AssociationKind {
     Alternative,
     /// Additional resources for this document.
     Supplement,
+    /// An encrypted payload accompanying this document (PDF 2.0+).
+    EncryptedPayload,
+    /// Data submitted as part of a form (PDF 2.0+).
+    FormData,
+    /// A schema describing the structure of an associated file, for
+    /// example an XML schema for a form data submission (PDF 2.0+).
+    Schema,
     /// There is no clear relationship or it is not known.
     Unspecified,
 }
 
 impl AssociationKind {
-    fn to_pdf(self) -> pdf_writer::types::AssociationKind {
+    /// Map this association kind to the underlying `pdf-writer` keyword,
+    /// respecting the target PDF version.
+    ///
+    /// The PDF 2.0 keywords (`EncryptedPayload`, `FormData`, `Schema`)
+    /// have no equivalent in PDF 1.x; when the target version is older
+    /// than 2.0 they are downgraded to `Unspecified` so the produced
+    /// file remains valid for older readers.
+    fn to_pdf(self, version: PdfVersion) -> pdf_writer::types::AssociationKind {
+        use pdf_writer::types::AssociationKind as PdfKind;
+
         match self {
-            AssociationKind::Source => pdf_writer::types::AssociationKind::Source,
-            AssociationKind::Data => pdf_writer::types::AssociationKind::Data,
-            AssociationKind::Alternative => pdf_writer::types::AssociationKind::Alternative,
-            AssociationKind::Supplement => pdf_writer::types::AssociationKind::Supplement,
-            AssociationKind::Unspecified => pdf_writer::types::AssociationKind::Unspecified,
+            AssociationKind::Source => PdfKind::Source,
+            AssociationKind::Data => PdfKind::Data,
+            AssociationKind::Alternative => PdfKind::Alternative,
+            AssociationKind::Supplement => PdfKind::Supplement,
+            AssociationKind::Unspecified => PdfKind::Unspecified,
+            AssociationKind::EncryptedPayload
+            | AssociationKind::FormData
+            | AssociationKind::Schema
+                if version < PdfVersion::Pdf20 =>
+            {
+                PdfKind::Unspecified
+            }
+            AssociationKind::EncryptedPayload => PdfKind::EncryptedPayload,
+            AssociationKind::FormData => PdfKind::FormData,
+            AssociationKind::Schema => PdfKind::Schema,
         }
     }
 }

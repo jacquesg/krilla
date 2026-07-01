@@ -28,8 +28,8 @@ use crate::{
     metadata_1, metadata_2, pdfx_external_output_profile, rect_to_path, red_fill, settings_1,
     settings_13, settings_15, settings_17, settings_19, settings_20, settings_23, settings_24,
     settings_32, settings_33, settings_34, settings_35, settings_36, settings_37, settings_38,
-    settings_40, settings_41, settings_42, settings_7, settings_8, settings_9,
-    stops_with_2_solid_1, validation_errors, youtube_link, NOTO_SANS,
+    settings_40, settings_41, settings_42, settings_43, settings_44, settings_7, settings_8,
+    settings_9, stops_with_2_solid_1, validation_errors, youtube_link, NOTO_SANS,
 };
 use crate::{Document, SerializeSettings};
 
@@ -909,6 +909,254 @@ fn validate_pdf_ua1_only_annotation(document: &mut Document) {
 
     let outline = Outline::new();
     document.set_outline(outline);
+}
+
+// ---- PDF/UA-2 tests ----
+
+#[snapshot(document, settings_43)]
+fn validate_pdf_ua2_full_example(document: &mut Document) {
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+
+    let annotation = page.add_tagged_annotation(Annotation::new_link(
+        LinkAnnotation::new(
+            Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+            Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+        ),
+        Some("A link to youtube".to_string()),
+    ));
+
+    let mut link_group = TagGroup::new(Tag::Link);
+    link_group.push(annotation);
+
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    tag_tree.push(link_group);
+    document.set_tag_tree(tag_tree);
+
+    let metadata = Metadata::new()
+        .language("en".to_string())
+        .title("a nice title".to_string());
+    document.set_metadata(metadata);
+
+    let outline = Outline::new();
+    document.set_outline(outline);
+}
+
+#[test]
+fn validate_pdf_ua2_missing_requirements() {
+    let mut document = Document::new_with(settings_43());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+
+    let annot_loc = loc(1);
+    let annot = page.add_tagged_annotation(
+        Annotation::new_link(
+            LinkAnnotation::new(
+                Rect::from_xywh(50.0, 50.0, 100.0, 100.0).unwrap(),
+                Target::Action(LinkAction::new("https://www.youtube.com".to_string()).into()),
+            ),
+            None,
+        )
+        .with_location(Some(annot_loc)),
+    );
+
+    page.finish();
+
+    let formula_loc = loc(2);
+    let mut tag_group = TagGroup::new(Tag::Formula(None).with_location(Some(formula_loc)));
+    tag_group.push(id1);
+    tag_group.push(annot);
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(tag_group);
+    document.set_tag_tree(tag_tree);
+
+    let errs = validation_errors(document.finish());
+    // A document outline is only a "should" under ISO 14289-2 §8.12.2, so its
+    // absence is not a PDF/UA-2 conformance error.
+    assert!(!errs.contains(&ValidationError::MissingDocumentOutline));
+    assert!(errs.contains(&ValidationError::MissingAnnotationAltText(Some(annot_loc))));
+    assert!(errs.contains(&ValidationError::MissingAltText(Some(formula_loc))));
+    assert!(errs.contains(&ValidationError::NoDocumentTitle));
+    assert!(errs.contains(&ValidationError::NoDocumentLanguage));
+}
+
+#[test]
+fn validate_pdf_ua2_missing_tagging() {
+    let mut document = Document::new_with(settings_43());
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .title("a nice title".to_string()),
+    );
+    document.set_outline(Outline::new());
+
+    let errs = validation_errors(document.finish());
+    assert!(errs.contains(&ValidationError::MissingTagging));
+}
+
+// ---- WTPDF 1.0 tests ----
+
+#[snapshot(document, settings_44)]
+fn validate_wtpdf_full_example(document: &mut Document) {
+    // WTPDF mandates a document title (§8.11.1) and language (§8.4.4) at
+    // every conformance level.
+    document.set_metadata(
+        Metadata::new()
+            .title("WTPDF Document".to_string())
+            .language("en".to_string()),
+    );
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font,
+        20.0,
+        "This is some text",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+}
+
+#[test]
+fn validate_wtpdf_missing_tagging() {
+    let document = Document::new_with(settings_44());
+    let errs = validation_errors(document.finish());
+    assert!(errs.contains(&ValidationError::MissingTagging));
+}
+
+#[test]
+fn validate_wtpdf_allows_minimal_metadata() {
+    // WTPDF, unlike UA-2, does not mandate alt text on figures, a document
+    // outline, or the DisplayDocTitle viewer preference. A minimally tagged
+    // document that carries the general-provision title (WTPDF §8.11.1) and
+    // language (§8.4.4) must therefore succeed without those accessibility
+    // extras.
+    let mut document = Document::new_with(settings_44());
+    document.set_metadata(metadata_1().title("Minimal WTPDF".to_string()));
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    assert!(document.finish().is_ok());
+}
+
+#[test]
+fn validate_wtpdf_requires_title_and_language() {
+    // WTPDF §8.11.1 (dc:title) and §8.4.4 (/Lang) are general provisions
+    // mandatory at every conformance level; a document lacking them is
+    // non-conforming even though WTPDF relaxes the UA-2 accessibility extras.
+    let mut document = Document::new_with(settings_44());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.set_fill(Some(red_fill(1.0)));
+    surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    let errs = validation_errors(document.finish());
+    assert!(errs.contains(&ValidationError::NoDocumentTitle));
+    assert!(errs.contains(&ValidationError::NoDocumentLanguage));
+}
+
+#[test]
+fn validate_wtpdf_requires_codepoint_mappings() {
+    let mut document = Document::new_with(settings_44());
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+
+    let font_data = NOTO_SANS.clone();
+    let font = Font::new(font_data, 0).unwrap();
+
+    let id1 = surface.start_tagged(ContentTag::Span(SpanTag::empty()));
+    surface.draw_text(
+        Point::from_xy(0.0, 100.0),
+        font.clone(),
+        20.0,
+        "你",
+        false,
+        TextDirection::Auto,
+    );
+    surface.end_tagged();
+
+    surface.finish();
+    page.finish();
+
+    let mut tag_tree = TagTree::new();
+    tag_tree.push(id1);
+    document.set_tag_tree(tag_tree);
+
+    let errs = validation_errors(document.finish());
+    assert!(errs
+        .iter()
+        .any(|e| matches!(e, ValidationError::ContainsNotDefGlyph(_, _, _))));
 }
 
 #[test]
@@ -4121,4 +4369,201 @@ fn validate_x6_rejects_external_output_profile() {
             panic!("expected ExternalOutputProfileUnsupportedByValidator error, got {other:?}")
         }
     }
+}
+
+#[test]
+fn custom_output_intent_rejects_invalid_input() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype,
+        OutputIntentProfile,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::PdfA,
+            OutputIntentProfile::Rgb(profile.clone()),
+            "   ".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyIdentifier)
+    );
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::PdfA,
+            OutputIntentProfile::Rgb(profile.clone()),
+            "Custom".to_string(),
+            "  ".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyInfo)
+    );
+
+    assert_eq!(
+        CustomOutputIntent::new(
+            CustomOutputIntentSubtype::Custom(String::new()),
+            OutputIntentProfile::Rgb(profile),
+            "Custom".to_string(),
+            "info".to_string(),
+        )
+        .err(),
+        Some(CustomOutputIntentError::EmptyCustomSubtype)
+    );
+}
+
+#[test]
+fn custom_output_intent_emits_catalogue_entry() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+    let intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::PdfA,
+        OutputIntentProfile::Rgb(profile),
+        "sRGB IEC61966-2.1".to_string(),
+        "sRGB v4 destination profile".to_string(),
+    )
+    .expect("intent fields are non-empty")
+    .with_output_condition("sRGB".to_string())
+    .with_registry_name("http://www.color.org".to_string());
+
+    let settings = SerializeSettings {
+        output_intents: vec![intent],
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    page.surface().finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/OutputIntents"),
+        "PDF should contain /OutputIntents catalogue entry"
+    );
+    assert!(
+        pdf.contains("/Type /OutputIntent"),
+        "PDF should contain /Type /OutputIntent dictionary entry"
+    );
+    assert!(
+        pdf.contains("/S /GTS_PDFA1"),
+        "PDF should contain /S /GTS_PDFA1 for PdfA subtype"
+    );
+    assert!(
+        pdf.contains("(sRGB IEC61966-2.1)"),
+        "PDF should contain the output condition identifier"
+    );
+    assert!(
+        pdf.contains("(sRGB v4 destination profile)"),
+        "PDF should contain the info string"
+    );
+    assert!(
+        pdf.contains("(sRGB)"),
+        "PDF should contain the optional output condition"
+    );
+    assert!(
+        pdf.contains("(http://www.color.org)"),
+        "PDF should contain the optional registry name"
+    );
+}
+
+#[test]
+fn custom_output_intent_custom_subtype_emits_verbatim_name() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+    let intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::Custom("ISO_PDFE1".to_string()),
+        OutputIntentProfile::Rgb(profile),
+        "Custom".to_string(),
+        "PDF/E custom intent".to_string(),
+    )
+    .expect("intent fields are non-empty");
+
+    let settings = SerializeSettings {
+        output_intents: vec![intent],
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    page.surface().finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+
+    let pdf = String::from_utf8_lossy(&bytes);
+    assert!(
+        pdf.contains("/S /ISO_PDFE1"),
+        "PDF should contain /S /ISO_PDFE1 verbatim for Custom subtype"
+    );
+}
+
+#[test]
+fn custom_output_intent_no_validator_emits_only_custom() {
+    use krilla::icc::ICCProfile;
+    use krilla::{
+        CustomOutputIntent, CustomOutputIntentSubtype, Document, OutputIntentProfile,
+        SerializeSettings,
+    };
+
+    let profile_bytes =
+        std::fs::read(crate::WORKSPACE_PATH.join("crates/krilla/icc/sRGB-v4.icc")).unwrap();
+    let profile = ICCProfile::<3>::new(&profile_bytes).unwrap();
+    let intent = CustomOutputIntent::new(
+        CustomOutputIntentSubtype::PdfE,
+        OutputIntentProfile::Rgb(profile),
+        "Custom".to_string(),
+        "PDF/E intent".to_string(),
+    )
+    .expect("intent fields are non-empty");
+
+    let settings = SerializeSettings {
+        output_intents: vec![intent],
+        ..crate::settings_1()
+    };
+
+    let mut document = Document::new_with(settings);
+    document.set_metadata(
+        Metadata::new()
+            .language("en".to_string())
+            .creation_date(DateTime::new(2001)),
+    );
+    let mut page = document.start_page();
+    page.surface().finish();
+    page.finish();
+    let bytes = document.finish().expect("document finishes without errors");
+    let pdf = String::from_utf8_lossy(&bytes);
+
+    assert!(pdf.contains("/S /ISO_PDFE1"));
+    // No validator → no PDFA intent should be auto-generated.
+    assert!(!pdf.contains("/S /GTS_PDFA1"));
 }

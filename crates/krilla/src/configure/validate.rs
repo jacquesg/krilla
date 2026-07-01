@@ -1497,6 +1497,116 @@ pub enum Accessibility {
     ///
     /// [`TagKind`]: crate::interchange::tagging::TagKind
     UA1,
+    /// The validator for the PDF/UA-2 standard (ISO 14289-2:2024).
+    ///
+    /// PDF/UA-2 builds on ISO 32000-2 (PDF 2.0) and normatively references
+    /// the PDF Association's Well-Tagged PDF (WTPDF) profile. Every WTPDF
+    /// requirement applies, plus the universal-accessibility additions
+    /// documented below. Use [`WTPDF`](Self::WTPDF) instead when you need a
+    /// well-tagged PDF 2.0 document without the stricter accessibility
+    /// metadata requirements.
+    ///
+    /// **Requirements**:
+    ///
+    /// All requirements of [`WTPDF`](Self::WTPDF), plus:
+    ///
+    /// General:
+    /// - Information should not be conveyed by contrast, colour, format,
+    ///   or layout alone.
+    /// - All "best practice" notes in [`TagKind`] need to be complied with.
+    ///
+    /// Text:
+    /// - You should make use of the `Alt`, `ActualText`, `Lang` and
+    ///   `Expansion` attributes whenever possible.
+    /// - You should not provide an empty string as `Lang`.
+    /// - Stretchable characters (such as brackets, which often consist of
+    ///   several glyphs) should be marked accordingly with `ActualText`.
+    ///
+    /// Graphics:
+    /// - Graphics should be tagged as figures (unless they are an artifact).
+    /// - Graphics need to be followed by a caption.
+    /// - Graphics that possess semantic value only in combination with other
+    ///   graphics should be tagged with a single Figure tag for each figure.
+    /// - If a more accessible representation exists, it should be used over
+    ///   graphics.
+    ///
+    /// Headings:
+    /// - Headings should be tagged as such.
+    /// - For not strongly structured documents, H1 should be the first
+    ///   heading.
+    ///
+    /// Navigation:
+    /// - The document must contain an outline, and it should reflect
+    ///   the reading order of the document.
+    /// - Page labels should be semantically appropriate.
+    ///
+    /// Annotations:
+    /// - Annotations should be present in the tag tree in the correct
+    ///   reading order.
+    /// - Every annotation needs an alternate description (`Contents`).
+    /// - Embedded files need a `Description`.
+    ///
+    /// Fonts:
+    /// - You should only use fonts that are legally embeddable in a file
+    ///   for unlimited, universal rendering.
+    ///
+    /// Metadata (enforced by krilla):
+    /// - A document title must be set via [`Metadata`].
+    /// - A document language must be set via [`Metadata`].
+    ///
+    /// [`TagKind`]: crate::interchange::tagging::TagKind
+    /// [`Metadata`]: crate::metadata::Metadata
+    UA2,
+    /// The validator for the Well-Tagged PDF (WTPDF) 1.0 profile, published
+    /// by the PDF Association in 2024.
+    ///
+    /// WTPDF is a profile of ISO 32000-2 (PDF 2.0) requiring the document to
+    /// be well-tagged using the PDF 2.0 standard structure namespace
+    /// (`https://www.iso.org/pdf2/ssn`, as emitted by the pdf-writer crate).
+    /// It is the structural foundation of [`UA2`](Self::UA2); UA-2
+    /// normatively references WTPDF and layers the accessibility-specific
+    /// requirements on top.
+    ///
+    /// Use this variant when every consumer must receive a tagged
+    /// reading-order PDF 2.0 document, but the stricter accessibility
+    /// requirements of PDF/UA-2 (alternative text on every figure, mandatory
+    /// title and language, display-doc-title viewer preference, document
+    /// outline, …) are not desired.
+    ///
+    /// **Requirements**:
+    ///
+    /// General:
+    /// - All real content should be tagged accordingly using a
+    ///   [`TagGroup`] and [`Surface::start_tagged`].
+    /// - All artifacts should be marked accordingly with
+    ///   [`ContentTag::Artifact`].
+    /// - The tag tree should reflect the logical reading order of the
+    ///   document.
+    ///
+    /// Text:
+    /// - Word boundaries need to be explicitly specified with a space. The
+    ///   same applies to words at the end of a line that are not followed
+    ///   by punctuation.
+    /// - Hyphenation should be represented as a soft hyphen character
+    ///   (U+00AD) instead of a hard hyphen (U+002D).
+    ///
+    /// Tagging:
+    /// - Custom structure types must be mapped via the role map to a
+    ///   standard structure type. krilla emits the mapping automatically
+    ///   when the standard types are not sufficient.
+    /// - To the fullest extent possible, the logical structure of the
+    ///   document should be encoded in the tag tree using appropriate
+    ///   grouping tags.
+    /// - Language identifiers used must be valid according to RFC 3066.
+    ///
+    /// Fonts:
+    /// - You should only use fonts that are legally embeddable in a file
+    ///   for unlimited, universal rendering.
+    ///
+    /// [`TagGroup`]: crate::interchange::tagging::TagGroup
+    /// [`Surface::start_tagged`]: crate::surface::Surface::start_tagged
+    /// [`ContentTag::Artifact`]: crate::interchange::tagging::ContentTag::Artifact
+    WTPDF,
 }
 
 impl Accessibility {
@@ -1527,6 +1637,8 @@ impl Accessibility {
                 | ValidationError::InvalidOutputProfileColorSpace(_)
                 | ValidationError::MissingExternalOutputProfile,
             ) => false,
+
+            // PDF/UA-1 (PDF 1.4–1.7 base).
             (
                 Self::UA1,
                 ValidationError::ContainsNotDefGlyph(_, _, _)
@@ -1570,18 +1682,82 @@ impl Accessibility {
                 )
                 | ValidationError::MissingDocumentDate,
             ) => false,
+
+            // WTPDF + UA-2 share a body; UA-2-only checks are gated by
+            // matching `self`.
+            (
+                Self::UA2 | Self::WTPDF,
+                ValidationError::ContainsNotDefGlyph(_, _, _)
+                | ValidationError::NoCodepointMapping(_, _, _)
+                | ValidationError::InvalidCodepointMapping(_, _, _, _)
+                | ValidationError::RestrictedLicense(_)
+                | ValidationError::MissingTagging
+                | ValidationError::EmbeddedPDF(_),
+            ) => true,
+            (
+                Self::UA2 | Self::WTPDF,
+                ValidationError::TooLongString
+                | ValidationError::TooLongName
+                | ValidationError::TooLongArray
+                | ValidationError::TooLongDictionary
+                | ValidationError::TooLargeFloat
+                | ValidationError::TooManyIndirectObjects
+                | ValidationError::TooHighQNestingLevel
+                | ValidationError::ContainsPostScript(_)
+                | ValidationError::MissingCMYKProfile
+                | ValidationError::InconsistentSeparationFallback(_)
+                | ValidationError::UnicodePrivateArea(_, _, _, _)
+                | ValidationError::Transparency(_)
+                | ValidationError::ImageInterpolation(_)
+                | ValidationError::EmbeddedFile(
+                    EmbedError::Existence | EmbedError::MissingDate | EmbedError::MissingMimeType,
+                    _,
+                )
+                | ValidationError::MissingDocumentDate
+                | ValidationError::RequiresNewerPdfVersion(
+                    VersionedFeature::HeaderFooterArtifactSubtypes
+                    | VersionedFeature::StructureOrderTabbing
+                    | VersionedFeature::TableHeaderScope,
+                    _,
+                ),
+            ) => false,
+            // dc:title (WTPDF §8.11.1), the catalog /Lang entry (WTPDF §8.4.4)
+            // and embedded-file /Desc (WTPDF §8.14.1) are general provisions
+            // mandatory at every WTPDF conformance level, exactly as under
+            // UA-2 — not accessibility-only extras.
+            (
+                Self::UA2 | Self::WTPDF,
+                ValidationError::NoDocumentLanguage
+                | ValidationError::NoDocumentTitle
+                | ValidationError::EmbeddedFile(EmbedError::MissingDescription, _),
+            ) => true,
+            // UA-2's accessibility-specific requirements; WTPDF relaxes these.
+            (
+                Self::UA2 | Self::WTPDF,
+                ValidationError::MissingAltText(_) | ValidationError::MissingAnnotationAltText(_),
+            ) => self == Self::UA2,
+            // ISO 14289-2 states a heading `/T` title and a document outline
+            // (§8.12.2) as recommendations ("should"), not requirements, so
+            // neither is a hard error under PDF/UA-2 or WTPDF (unlike PDF/UA-1).
+            (
+                Self::UA2 | Self::WTPDF,
+                ValidationError::MissingHeadingTitle | ValidationError::MissingDocumentOutline,
+            ) => false,
         }
     }
 
     fn requires_codepoint_mappings(self) -> bool {
         match self {
-            Self::UA1 => true,
+            Self::UA1 | Self::UA2 | Self::WTPDF => true,
         }
     }
 
     fn requires_display_doc_title(self) -> bool {
         match self {
-            Self::UA1 => true,
+            // UA-1 and UA-2 mandate the DisplayDocTitle viewer preference;
+            // WTPDF does not.
+            Self::UA1 | Self::UA2 => true,
+            Self::WTPDF => false,
         }
     }
 
@@ -1591,7 +1767,7 @@ impl Accessibility {
 
     fn requires_xmp_metadata(self) -> bool {
         match self {
-            Self::UA1 => true,
+            Self::UA1 | Self::UA2 | Self::WTPDF => true,
         }
     }
 
@@ -1599,6 +1775,32 @@ impl Accessibility {
         match self {
             Self::UA1 => {
                 xmp.pdfua_part(1);
+            }
+            Self::UA2 => {
+                // PDF/UA-2 (ISO 14289-2:2024) identifies itself through
+                // `pdfuaid:part = 2` and `pdfuaid:rev = 2024`.
+                xmp.pdfua_part(2);
+                xmp.pdfua_rev(2024);
+            }
+            // WTPDF 1.0 §6.1: a file conforming to the reuse level shall
+            // carry a PDF Declaration whose `pdfd:conformsTo` entry names the
+            // reuse-level URI. krilla's WTPDF validator targets the reuse
+            // conformance level (the accessibility level additionally requires
+            // alt text, DisplayDocTitle and the other UA-2 extras).
+            Self::WTPDF => {
+                let pdfd = || {
+                    Namespace::Custom(Box::new(CustomNamespace::new(
+                        "PDF Declarations",
+                        "pdfd",
+                        "http://pdfa.org/declarations/",
+                    )))
+                };
+                let mut bag = xmp
+                    .element("declarations", pdfd())
+                    .array(RdfCollectionType::Bag);
+                let mut li = bag.element().obj();
+                li.element("conformsTo", pdfd())
+                    .value("http://pdfa.org/declarations/wtpdf/#reuse1.0");
             }
         }
     }
@@ -1615,6 +1817,8 @@ impl Accessibility {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::UA1 => "PDF/UA-1",
+            Self::UA2 => "PDF/UA-2",
+            Self::WTPDF => "WTPDF 1.0",
         }
     }
 
@@ -1623,6 +1827,8 @@ impl Accessibility {
         match self {
             // PDF/UA-1 requires Tagged PDF and XMP `/Metadata` streams, which both require PDF 1.4.
             Self::UA1 => Some(PdfVersion::Pdf14),
+            // PDF/UA-2 and WTPDF are PDF 2.0 only.
+            Self::UA2 | Self::WTPDF => Some(PdfVersion::Pdf20),
         }
     }
 
@@ -1631,6 +1837,8 @@ impl Accessibility {
         match self {
             // PDF/UA-1 is specified against PDF 1.7.
             Self::UA1 => PdfVersion::Pdf17,
+            // PDF/UA-2 and WTPDF are PDF 2.0 only.
+            Self::UA2 | Self::WTPDF => PdfVersion::Pdf20,
         }
     }
 }

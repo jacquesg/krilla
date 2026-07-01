@@ -82,9 +82,10 @@ impl GenericICCProfile {
     }
 }
 
-// The `Cacheable` implementation is only needed when embedding a profile as a
-// stream, which today only happens for raster image color spaces.
-#[cfg(feature = "raster-images")]
+// The `Cacheable` implementation embeds a profile as a stream. This is
+// needed both for raster-image colour spaces and for output-intent
+// destination profiles (which are emitted regardless of the
+// `raster-images` feature), so it is available unconditionally.
 impl Cacheable for GenericICCProfile {
     fn serialize(
         self,

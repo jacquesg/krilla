@@ -915,6 +915,7 @@ pub fn settings_1() -> SerializeSettings {
         configuration: Configuration::default(),
         render_svg_glyph_fn: render_svg_glyph,
         external_output_profile: None,
+        output_intents: Vec::new(),
     }
 }
 
@@ -1314,6 +1315,28 @@ pub fn pdfx_external_output_profile() -> ExternalOutputProfile {
     )
     .expect("test fixture ExternalOutputProfile is well-formed")
     .with_output_condition("sRGB".to_string())
+}
+
+// PDF/UA-2 (ISO 14289-2:2024).
+pub fn settings_43() -> SerializeSettings {
+    SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::UA2)
+            .finish()
+            .unwrap(),
+        ..settings_1()
+    }
+}
+
+// WTPDF 1.0 (PDF Association well-tagged PDF 2.0 profile).
+pub fn settings_44() -> SerializeSettings {
+    SerializeSettings {
+        configuration: ConfigurationBuilder::new()
+            .with_accessibility_validator(Accessibility::WTPDF)
+            .finish()
+            .unwrap(),
+        ..settings_1()
+    }
 }
 
 pub fn metadata_1() -> Metadata {
