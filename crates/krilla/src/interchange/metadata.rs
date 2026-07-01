@@ -263,10 +263,15 @@ impl Metadata {
     ///   (ISO 32000-2 §12.6.4.9 Table 200). Used by the PDFreactor
     ///   `printDialogPrompt` parity surface to raise the print
     ///   dialog on document open via [`NamedAction::Print`].
+    /// - [`OpenAction::javascript`] — JavaScript-action dispatch
+    ///   (ISO 32000-2 §12.6.4.16). Executes the supplied
+    ///   ECMAScript snippet when the document is opened; the
+    ///   script string is written verbatim into the catalogue's
+    ///   `/OpenAction /JS` entry.
     ///
-    /// Other action types (`/JavaScript`, `/SubmitForm`, etc.) are
-    /// not exposed at this entry; use the appropriate annotation
-    /// or document-event setter instead.
+    /// Other action types (`/SubmitForm`, `/Launch`, etc.) are not
+    /// exposed at this entry; use the appropriate annotation or
+    /// document-event setter instead.
     pub fn open_action(mut self, action: OpenAction) -> Self {
         self.open_action = Some(action);
         self
@@ -867,7 +872,7 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
 
 /// `/OpenAction` document action (ISO 32000-2 §12.6.4.3).
 ///
-/// Two flavours are exposed:
+/// Three flavours are exposed:
 ///
 /// - [`OpenAction::go_to_page_with_zoom`] — the direct-link
 ///   `[<page-ref> <destination>]` form serialised as a single-line
@@ -876,7 +881,16 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
 ///   a `<< /S /Named /N /<NamedAction> >>` dictionary. Used to
 ///   trigger viewer-side commands such as the print dialog on
 ///   document open (ISO 32000-2 §12.6.4.9 Table 200).
-#[derive(Copy, Clone, Debug)]
+/// - [`OpenAction::javascript`] — the JavaScript-action form
+///   `<< /S /JavaScript /JS (<script>) >>` (ISO 32000-2 §12.6.4.16).
+///   The script string is owned by the action and serialised
+///   verbatim through `pdf_writer`'s `TextStr` writer.
+///
+/// `OpenAction` is intentionally not `Copy` because the
+/// JavaScript variant owns an arbitrarily-long `String`; the
+/// only call site clones cheaply via `.as_ref()` on the parent
+/// `Option`.
+#[derive(Clone, Debug)]
 pub enum OpenAction {
     /// Direct-link destination — opens `page_index` (0-indexed)
     /// at the given destination flavour. Resolved against the
@@ -892,6 +906,18 @@ pub enum OpenAction {
     /// Named action — opens the document and immediately
     /// dispatches a viewer-side command (ISO 32000-2 §12.6.4.9).
     Named(NamedAction),
+    /// JavaScript action — opens the document and immediately
+    /// executes the supplied ECMAScript snippet
+    /// (ISO 32000-2 §12.6.4.16). The string is written verbatim
+    /// into the catalogue's `/OpenAction /JS` entry; no escaping
+    /// or sanitisation is performed at this layer.
+    ///
+    /// PDF viewers typically gate JavaScript execution through a
+    /// Trust Manager (Acrobat, Foxit). Authors that rely on the
+    /// script firing should keep it to AcroForm helpers or
+    /// `app.alert(...)`-style snippets that all major viewers
+    /// permit by default.
+    JavaScript(String),
 }
 
 impl OpenAction {
@@ -909,6 +935,15 @@ impl OpenAction {
     /// `printDialogPrompt` configuration property.
     pub fn named(action: NamedAction) -> Self {
         Self::Named(action)
+    }
+
+    /// Build an `/OpenAction` JavaScript entry that executes
+    /// `script` on document open (ISO 32000-2 §12.6.4.16).
+    ///
+    /// The script string is owned by the action and serialised
+    /// verbatim as the `/JS` entry; no escaping is performed.
+    pub fn javascript(script: impl Into<String>) -> Self {
+        Self::JavaScript(script.into())
     }
 }
 
@@ -1625,5 +1660,58 @@ mod tests {
             .legal_content(LegalContent::new().javascript_actions(true))
             .legal_content(LegalContent::new());
         assert!(metadata.legal_content.is_none());
+    }
+
+    #[test]
+    fn open_action_javascript_builder_constructs_variant() {
+        // E.9-CC3 — the `OpenAction::javascript(...)` builder must
+        // produce the matching enum variant verbatim so downstream
+        // consumers can pattern-match on the script payload.
+        let action = OpenAction::javascript("app.alert('hi');");
+        match action {
+            OpenAction::JavaScript(script) => {
+                assert_eq!(script, "app.alert('hi');");
+            }
+            other => panic!(
+                "expected OpenAction::JavaScript, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn open_action_javascript_round_trips_through_metadata() {
+        // E.9-CC3 — round-trip the action through `Metadata` so the
+        // catalogue `/OpenAction` serialisation path in
+        // `chunk_container.rs` has a stable input shape to consume.
+        let metadata = Metadata::new()
+            .open_action(OpenAction::javascript("print();"));
+        let stored = metadata
+            .open_action
+            .as_ref()
+            .expect("open_action should be set after builder");
+        match stored {
+            OpenAction::JavaScript(script) => {
+                assert_eq!(script, "print();");
+            }
+            other => panic!(
+                "expected OpenAction::JavaScript, got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn open_action_clones_javascript_payload() {
+        // E.9-CC3 — `OpenAction` lost `Copy` to accommodate the
+        // owned-`String` JavaScript variant. The clone path is the
+        // only way callers (and the serialiser) can read the payload
+        // without taking ownership; assert it preserves the bytes.
+        let original = OpenAction::javascript("foo();");
+        let copy = original.clone();
+        match (original, copy) {
+            (OpenAction::JavaScript(a), OpenAction::JavaScript(b)) => {
+                assert_eq!(a, b);
+            }
+            _ => panic!("clone produced a different variant"),
+        }
     }
 }
