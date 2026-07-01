@@ -271,6 +271,33 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Begin an `/Artifact` marked-content section bracketing decorative
+    /// content (for example a blurred text-shadow's repeated glyph stamps)
+    /// so conforming text extractors and assistive technology skip it.
+    ///
+    /// Unlike [`start_artifact`](Self::start_artifact), which routes through
+    /// the structure-tagging machinery and emits nothing on an untagged
+    /// page, this writes the `/Artifact BDC` operator directly into the
+    /// content stream regardless of tagging mode — the right marker for
+    /// decorative content in plain (untagged) PDFs.
+    ///
+    /// Returns `false` (emitting nothing) when a marked-content section is
+    /// already open, since marked content does not nest here. Pass the
+    /// returned flag to [`end_artifact_content`](Self::end_artifact_content).
+    #[must_use]
+    pub fn begin_artifact_content(&mut self) -> bool {
+        self.bd.get_mut().try_begin_artifact_content()
+    }
+
+    /// End a content-stream artifact section opened by
+    /// [`begin_artifact_content`](Self::begin_artifact_content). `started`
+    /// is the flag that call returned; a `false` flag is a no-op.
+    pub fn end_artifact_content(&mut self, started: bool) {
+        if started {
+            self.bd.get_mut().end_marked_content();
+        }
+    }
+
     fn outline_glyphs(
         &mut self,
         glyphs: &[impl Glyph],
