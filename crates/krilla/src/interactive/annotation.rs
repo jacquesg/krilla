@@ -2818,10 +2818,17 @@ impl WidgetAnnotation {
             WidgetField::Signature(sig) => {
                 // ISO 32000-2 §12.7.4.5: a signature field carries
                 // `/FT /Sig` plus optional `/Lock` and `/SV` (seed value).
-                // krilla emits the field unsigned — `/V` is *omitted*
-                // entirely so a downstream signing pipeline can fill it
-                // in without rewriting the widget structure.
+                // When the document is configured with
+                // [`Document::with_digital_signature`], `/V` is wired
+                // to the indirect `/Sig` dictionary krilla emits at
+                // finalise time. When the document is not signed,
+                // `/V` is *omitted* so a downstream signing pipeline
+                // can fill it in without rewriting the widget
+                // structure (the original krilla behaviour).
                 annotation.pair(Name(b"FT"), Name(b"Sig"));
+                if let Some(sig_ref) = sc.signature_dict_ref() {
+                    annotation.pair(Name(b"V"), sig_ref);
+                }
                 match &sig.lock {
                     SignatureLock::None => {}
                     SignatureLock::All => {

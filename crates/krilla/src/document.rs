@@ -17,6 +17,7 @@
 use crate::chunk_container::ChunkContainer;
 use crate::destination::NamedDestination;
 use crate::error::KrillaResult;
+use crate::interactive::signature::DigitalSignature;
 use crate::interchange::embed::EmbeddedFile;
 use crate::interchange::metadata::Metadata;
 use crate::interchange::outline::Outline;
@@ -31,6 +32,13 @@ use crate::surface::Location;
 pub struct Document {
     pub(crate) serializer_context: SerializeContext,
     pub(crate) chunk_container: ChunkContainer,
+    /// Digital signature to apply on `finish`. `None` leaves any
+    /// [`SignatureField`](crate::annotation::SignatureField)
+    /// widgets unsigned (placeholder structure only). When `Some`,
+    /// `finish` emits a real `/Sig` indirect dictionary, wires the
+    /// widget's `/V`, sets `/AcroForm /SigFlags 3` and patches the
+    /// signature bytes into the buffer after serialisation.
+    pub(crate) digital_signature: Option<DigitalSignature>,
 }
 
 impl Default for Document {
@@ -48,6 +56,7 @@ impl Document {
         Self {
             serializer_context,
             chunk_container,
+            digital_signature: None,
         }
     }
 
@@ -59,7 +68,31 @@ impl Document {
         Self {
             serializer_context,
             chunk_container,
+            digital_signature: None,
         }
+    }
+
+    /// Attach a digital signature to this document.
+    ///
+    /// Configures krilla to emit a real `/Sig` indirect dictionary
+    /// (ISO 32000-2 §12.8) wired to every
+    /// [`SignatureField`](crate::annotation::SignatureField)
+    /// widget the document already carries via
+    /// [`crate::page::Page::add_widget_annotation`]. The signer
+    /// callback inside `signature` is invoked exactly once during
+    /// [`Self::finish`], after the PDF byte buffer has been
+    /// produced but before it is returned to the caller — it
+    /// receives the bytes covered by `/ByteRange` and must
+    /// produce a DER-encoded PKCS#7 / CMS `SignedData` structure
+    /// that fits inside the reservation declared by
+    /// [`DigitalSignature::placeholder_size_bytes`].
+    ///
+    /// Calling this method twice on the same document is not
+    /// supported — the second call replaces the first signer.
+    pub fn with_digital_signature(mut self, signature: DigitalSignature) -> Self {
+        self.serializer_context.enable_signing();
+        self.digital_signature = Some(signature);
+        self
     }
 
     /// Start a new page with default settings.
@@ -186,9 +219,33 @@ impl Document {
 
         let Self {
             serializer_context,
-            chunk_container,
+            mut chunk_container,
+            digital_signature,
         } = self;
 
-        serializer_context.finish(chunk_container)
+        // Stash the signature metadata onto the chunk container so the
+        // catalogue-emit path can write the `/Sig` indirect dict body
+        // and set `/AcroForm /SigFlags`. The signer callback itself
+        // stays here — `finish` returns it (alongside the buffer) so
+        // we can invoke it post-emit.
+        if let Some(ref sig) = digital_signature {
+            chunk_container.set_signature_emission_settings(
+                sig.sub_filter,
+                sig.placeholder_size_bytes,
+                sig.reason.clone(),
+                sig.location.clone(),
+                sig.contact_info.clone(),
+                sig.signer_name.clone(),
+                sig.signing_time.clone(),
+            );
+        }
+
+        let buffer = serializer_context.finish(chunk_container)?;
+
+        if let Some(signature) = digital_signature {
+            crate::interactive::signature::patch_signature(buffer, signature)
+        } else {
+            Ok(buffer)
+        }
     }
 }
