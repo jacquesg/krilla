@@ -45,6 +45,20 @@ pub(crate) struct AppearanceStream {
     pub(crate) uses_helvetica: bool,
 }
 
+/// A pushbutton icon-appearance Form XObject — ISO 32000-2 §12.5.6.19
+/// Table 167 `/MK /I`. Wraps a single registered [`crate::graphics::
+/// image::Image`] (via its already-resolved indirect ref) inside a
+/// widget-local Form XObject whose content stream stretches the image
+/// to fill `[0 0 bbox_w bbox_h]`. The XObject's indirect reference
+/// becomes the `/MK /I` entry on the widget annotation; viewers draw
+/// the icon inside the widget's rectangle.
+pub(crate) struct IconAppearanceXObject {
+    pub(crate) xobject_ref: Ref,
+    pub(crate) image_ref: Ref,
+    pub(crate) bbox_w: f32,
+    pub(crate) bbox_h: f32,
+}
+
 /// The set of Form XObjects produced by widget appearance generation
 /// for one annotation. Consumed by [`Annotation::serialize`] after the
 /// annotation dict has been finalised — every stream becomes one
@@ -58,13 +72,28 @@ pub(crate) struct AppearanceJob {
     pub(crate) on: AppearanceStream,
     /// "Off" state stream — `Some` only for checkbox / radio.
     pub(crate) off: Option<AppearanceStream>,
+    /// Pushbutton icon-appearance Form XObject. `Some` only when the
+    /// widget was decorated via [`WidgetAnnotation::with_icon_appearance`].
+    pub(crate) icon: Option<IconAppearanceXObject>,
 }
 
 /// An annotation.
 pub struct Annotation {
     pub(crate) annotation_type: AnnotationType,
     pub(crate) alt: Option<String>,
-    pub(crate) struct_parent: Option<i32>,
+    /// `/StructParent` key (PDF 1.5+, ISO 32000-2 §14.7.4.4 / ISO
+    /// 14289-1 §7.18.1). Populated automatically by
+    /// [`crate::page::Page::add_tagged_annotation`] when the annotation
+    /// participates in the structure tree; callers using the untagged
+    /// [`crate::page::Page::add_annotation`] entry point may set this
+    /// directly via [`Annotation::with_struct_parent`] when they have
+    /// allocated the struct-parent slot themselves. The field is also
+    /// exposed for `pub(crate)` mutation from the structure-tree
+    /// builder, which back-fills the value when the tag tree resolves
+    /// the annotation's `/StructElem` parent. Keeping the slot public
+    /// for read access lets embedders implementing their own structure
+    /// trees verify the wired value.
+    pub struct_parent: Option<i32>,
     pub(crate) location: Option<Location>,
 }
 
@@ -127,6 +156,25 @@ impl Annotation {
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
+        self
+    }
+
+    /// Set the `/StructParent` entry — the integer key into the
+    /// document's `/StructTreeRoot /ParentTree` that resolves to the
+    /// structure element this annotation belongs to (ISO 32000-2
+    /// §14.7.4.4 / ISO 14289-1 §7.18.1). PDF/UA-1 requires every
+    /// annotation appearing inside a `/StructElem` to carry the
+    /// corresponding `/StructParent`; conforming readers thread the
+    /// reverse pointer to surface the annotation as an `OBJR` leaf
+    /// under the tag tree.
+    ///
+    /// Most callers obtain this value implicitly by calling
+    /// [`crate::page::Page::add_tagged_annotation`]; embedders that
+    /// allocate the slot themselves (e.g. when feeding a custom
+    /// structure-tree builder) may set it directly. Passing the value
+    /// twice is harmless — the later call wins.
+    pub fn with_struct_parent(mut self, struct_parent: i32) -> Self {
+        self.struct_parent = Some(struct_parent);
         self
     }
 }
@@ -259,6 +307,32 @@ impl Annotation {
             }
         }
 
+        // Pre-resolve any pushbutton icon-appearance image ref *before*
+        // the annotation dict starts writing — `register_image` needs
+        // mutable access to `chunk_container`, which the annotation
+        // dict's `&mut Chunk` would otherwise hold exclusively. The
+        // resulting `Ref` is threaded into `serialize_type` so the
+        // widget's `/MK /I` entry can name the freshly-registered
+        // image. krilla deduplicates by image hash, so multiple widgets
+        // sharing one `Image` clone resolve to the same indirect
+        // reference.
+        let icon_image_ref: Option<Ref> = {
+            #[cfg(feature = "raster-images")]
+            {
+                if let AnnotationType::Widget(w) = &self.annotation_type {
+                    w.icon_image
+                        .as_ref()
+                        .map(|image| sc.register_image(chunk_container, image.clone()))
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(feature = "raster-images"))]
+            {
+                None
+            }
+        };
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)
@@ -266,7 +340,7 @@ impl Annotation {
 
         let appearance_job = self
             .annotation_type
-            .serialize_type(sc, &mut annotation, page_height)?;
+            .serialize_type(sc, &mut annotation, page_height, icon_image_ref)?;
 
         // Link annotations only set the /F PRINT flag when they have a visible
         // border (so borderless links don't print). Text, Markup and Widget
@@ -355,12 +429,51 @@ impl Annotation {
 /// referenced from the widget annotation's `/AP` entry. Each XObject
 /// carries a widget-local `/BBox` (`[0 0 w h]`) and a `/Resources`
 /// dict containing `/Font /Helv <helv_ref>` when the content stream
-/// references Helvetica.
+/// references Helvetica. When the widget carries a pushbutton
+/// icon-appearance (`/MK /I`), an additional Form XObject is emitted
+/// that wraps the registered image — its `/Resources /XObject /Im0`
+/// names the image ref and the content stream stretches it across the
+/// widget's bbox.
 fn emit_appearance_xobjects(chunk: &mut Chunk, job: AppearanceJob) {
     write_form_xobject(chunk, &job.on, job.helv_ref);
     if let Some(off) = job.off {
         write_form_xobject(chunk, &off, job.helv_ref);
     }
+    if let Some(icon) = job.icon {
+        write_icon_form_xobject(chunk, &icon);
+    }
+}
+
+/// Emit a pushbutton icon-appearance Form XObject. The content stream
+/// is `q <bbox_w> 0 0 <bbox_h> 0 0 cm /Im0 Do Q` — a single image draw
+/// stretched to fill the widget's bbox. `/Resources /XObject /Im0`
+/// names the registered image ref; the `/MK /I` entry on the widget
+/// dict references this Form XObject directly.
+fn write_icon_form_xobject(chunk: &mut Chunk, icon: &IconAppearanceXObject) {
+    use std::fmt::Write as _;
+    let mut content = String::with_capacity(48);
+    // The image's intrinsic coordinate system is `1 x 1`; the matrix
+    // scales it to fill `[0 0 bbox_w bbox_h]` so the icon stretches
+    // across the widget rectangle. Authors needing fit / preserve-
+    // aspect-ratio behaviour drive `/IF` via the embedder; krilla's
+    // current surface emits a bare image draw.
+    writeln!(
+        &mut content,
+        "q\n{:.4} 0 0 {:.4} 0 0 cm\n/Im0 Do\nQ",
+        icon.bbox_w, icon.bbox_h,
+    )
+    .unwrap();
+
+    let mut xobj = chunk.form_xobject(icon.xobject_ref, content.as_bytes());
+    xobj.bbox(pdf_writer::Rect::new(0.0, 0.0, icon.bbox_w, icon.bbox_h));
+    {
+        let mut resources = xobj.resources();
+        let mut xobjects = resources.x_objects();
+        xobjects.pair(Name(b"Im0"), icon.image_ref);
+        xobjects.finish();
+        resources.finish();
+    }
+    xobj.finish();
 }
 
 fn write_form_xobject(chunk: &mut Chunk, stream: &AppearanceStream, helv_ref: Ref) {
@@ -423,12 +536,15 @@ impl AnnotationType {
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
+        icon_image_ref: Option<Ref>,
     ) -> KrillaResult<Option<AppearanceJob>> {
         match self {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
             AnnotationType::Text(t) => t.serialize_type(sc, annotation, page_height),
             AnnotationType::Markup(m) => m.serialize_type(sc, annotation, page_height),
-            AnnotationType::Widget(w) => w.serialize_type(sc, annotation, page_height),
+            AnnotationType::Widget(w) => {
+                w.serialize_type(sc, annotation, page_height, icon_image_ref)
+            }
         }
     }
 }
@@ -499,12 +615,53 @@ impl LinkBorder {
     }
 }
 
+/// `/H` highlight mode on a [`LinkAnnotation`] (ISO 32000-2 §12.5.6.5
+/// Table 165, mirrored on widget annotations by ISO 32000-2 §12.5.6.19
+/// Table 167). Determines the visual effect the conforming reader
+/// applies while the user holds the pointer button over the annotation.
+///
+/// PDF/UA-1 §7.18.2.1 demands an explicit `/H` value on every link
+/// annotation so assistive technology knows whether the activation
+/// gesture conveys feedback to the user. Most viewers default to
+/// `/H /I` (Invert) when the entry is missing; krilla writes the
+/// explicit value when one is set, otherwise omits the entry and
+/// relies on the viewer default.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash, Default)]
+pub enum LinkHighlight {
+    /// `/H /N` — no highlighting effect.
+    None,
+    /// `/H /I` — invert the contents of the annotation rectangle.
+    /// Most PDF viewers treat this as the implicit default when the
+    /// `/H` entry is absent.
+    #[default]
+    Invert,
+    /// `/H /O` — invert the annotation's border (outline only).
+    Outline,
+    /// `/H /P` — display the annotation rectangle as if it had been
+    /// pushed below the surface of the page.
+    Push,
+}
+
+impl LinkHighlight {
+    /// Project onto the pdf-writer enum used by the `/H` writer.
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::HighlightEffect {
+        use pdf_writer::types::HighlightEffect;
+        match self {
+            Self::None => HighlightEffect::None,
+            Self::Invert => HighlightEffect::Invert,
+            Self::Outline => HighlightEffect::Outline,
+            Self::Push => HighlightEffect::Push,
+        }
+    }
+}
+
 /// A link annotation.
 pub struct LinkAnnotation {
     pub(crate) rect: Rect,
     pub(crate) quad_points: Option<Vec<Quadrilateral>>,
     pub(crate) target: Target,
     pub(crate) border: Option<LinkBorder>,
+    pub(crate) highlight: Option<LinkHighlight>,
 }
 
 impl LinkAnnotation {
@@ -518,6 +675,7 @@ impl LinkAnnotation {
             quad_points: None,
             target,
             border: None,
+            highlight: None,
         }
     }
 
@@ -559,6 +717,7 @@ impl LinkAnnotation {
             quad_points: Some(quad_points),
             target,
             border: None,
+            highlight: None,
         }
     }
 
@@ -569,6 +728,17 @@ impl LinkAnnotation {
             border: Some(border),
             ..self
         }
+    }
+
+    /// Set the `/H` highlight mode (ISO 32000-2 §12.5.6.5 Table 165).
+    /// PDF/UA-1 §7.18.2.1 requires every link annotation to carry an
+    /// explicit highlight mode so assistive technology can convey the
+    /// activation effect to users. When unset, krilla omits the `/H`
+    /// entry and viewers fall back to their implicit default (`/I`
+    /// Invert across most viewers).
+    pub fn with_highlight(mut self, highlight: LinkHighlight) -> Self {
+        self.highlight = Some(highlight);
+        self
     }
 
     fn serialize_type(
@@ -590,6 +760,16 @@ impl LinkAnnotation {
             self.border.as_ref().map_or(0.0, |x| x.width),
             None,
         );
+
+        // ISO 32000-2 §12.5.6.5 `/H` — explicit highlight mode.
+        // PDF/UA-1 §7.18.2.1 mandates the entry; krilla writes the
+        // explicit value when the embedder has called
+        // `with_highlight(...)`. Without an explicit value the entry
+        // is omitted and conforming readers default to `/H /I`
+        // (Invert).
+        if let Some(highlight) = self.highlight {
+            annotation.highlight(highlight.to_pdf());
+        }
 
         if let Some(border) = &self.border {
             write_color(annotation, &border.color);
@@ -1586,6 +1766,24 @@ pub struct WidgetAnnotation {
     /// for numeric range bounds. The action may reject the change by
     /// setting `event.rc = false` so the viewer reverts the field.
     pub(crate) validate_action: Option<Action>,
+    /// `/MK /I` — pushbutton icon appearance (ISO 32000-2 §12.5.6.19
+    /// Table 167). When set, krilla emits a Form XObject wrapping
+    /// the image and threads its indirect reference into the
+    /// widget's `/MK` dictionary. The image draws into the widget's
+    /// `/BBox [0 0 w h]` so the viewer fills the button area with
+    /// the icon. Only meaningful for pushbutton widgets
+    /// (`<input type="image">`); krilla silently ignores the value
+    /// on other field types.
+    #[cfg(feature = "raster-images")]
+    pub(crate) icon_image: Option<crate::graphics::image::Image>,
+    /// `/DA` — default appearance string (ISO 32000-2 §12.7.4.3 Table
+    /// 230). Overrides krilla's built-in `/Helv 10 Tf 0 g` fallback
+    /// so the widget can reference a specific font and colour. The
+    /// string is written verbatim as a PDF byte string; the embedder
+    /// is responsible for escaping. Only meaningful for variable-text
+    /// fields (`/Tx`, `/Ch`); krilla writes the value on Text and
+    /// Choice widgets and ignores it elsewhere.
+    pub(crate) default_appearance: Option<String>,
 }
 
 impl WidgetAnnotation {
@@ -1607,6 +1805,9 @@ impl WidgetAnnotation {
             keystroke_action: None,
             format_action: None,
             validate_action: None,
+            #[cfg(feature = "raster-images")]
+            icon_image: None,
+            default_appearance: None,
         }
     }
 
@@ -1671,11 +1872,42 @@ impl WidgetAnnotation {
         self
     }
 
+    /// Attach an icon appearance image to a pushbutton widget
+    /// (`<input type="image">`). The image surfaces as `/MK /I` on the
+    /// widget annotation per ISO 32000-2 §12.5.6.19 Table 167; PDF
+    /// viewers draw the icon inside the widget's `/BBox`.
+    ///
+    /// krilla registers the image once and wraps it in a Form XObject
+    /// at serialisation time; multiple widgets pointing at the same
+    /// `Image` clone share the underlying image resource. The icon
+    /// entry is only meaningful for pushbutton fields (`WidgetField::
+    /// Button(ButtonField { kind: ButtonKind::PushButton, .. })`);
+    /// other widget kinds silently ignore the value.
+    #[cfg(feature = "raster-images")]
+    pub fn with_icon_appearance(mut self, image: crate::graphics::image::Image) -> Self {
+        self.icon_image = Some(image);
+        self
+    }
+
+    /// Override the widget's `/DA` (default appearance) string. The
+    /// supplied bytes are written verbatim as the `/DA` entry per ISO
+    /// 32000-2 §12.7.4.3 Table 230. Use for variable-text fields
+    /// (`/Tx`, `/Ch`) when the widget should reference a specific font
+    /// or colour (e.g. `/Courier 10 Tf 0 g` for a monospaced hex
+    /// literal). When unset, krilla falls back to its built-in
+    /// `/Helv 10 Tf 0 g` default. The embedder is responsible for
+    /// supplying a syntactically valid `/DA` operator sequence.
+    pub fn with_default_appearance(mut self, da: impl Into<String>) -> Self {
+        self.default_appearance = Some(da.into());
+        self
+    }
+
     fn serialize_type(
         &self,
         sc: &mut SerializeContext,
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
+        icon_image_ref: Option<Ref>,
     ) -> KrillaResult<Option<AppearanceJob>> {
         annotation.subtype(pdf_writer::types::AnnotationType::Widget);
 
@@ -1703,7 +1935,16 @@ impl WidgetAnnotation {
         // elsewhere). A minimal default appearance — Helvetica 10pt
         // black — matches what Acrobat falls back to when /DA is
         // missing but `/NeedAppearances true` is set at the catalogue.
+        // Callers may override via `with_default_appearance(...)` to
+        // request a specific font / colour (e.g. monospaced `/Courier`
+        // for a hex literal). The override is consulted on Text and
+        // Choice arms; other field types ignore the slot.
         const DEFAULT_APPEARANCE: &[u8] = b"/Helv 10 Tf 0 g";
+        let da_bytes: &[u8] = self
+            .default_appearance
+            .as_deref()
+            .map(str::as_bytes)
+            .unwrap_or(DEFAULT_APPEARANCE);
 
         let bbox_w = self.rect.width();
         let bbox_h = self.rect.height();
@@ -1725,7 +1966,7 @@ impl WidgetAnnotation {
             WidgetField::Text(text) => {
                 annotation.pair(Name(b"FT"), Name(b"Tx"));
                 annotation.pair(Name(b"Ff"), text.flags.to_bits() as i32);
-                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
+                annotation.pair(Name(b"DA"), Str(da_bytes));
                 annotation.pair(Name(b"V"), TextStr(&text.value));
                 annotation.pair(Name(b"DV"), TextStr(&text.default_value));
                 if let Some(max_len) = text.max_length {
@@ -1743,6 +1984,7 @@ impl WidgetAnnotation {
                         uses_helvetica: true,
                     },
                     off: None,
+                    icon: None,
                 };
             }
             WidgetField::Button(button) => {
@@ -1777,6 +2019,7 @@ impl WidgetAnnotation {
                                 content: build_empty_box_content(bbox_w, bbox_h),
                                 uses_helvetica: false,
                             }),
+                            icon: None,
                         };
                     }
                     ButtonKind::Radio => {
@@ -1813,20 +2056,44 @@ impl WidgetAnnotation {
                                 content: build_radio_off_content(bbox_w, bbox_h),
                                 uses_helvetica: false,
                             }),
+                            icon: None,
                         };
                     }
                     ButtonKind::PushButton => {
-                        // Pushbuttons have no persistent value. /MK /CA
-                        // gives Acrobat a label to draw — written as a
-                        // best-effort caption derived from the HTML
-                        // element's text content.
-                        if !button.caption.is_empty() {
+                        // Pushbuttons have no persistent value. /MK
+                        // carries the optional caption (/CA, ISO
+                        // 32000-2 §12.5.6.19 Table 167) and / or icon
+                        // (/I, same table). HTML `<input type="image">`
+                        // routes the image through
+                        // `WidgetAnnotation::with_icon_appearance`; the
+                        // caption is the alt-text fallback for viewers
+                        // that cannot decode the icon (or while the
+                        // image is loading). When either entry is
+                        // populated krilla emits a single shared `/MK`
+                        // dict carrying both.
+                        let icon_xobject_ref: Option<Ref> =
+                            icon_image_ref.map(|_| sc.new_ref());
+                        if !button.caption.is_empty() || icon_xobject_ref.is_some() {
                             let mut mk = annotation.insert(Name(b"MK")).dict();
-                            mk.pair(Name(b"CA"), TextStr(&button.caption));
+                            if !button.caption.is_empty() {
+                                mk.pair(Name(b"CA"), TextStr(&button.caption));
+                            }
+                            if let Some(icon_ref) = icon_xobject_ref {
+                                mk.pair(Name(b"I"), icon_ref);
+                            }
                             mk.finish();
                         }
                         let ap_ref = sc.new_ref();
                         write_ap_single(annotation, ap_ref);
+                        let icon = match (icon_image_ref, icon_xobject_ref) {
+                            (Some(image_ref), Some(xobject_ref)) => Some(IconAppearanceXObject {
+                                xobject_ref,
+                                image_ref,
+                                bbox_w,
+                                bbox_h,
+                            }),
+                            _ => None,
+                        };
                         job = AppearanceJob {
                             helv_ref,
                             on: AppearanceStream {
@@ -1837,6 +2104,7 @@ impl WidgetAnnotation {
                                 uses_helvetica: true,
                             },
                             off: None,
+                            icon,
                         };
                     }
                 }
@@ -1878,6 +2146,7 @@ impl WidgetAnnotation {
                         content: build_radio_off_content(bbox_w, bbox_h),
                         uses_helvetica: false,
                     }),
+                    icon: None,
                 };
             }
             WidgetField::Signature(sig) => {
@@ -1935,12 +2204,13 @@ impl WidgetAnnotation {
                         uses_helvetica: false,
                     },
                     off: None,
+                    icon: None,
                 };
             }
             WidgetField::Choice(choice) => {
                 annotation.pair(Name(b"FT"), Name(b"Ch"));
                 annotation.pair(Name(b"Ff"), choice.flags.to_bits() as i32);
-                annotation.pair(Name(b"DA"), Str(DEFAULT_APPEARANCE));
+                annotation.pair(Name(b"DA"), Str(da_bytes));
                 // /V and /DV emission follows ISO 32000-2 §12.7.4.4:
                 // empty → omit; one entry → string literal; two or more
                 // → array of strings (MultiSelect, bit 22). Single-
@@ -1980,6 +2250,7 @@ impl WidgetAnnotation {
                         uses_helvetica: true,
                     },
                     off: None,
+                    icon: None,
                 };
             }
         }
@@ -3187,6 +3458,155 @@ mod tests {
         assert!(
             !contains(&pdf, b"/Ff 98304"),
             "pushbutton+radio combination must not be set on a radio group",
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // moegoe G26 — fork-extension setters: `/H`, `/StructParent`,
+    // `/DA` override, `/MK /I`.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn link_annotation_with_highlight_invert_emits_h_i() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        )
+        .with_highlight(LinkHighlight::Invert);
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(contains(&pdf, b"/H /I"), "missing /H /I");
+    }
+
+    #[test]
+    fn link_annotation_with_highlight_push_emits_h_p() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        )
+        .with_highlight(LinkHighlight::Push);
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(contains(&pdf, b"/H /P"), "missing /H /P");
+    }
+
+    #[test]
+    fn link_annotation_without_highlight_omits_h() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 16.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(0, Point::from_xy(0.0, 0.0)),
+            )),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("link".into())));
+        assert!(!contains(&pdf, b"/H /"), "unexpected /H entry on link without highlight");
+    }
+
+    #[test]
+    fn annotation_with_struct_parent_emits_structparent_entry() {
+        let text = TextAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
+        let annotation = Annotation::new_text(text, Some("alt".into())).with_struct_parent(7);
+        let pdf = finish_with(annotation);
+        assert!(
+            contains(&pdf, b"/StructParent 7"),
+            "missing /StructParent 7"
+        );
+    }
+
+    #[test]
+    fn widget_text_with_default_appearance_overrides_helvetica() {
+        let text = WidgetField::Text(TextField {
+            value: "deadbeef".into(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "hex", text)
+            .with_default_appearance("/Courier 10 Tf 0 g");
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(
+            contains(&pdf, b"/DA (/Courier 10 Tf 0 g)"),
+            "missing overridden /DA"
+        );
+        assert!(
+            !contains(&pdf, b"/DA (/Helv 10 Tf 0 g)"),
+            "default Helvetica /DA must not appear when override is set"
+        );
+    }
+
+    #[test]
+    fn widget_text_without_default_appearance_falls_back_to_helvetica() {
+        let text = WidgetField::Text(TextField {
+            value: String::new(),
+            default_value: String::new(),
+            max_length: None,
+            flags: TextFieldFlags::default(),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "untitled", text);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(
+            contains(&pdf, b"/DA (/Helv 10 Tf 0 g)"),
+            "missing default Helvetica /DA"
+        );
+    }
+
+    #[cfg(feature = "raster-images")]
+    #[test]
+    fn widget_pushbutton_with_icon_appearance_emits_mk_i() {
+        use crate::graphics::image::Image;
+
+        // Construct a 2x2 RGBA image directly from raw pixels — avoids
+        // taking a hard dependency on a PNG fixture file. Four 8-bit
+        // RGBA samples (red, green, blue, transparent) give a
+        // deterministic test image.
+        let image = Image::from_rgba8(
+            vec![
+                255, 0, 0, 255, // red
+                0, 255, 0, 255, // green
+                0, 0, 255, 255, // blue
+                0, 0, 0, 0, // transparent
+            ],
+            2,
+            2,
+        );
+
+        let button = WidgetField::Button(ButtonField {
+            checked: false,
+            kind: ButtonKind::PushButton,
+            caption: "Go".into(),
+            flags: ButtonFieldFlags::default().with_pushbutton(true),
+        });
+        let widget = WidgetAnnotation::new(widget_rect(), "submit", button)
+            .with_icon_appearance(image);
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+
+        // /MK dict carries both /CA caption and /I icon ref.
+        assert!(contains(&pdf, b"/MK <<"), "missing /MK dictionary opener");
+        assert!(contains(&pdf, b"/CA (Go)"), "missing /CA caption inside /MK");
+        // /I <n> 0 R — the indirect reference token. We assert the
+        // `/I ` substring followed by digits + ` 0 R`.
+        let mk_pos = pdf
+            .windows(b"/MK <<".len())
+            .position(|w| w == b"/MK <<")
+            .expect("/MK dict not found");
+        let mk_tail = &pdf[mk_pos..];
+        let i_in_mk = mk_tail
+            .windows(b"/I ".len())
+            .position(|w| w == b"/I ")
+            .expect("missing /I entry inside /MK dict");
+        let after_i = &mk_tail[i_in_mk + b"/I ".len()..];
+        assert!(
+            after_i.iter().take_while(|b| b.is_ascii_digit()).count() > 0,
+            "/I must be followed by a numeric ref id"
+        );
+        // The icon Form XObject's content stream draws the image as
+        // /Im0; assert the content-stream marker is present somewhere
+        // in the document.
+        assert!(
+            contains(&pdf, b"/Im0 Do"),
+            "missing image draw in icon Form XObject content stream"
         );
     }
 }
