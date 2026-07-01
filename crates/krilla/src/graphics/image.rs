@@ -349,11 +349,11 @@ impl Image {
         self.0.size()
     }
 
-    fn icc(&self) -> Option<GenericICCProfile> {
+    pub(crate) fn icc(&self) -> Option<GenericICCProfile> {
         self.0.icc()
     }
 
-    fn color_space(&self) -> ImageColorspace {
+    pub(crate) fn color_space(&self) -> ImageColorspace {
         self.0.color_space()
     }
 

@@ -8,6 +8,7 @@
 use pdf_writer::types::TrappingStatus;
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
+use std::ops::DerefMut;
 use xmp_writer::{LangId, Timezone, XmpWriter};
 
 use crate::configure::{Configuration, PdfVersion, ValidationError};
@@ -52,6 +53,16 @@ pub struct Metadata {
     /// Table 200). One entry per event key; `set_document_event_script`
     /// overwrites a duplicate event.
     pub(crate) document_event_scripts: Vec<(DocumentEvent, String)>,
+    /// F18 — author-supplied custom entries written into the PDF
+    /// `/Info` dictionary (ISO 32000-2 §14.3.3 "any number of
+    /// additional entries containing application-specific data").
+    /// These entries have no predefined XMP analogue and are not
+    /// mirrored into the XMP packet; ISO 19005-1 §6.7.2 permits
+    /// document information dictionary entries with no XMP analogue
+    /// to remain Info-dict-only. Order is preserved. Duplicate names
+    /// retain the later value (the builder calls
+    /// [`Metadata::custom_property`] with last-wins semantics).
+    pub(crate) custom_properties: Vec<(String, String)>,
 }
 
 /// PDF catalogue-level additional-action event keys (ISO 32000-2
@@ -321,6 +332,41 @@ impl Metadata {
         self
     }
 
+    /// Register a custom entry in the PDF `/Info` dictionary
+    /// (ISO 32000-2 §14.3.3 — "any number of additional entries
+    /// containing application-specific data").
+    ///
+    /// These entries have no predefined XMP analogue, so they are
+    /// written to the Info dictionary only and not mirrored into the
+    /// XMP packet; ISO 19005-1 §6.7.2 permits document information
+    /// dictionary entries with no XMP analogue to be omitted from the
+    /// XMP metadata stream.
+    ///
+    /// Standard Info-dict slot names (`Title`, `Author`, `Subject`,
+    /// `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`,
+    /// `Trapped`, `GTS_PDFXVersion`) MUST NOT be supplied via this
+    /// setter — the caller is expected to filter them out before
+    /// reaching krilla. krilla writes the supplied `name` verbatim
+    /// as a PDF name token; the value is written as a PDF text
+    /// string (UTF-16BE BOM-prefixed when it contains non-ASCII,
+    /// per ISO 32000-2 §7.9.2.2).
+    ///
+    /// Duplicate `name`s retain the later value (last-wins).
+    pub fn custom_property(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let value = value.into();
+        if name.is_empty() {
+            return self;
+        }
+        self.custom_properties.retain(|(existing, _)| existing != &name);
+        self.custom_properties.push((name, value));
+        self
+    }
+
 
     pub(crate) fn has_document_info(&self) -> bool {
         self.title.is_some()
@@ -330,6 +376,7 @@ impl Metadata {
             || self.creator.is_some()
             || self.creation_date.is_some()
             || self.description.is_some()
+            || !self.custom_properties.is_empty()
     }
 
     pub(crate) fn serialize_xmp_metadata(
@@ -479,6 +526,19 @@ impl Metadata {
                 Trapping::Unknown => {}
             }
         }
+
+        // F18 — custom Info-dict entries (ISO 32000-2 §14.3.3) are
+        // deliberately NOT mirrored into the XMP packet. They have no
+        // predefined XMP analogue, so ISO 19005-1 §6.7.2 permits them
+        // to remain Info-dict-only ("document information dictionary
+        // entries that have no XMP analogues"). Mirroring them under an
+        // Adobe extension namespace (`pdfx:`) would require a
+        // pdfaExtension:schemas description (§6.7.8) that krilla does
+        // not emit for arbitrary caller keys, and an arbitrary property
+        // name is not necessarily a valid XML name, so writing it as an
+        // element name could yield a non-well-formed packet (§6.7.9).
+        // The entries are carried solely in the Info dictionary (see
+        // `serialize_document_info`).
     }
 
     pub(crate) fn serialize_document_info(
@@ -501,6 +561,22 @@ impl Metadata {
             || config.validators().requires_trapping_metadata()
             || self.trapped.is_some();
 
+        // Custom Info-dict entries (ISO 32000-2 §14.3.3) are NOT
+        // deprecated in PDF 2.0 — only the standard string slots
+        // (Title, Author, …) are. Force the Info dict open whenever
+        // the caller has registered custom properties so the entries
+        // survive a PDF 2.0 emission.
+        let has_custom_properties = !self.custom_properties.is_empty();
+
+        // ISO 32000-2 §14.3.3 Table 349: `/ModDate` is *required* in
+        // the document information dictionary when `/PieceInfo` is
+        // present in the document catalogue. krilla emits `/PieceInfo`
+        // whenever the caller registered any piece-info entry, so force
+        // the Info dict open — and the `/ModDate` below — in that case.
+        // `ModDate` is one of the two entries NOT deprecated in PDF 2.0
+        // (§14.3.3), so this holds on every version.
+        let has_piece_info = !self.piece_info.is_empty();
+
         // Under PDF 2.0 the per-field string entries (title, producer,
         // etc.) are deprecated and not written — only `creation_date`
         // and the PDF/X-mandated entries remain. Guard the ref bump
@@ -511,7 +587,10 @@ impl Metadata {
         let will_write = if config.version() < PdfVersion::Pdf20 {
             self.has_document_info() || requires_pdfx_info || has_piece_info
         } else {
-            self.creation_date.is_some() || requires_pdfx_info
+            self.creation_date.is_some()
+                || requires_pdfx_info
+                || has_custom_properties
+                || has_piece_info
         };
 
         if will_write {
@@ -548,8 +627,39 @@ impl Metadata {
                 }
             }
 
-            if let Some(date_time) = self.creation_date {
+            // `/ModDate` (ISO 32000-2 §14.3.3 Table 349) is *required*
+            // when `/PieceInfo` is present in the document catalogue and
+            // otherwise optional. Prefer the caller's creation date;
+            // failing that, fall back to the most recent piece-info
+            // `/LastModified` so a piece-info-only document still carries
+            // the required entry. Missing calendar fields default exactly
+            // as `pdf_date` fills them; the UTC offset is deliberately
+            // not folded into the comparison because the selected entry's
+            // date is emitted verbatim and §14.5 compares modification
+            // dates only for equality.
+            let modified_date = self.creation_date.or_else(|| {
+                self.piece_info
+                    .values()
+                    .map(|entry| entry.last_modified)
+                    .max_by_key(|dt| {
+                        (
+                            dt.year,
+                            dt.month.unwrap_or(1),
+                            dt.day.unwrap_or(1),
+                            dt.hour.unwrap_or(0),
+                            dt.minute.unwrap_or(0),
+                            dt.second.unwrap_or(0),
+                        )
+                    })
+            });
+            if let Some(date_time) = modified_date {
                 document_info.modified_date(pdf_date(date_time));
+            }
+
+            // `/CreationDate` (ISO 32000-2 §14.3.3 Table 349) is
+            // optional; emit it only when the caller supplied one — we
+            // never fabricate a creation date from piece-info metadata.
+            if let Some(date_time) = self.creation_date {
                 document_info.creation_date(pdf_date(date_time));
             }
 
@@ -575,6 +685,19 @@ impl Metadata {
             // the Info dict (see above) and carry the version solely in XMP.
             if let Some(version_str) = config.validators().gts_pdfx_version_string() {
                 document_info.pair(Name(b"GTS_PDFXVersion"), TextStr(version_str));
+            }
+
+            // F18 — author-supplied custom Info-dict entries
+            // (ISO 32000-2 §14.3.3). PDF allows arbitrary additional
+            // keys; the standard-slot deprecation in PDF 2.0 does NOT
+            // apply to application-defined keys, so these survive
+            // regardless of `config.version()`. The caller is
+            // responsible for not colliding with the spec-reserved
+            // names; krilla writes the supplied name verbatim.
+            for (name, value) in &self.custom_properties {
+                document_info
+                    .deref_mut()
+                    .pair(Name(name.as_bytes()), TextStr(value));
             }
         }
     }

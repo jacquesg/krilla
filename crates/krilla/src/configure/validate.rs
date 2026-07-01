@@ -970,6 +970,38 @@ impl Archival {
             // — a conformant archival document must be openable without a
             // password by future preservation tooling.
             (_, ValidationError::ContainsEncryption) => true,
+            // JavaScript actions: PDF/A-1/-2/-3 forbid them, PDF/A-4 permits
+            // them (ISO 19005-4 §6.6.2).
+            (Self::A4 | Self::A4F | Self::A4E, ValidationError::ContainsJavaScriptAction(_)) => {
+                false
+            }
+            (_, ValidationError::ContainsJavaScriptAction(_)) => true,
+            // A widget/field `/AA` additional-actions dictionary: forbidden by
+            // PDF/A-1/-2/-3 ("Trigger events"), permitted (though discouraged)
+            // by PDF/A-4.
+            (
+                Self::A4 | Self::A4F | Self::A4E,
+                ValidationError::ContainsWidgetAdditionalActions(_),
+            ) => false,
+            (_, ValidationError::ContainsWidgetAdditionalActions(_)) => true,
+            // Catalog /AA and non-standard named actions: forbidden by every
+            // PDF/A part.
+            (
+                _,
+                ValidationError::ContainsCatalogAdditionalActions(_)
+                | ValidationError::NonStandardNamedAction(_),
+            ) => true,
+            // Optional content and cross-reference streams both require PDF
+            // 1.5. The emission gate raises this error only when the effective
+            // version is below 1.5, so whenever it fires it is a genuine
+            // conflict — including PDF/A-2/-3, whose minimum version is 1.4.
+            (
+                _,
+                ValidationError::RequiresNewerPdfVersion(
+                    VersionedFeature::OptionalContent | VersionedFeature::CrossReferenceStream,
+                    _,
+                ),
+            ) => true,
             // PDF/X-specific errors have a uniform verdict across every PDF/A
             // profile: PDF/A normalizes mixed gradient color spaces and never
             // makes use of an external output profile, but it permits RGB,
@@ -1682,6 +1714,25 @@ impl Accessibility {
             // ISO 14289 (PDF/UA-1, PDF/UA-2) and WTPDF are silent on encryption
             // — accessibility conformance is orthogonal to the security handler.
             (_, ValidationError::ContainsEncryption) => false,
+            // Interactive-action restrictions are a PDF/A / PDF/X concern; the
+            // accessibility validators do not forbid these.
+            (
+                _,
+                ValidationError::ContainsJavaScriptAction(_)
+                | ValidationError::ContainsCatalogAdditionalActions(_)
+                | ValidationError::ContainsWidgetAdditionalActions(_)
+                | ValidationError::NonStandardNamedAction(_),
+            ) => false,
+            // Optional content and cross-reference streams require PDF 1.5. The
+            // gate fires only below 1.5, so whenever it does it is a genuine
+            // conflict — including PDF/UA-1, whose minimum version is 1.4.
+            (
+                _,
+                ValidationError::RequiresNewerPdfVersion(
+                    VersionedFeature::OptionalContent | VersionedFeature::CrossReferenceStream,
+                    _,
+                ),
+            ) => true,
             // PDF/X-specific errors: PDF/UA normalizes mixed gradient color
             // spaces and never makes use of an external output profile, but it
             // permits RGB, annotations, and pages without a TrimBox/ArtBox.
@@ -2373,6 +2424,52 @@ impl ValidationStore {
             Err(ValidationError::InconsistentSeparationFallback(
                 separation.colorant.clone(),
             ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// PDF/A-1/-2/-3 (ISO 19005-1 §6.6.1) and PDF/X-1a/-3/-4/-4p forbid
+    /// JavaScript actions; PDF/A-4 (ISO 19005-4 §6.6.2) and PDF/X-6/-6p
+    /// (ISO 15930-9 §6.14.2) permit them to be present.
+    #[test]
+    fn javascript_action_gating() {
+        let err = ValidationError::ContainsJavaScriptAction(None);
+        for p in [Archival::A1_B, Archival::A2_B, Archival::A3_B] {
+            assert!(p.prohibits(&err), "{p:?} should forbid JavaScript");
+        }
+        for p in [Archival::A4, Archival::A4F, Archival::A4E] {
+            assert!(!p.prohibits(&err), "{p:?} should permit JavaScript");
+        }
+        for p in [Prepress::X1A, Prepress::X3, Prepress::X4, Prepress::X4P] {
+            assert!(p.prohibits(&err), "{p:?} should forbid JavaScript");
+        }
+        for p in [Prepress::X6, Prepress::X6P] {
+            assert!(!p.prohibits(&err), "{p:?} should permit JavaScript");
+        }
+    }
+
+    /// A widget/field `/AA` additional-actions dictionary is forbidden by
+    /// PDF/A-1/-2/-3 ("Trigger events") and every PDF/X revision
+    /// (ISO 15930-9 §6.14.3); PDF/A-4 permits it and the accessibility
+    /// profiles are silent on it.
+    #[test]
+    fn widget_additional_actions_gating() {
+        let err = ValidationError::ContainsWidgetAdditionalActions(None);
+        for p in [Archival::A1_B, Archival::A2_B, Archival::A3_B] {
+            assert!(p.prohibits(&err), "{p:?} should forbid widget /AA");
+        }
+        for p in [Archival::A4, Archival::A4F, Archival::A4E] {
+            assert!(!p.prohibits(&err), "{p:?} should permit widget /AA");
+        }
+        for p in [Prepress::X1A, Prepress::X4, Prepress::X6, Prepress::X6P] {
+            assert!(p.prohibits(&err), "{p:?} should forbid widget /AA");
+        }
+        for p in [Accessibility::UA1, Accessibility::UA2, Accessibility::WTPDF] {
+            assert!(!p.prohibits(&err), "{p:?} should permit widget /AA");
         }
     }
 }

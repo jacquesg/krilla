@@ -1,5 +1,6 @@
 pub mod blend;
 pub mod color;
+pub(crate) mod devicen;
 pub mod graphic;
 pub(crate) mod graphics_state;
 pub mod icc;

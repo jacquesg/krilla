@@ -74,6 +74,42 @@ impl PdfDocument {
         Self(Arc::new(Prehashed::new(PdfDocumentRepr(pdf))))
     }
 
+    /// Number of pages in the embedded PDF document.
+    ///
+    /// Use this to drive [`Document::embed_pdf_pages`] when the caller
+    /// wants to embed every page of a foreign PDF without first parsing
+    /// the byte stream out-of-band. Returns `0` for PDFs with an empty
+    /// page tree (which is technically allowed by ISO 32000-2 §7.7.3
+    /// but rare in practice).
+    ///
+    /// [`Document::embed_pdf_pages`]: crate::Document::embed_pdf_pages
+    pub fn page_count(&self) -> usize {
+        self.0.deref().0.pages().len()
+    }
+
+    /// Per-page rendered dimensions in PDF points for the page at the
+    /// given index, or `None` when the index is out of range.
+    ///
+    /// "Rendered dimensions" follow hayro's `Page::render_dimensions`
+    /// semantics: the width and height of the crop box intersected
+    /// with the media box (falling back to A4 for degenerate,
+    /// zero-area pages), after the page's rotation has been applied.
+    /// This matches what a PDF viewer paints, so for a page whose
+    /// crop box is smaller than its media box the returned size is
+    /// the crop box size, not the media box size. Callers that need
+    /// the raw, unrotated media box or crop box should parse the PDF
+    /// directly with a low-level crate (`lopdf`, `pdf-writer`, …) —
+    /// krilla's public surface intentionally exposes only the geometry
+    /// consumers actually care about for downstream layout.
+    pub fn page_dimensions(&self, page_index: usize) -> Option<(f32, f32)> {
+        self.0
+            .deref()
+            .0
+            .pages()
+            .get(page_index)
+            .map(|p| p.render_dimensions())
+    }
+
     pub(crate) fn pdf(&self) -> &Pdf {
         &self.0.deref().0
     }
@@ -167,7 +203,7 @@ impl PdfSerializerContext {
 
         let mut entries = self.infos.into_iter().collect::<Vec<_>>();
         // Make sure we always process them in the same order.
-        entries.sort_by(|d1, d2| d1.1.counter.cmp(&d2.1.counter));
+        entries.sort_by_key(|d1| d1.1.counter);
 
         for (doc, info) in entries {
             for location in info.locations.iter() {

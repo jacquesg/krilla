@@ -326,3 +326,27 @@ fn pdf_embedded_as_xobject_caching(page: &mut Page) {
     surface.draw_pdf_page(&pdf, Size::from_wh(100.0, 100.0).unwrap(), 0);
     surface.pop();
 }
+
+/// [`PdfDocument::page_count`] and [`PdfDocument::page_dimensions`]
+/// must report the foreign PDF's geometry. `resvg_masking_clipPath_mixed_clip_rule.pdf`
+/// has exactly one page (embedding index `1` yields `InvalidPage(1)`).
+#[test]
+fn pdf_document_page_count_and_dimensions() {
+    let pdf = load_pdf("resvg_masking_clipPath_mixed_clip_rule.pdf");
+
+    assert_eq!(pdf.page_count(), 1, "fixture has exactly one page");
+
+    let (w, h) = pdf
+        .page_dimensions(0)
+        .expect("page 0 must report dimensions");
+    assert!(
+        w.is_finite() && h.is_finite() && w > 0.0 && h > 0.0,
+        "page dimensions must be positive and finite, got {w}x{h}",
+    );
+
+    assert_eq!(
+        pdf.page_dimensions(1),
+        None,
+        "out-of-range page index must yield None",
+    );
+}

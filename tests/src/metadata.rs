@@ -124,6 +124,26 @@ fn raw_xmp_overrides_stream() {
     );
 }
 
+/// [`Metadata::custom_property`] must write the author-supplied entry
+/// into the `/Info` dictionary (ISO 32000-2 §14.3.3): the name as a
+/// PDF name token and the value as a literal string.
+#[test]
+fn custom_property_written_to_info_dict() {
+    let mut document = Document::new();
+    document.set_metadata(Metadata::new().custom_property("CustomKey", "custom-value"));
+    minimal_page(&mut document);
+    let pdf = document.finish().expect("finish should succeed");
+
+    assert!(
+        memmem(&pdf, b"/CustomKey"),
+        "custom Info-dict key should be written as a PDF name token",
+    );
+    assert!(
+        memmem(&pdf, b"custom-value"),
+        "custom Info-dict value should be written verbatim",
+    );
+}
+
 /// Construct a fresh [`Metadata`] equivalent to [`metadata_impl`] but
 /// without taking a `&mut Document` — needed because builder chaining
 /// consumes the receiver.
