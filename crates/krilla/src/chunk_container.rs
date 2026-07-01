@@ -1,5 +1,6 @@
 use pdf_writer::{Chunk, Finish, Name, Pdf, Ref, Str, TextStr};
 use std::collections::HashMap;
+use std::ops::DerefMut;
 use std::sync::OnceLock;
 use xmp_writer::{RenditionClass, XmpWriter};
 
@@ -449,6 +450,65 @@ impl ChunkContainer {
 
             if let Some(ol) = &self.non_stream.outline {
                 catalog.outlines(remapper[&ol.0]);
+            }
+
+            // G5b — `/OpenAction` document action (ISO 32000-2
+            // §12.6.4.3). Only the direct-link
+            // `[<page-ref> <destination>]` form is supported (see
+            // `Metadata::open_action`). The destination flavour is
+            // mapped through `OpenZoom`; out-of-range page indices
+            // are clamped at the caller boundary, so resolving
+            // against `page_infos()` here is infallible-by-construction.
+            if let Some(open_action) = metadata.open_action {
+                use crate::interchange::metadata::OpenZoom;
+                use crate::serialize::PageInfo;
+                let page_info = sc
+                    .page_infos()
+                    .get(open_action.page_index)
+                    .expect(
+                        "Metadata::open_action page_index out of range; \
+                         the embedder must clamp before calling",
+                    );
+                let page_ref = match page_info {
+                    PageInfo::Krilla { ref_, .. } => *ref_,
+                    PageInfo::Pdf { ref_, .. } => *ref_,
+                };
+                let mut array = catalog
+                    .deref_mut()
+                    .insert(Name(b"OpenAction"))
+                    .array();
+                array.item(page_ref);
+                match open_action.zoom {
+                    OpenZoom::Xyz(zoom) => {
+                        array.item(Name(b"XYZ"));
+                        array.item(pdf_writer::Null);
+                        array.item(pdf_writer::Null);
+                        array.item(zoom);
+                    }
+                    OpenZoom::FitPage => {
+                        array.item(Name(b"Fit"));
+                    }
+                    OpenZoom::FitHorizontalToWidth => {
+                        array.item(Name(b"FitH"));
+                        array.item(pdf_writer::Null);
+                    }
+                    OpenZoom::FitVerticalToHeight => {
+                        array.item(Name(b"FitV"));
+                        array.item(pdf_writer::Null);
+                    }
+                    OpenZoom::FitBoundingBox => {
+                        array.item(Name(b"FitB"));
+                    }
+                    OpenZoom::FitBoundingBoxHorizontal => {
+                        array.item(Name(b"FitBH"));
+                        array.item(pdf_writer::Null);
+                    }
+                    OpenZoom::FitBoundingBoxVertical => {
+                        array.item(Name(b"FitBV"));
+                        array.item(pdf_writer::Null);
+                    }
+                }
+                array.finish();
             }
 
             let settings = sc.serialize_settings();
