@@ -1977,7 +1977,7 @@ impl FileAttachmentIcon {
 ///
 /// The annotation's `/FS` entry is an indirect reference to a file
 /// specification dictionary; krilla registers the [`EmbeddedFile`]
-/// via [`crate::serialize::SerializeContext::register_cacheable`],
+/// via `SerializeContext::register_cacheable`,
 /// so multiple annotations sharing one payload (same path / mime /
 /// data hash) dedupe onto a single FileSpec object. The annotation
 /// does NOT automatically participate in the document catalogue's
@@ -3360,7 +3360,7 @@ impl ChoiceFieldFlags {
 /// for checkbox/radio) drawn in widget-local coordinates with `/BBox
 /// [0 0 w h]`. Text and choice streams reference the document-level
 /// Helvetica resource (allocated lazily via
-/// [`SerializeContext::standard_helvetica_ref`]); checkbox / radio
+/// `SerializeContext::standard_helvetica_ref`); checkbox / radio
 /// streams use vector paths only. The catalogue still sets
 /// `/NeedAppearances true` so Acrobat regenerates appearances from
 /// `/V` + `/DA` on the first save when a non-ASCII value triggers

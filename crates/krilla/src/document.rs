@@ -78,14 +78,14 @@ impl Document {
     /// (ISO 32000-2 §12.8) wired to every
     /// [`SignatureField`](crate::annotation::SignatureField)
     /// widget the document already carries via
-    /// [`crate::page::Page::add_widget_annotation`]. The signer
+    /// [`crate::page::Page::add_annotation`]. The signer
     /// callback inside `signature` is invoked exactly once during
     /// [`Self::finish`], after the PDF byte buffer has been
     /// produced but before it is returned to the caller — it
     /// receives the bytes covered by `/ByteRange` and must
     /// produce a DER-encoded PKCS#7 / CMS `SignedData` structure
     /// that fits inside the reservation declared by
-    /// [`DigitalSignature::placeholder_size_bytes`].
+    /// `DigitalSignature::placeholder_size_bytes`.
     ///
     /// Calling this method twice on the same document is not
     /// supported — the second call replaces the first signer.

@@ -1,5 +1,6 @@
 //! End-to-end tests for [`Document::add_layer`] +
-//! [`Surface::push_layer`] / [`Surface::pop`].
+//! [`Surface::push_layer`](krilla::surface::Surface::push_layer)
+//! / [`Surface::pop`](krilla::surface::Surface::pop).
 
 use krilla::optional_content::{Layer, LayerIntent};
 use krilla::page::PageSettings;

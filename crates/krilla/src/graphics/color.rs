@@ -1244,15 +1244,15 @@ pub mod separation {
 /// maps the *N* tints onto the alternate space's components. Authoring
 /// flow:
 ///
-/// 1. Build a [`TintTransform`] describing how each colorant contributes
+/// 1. Build a [`TintTransform`](devicen::TintTransform) describing how each colorant contributes
 ///    to the alternate-space components at full tint.
-/// 2. Build a [`DeviceNSpace`] from the colorant names, the alternate
+/// 2. Build a [`DeviceNSpace`](devicen::DeviceNSpace) from the colorant names, the alternate
 ///    process colour (its variant fixes the channel count), and the
 ///    tint transform.
 /// 3. Paint with a [`Color`] carrying *N* per-channel tints in
 ///    `[0.0, 1.0]`.
 ///
-/// Stage A exposes only [`TintTransform::Linear`] — a blend in the
+/// Stage A exposes only [`TintTransform::Linear`](devicen::TintTransform::Linear) — a blend in the
 /// alternate space. PDF/A profiles forbid DeviceN that uses a Type 4
 /// (PostScript) tint transform; the writer therefore emits a single
 /// Type 2 exponential function for the `N = 1` case (PDF/A-friendly)
@@ -1346,7 +1346,7 @@ pub mod devicen {
     ///
     /// PDF/A-1 forbids DeviceN; PDF/A-2 onward and every PDF/X profile
     /// admit it. The writer dispatches the validator hook through
-    /// [`crate::configure::ValidationStore::validate_devicen`].
+    /// `ValidationStore::validate_devicen`.
     #[derive(Debug, Eq, PartialEq, Hash, Clone)]
     pub struct DeviceNSpace {
         pub(crate) colorants: Vec<String>,
@@ -1424,7 +1424,7 @@ pub mod devicen {
         /// as the alternate space's channel count (3 for RGB / 4 for
         /// CMYK / 1 for Luma / 3 for ICC-based wide gamut). The
         /// blend at output channel `m` is
-        ///   out[m] = Σᵢ tintᵢ * per_colorant_components[i][m]
+        ///   `out[m] = Σᵢ tintᵢ * per_colorant_components[i][m]`
         /// emitted as a single Type 2 exponential function when `N
         /// == 1` (PDF/A-friendly) and as a Type 4 PostScript
         /// calculator otherwise (PDF/X-4 / PDF 2.0 only).

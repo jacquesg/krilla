@@ -1,5 +1,5 @@
 //! API-shape tests for the
-//! [`ShapeOptimisation`](krilla::ShapeOptimisation) enum and its
+//! [`ShapeOptimisation`] enum and its
 //! plumbing through [`SerializeSettings`].
 //!
 //! Krilla does not currently apply any path simplification, so the

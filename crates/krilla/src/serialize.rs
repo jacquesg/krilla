@@ -252,7 +252,7 @@ pub struct SerializeSettings {
     /// `Force*` variants project regular colours into the requested
     /// target space using ISO 32000-2 §8.6.4 (RGB <-> CMYK) and
     /// Rec. 709 (RGB -> Y) at every fill, stroke, and glyph paint
-    /// dispatch in [`crate::content`].
+    /// dispatch in `crate::content`.
     ///
     /// `ContentOnly` and `ForceSpot` are reserved for Phase 3 of
     /// the moegoe `colour_conversion` work and are currently

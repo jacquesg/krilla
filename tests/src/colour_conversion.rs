@@ -1,6 +1,6 @@
 //! Content-stream-level integration tests for the
 //! [`ColourConversion`] dispatch wired into
-//! [`crate::content::ContentBuilder`].
+//! `ContentBuilder`.
 //!
 //! Unlike the unit tests in `krilla::graphics::color::tests`, these
 //! verify that the projection actually executes during PDF

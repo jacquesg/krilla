@@ -2,7 +2,7 @@
 //!
 //! krilla itself does not embed any cryptographic stack — embedders
 //! supply the PKCS#7 / CMS detached-signature bytes through the
-//! [`DigitalSignature::signer`] callback. krilla owns the byte-range
+//! `DigitalSignature::signer` callback. krilla owns the byte-range
 //! arithmetic, the placeholder padding, and the post-finish patching
 //! of `/ByteRange` and `/Contents`.
 //!
@@ -15,7 +15,7 @@
 //!    dictionary, wires its ref into the widget's `/V`, sets
 //!    `/AcroForm /SigFlags 3`, and emits placeholder `/ByteRange`
 //!    and `/Contents <…>` values whose textual length is fixed by
-//!    [`DigitalSignature::placeholder_size_bytes`].
+//!    `DigitalSignature::placeholder_size_bytes`.
 //! 3. After `pdf-writer` has produced the final byte buffer, krilla
 //!    locates the placeholder markers, fills in the correct
 //!    `/ByteRange [0 a b c]` triple, concatenates the two

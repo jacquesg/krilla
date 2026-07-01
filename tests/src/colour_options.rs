@@ -1,7 +1,7 @@
 //! Content-stream-level integration tests for the
 //! `rgb_grey_to_devicegray` and `preserve_black`
 //! [`SerializeSettings`] fields wired through
-//! [`crate::content::ContentBuilder`].
+//! `ContentBuilder`.
 //!
 //! Unlike the unit-test pairs in `krilla::graphics::color`, these
 //! verify that the promotion / bypass actually executes during PDF
