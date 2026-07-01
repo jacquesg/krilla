@@ -87,6 +87,26 @@ impl PdfDocument {
         self.0.deref().0.pages().len()
     }
 
+    /// Per-page rendered dimensions in PDF points for the page at the
+    /// given index, or `None` when the index is out of range.
+    ///
+    /// "Rendered dimensions" follow hayro's `Page::render_dimensions`
+    /// semantics: the page's effective MediaBox width and height
+    /// after rotation has been applied, which matches what a PDF
+    /// viewer paints. Callers that need the raw, unrotated MediaBox
+    /// should parse the PDF directly with a low-level crate
+    /// (`lopdf`, `pdf-writer`, …) — krilla's public surface
+    /// intentionally exposes only the geometry consumers actually
+    /// care about for downstream layout.
+    pub fn page_dimensions(&self, page_index: usize) -> Option<(f32, f32)> {
+        self.0
+            .deref()
+            .0
+            .pages()
+            .get(page_index)
+            .map(|p| p.render_dimensions())
+    }
+
     pub(crate) fn pdf(&self) -> &Pdf {
         &self.0.deref().0
     }
