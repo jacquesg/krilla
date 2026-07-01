@@ -287,6 +287,45 @@ impl ChunkContainer {
             ocg.intent(layer.intent.to_pdf_writer());
         }
 
+        // G64 — emit one indirect `/S /JavaScript` action dictionary
+        // per document-level script (`Metadata::document_javascript`)
+        // and one per catalogue-level event script
+        // (`Metadata::document_event_script`). The refs are allocated
+        // here from the same final-numbering counter as the layer /
+        // metadata refs, so they don't collide with chunk-renumbered
+        // refs. Both sets are referenced from inside the catalog block
+        // (named-JavaScript entries land on `/Names /JavaScript`,
+        // event-keyed entries on `/AA /WC` / `/WS` / `/DS` / `/WP` /
+        // `/DP`). ISO 32000-2 §12.6.4.16 (JavaScript action) plus
+        // §12.6.3 Table 200 (catalogue additional-actions).
+        let document_js_refs: Vec<(String, Ref)> = metadata
+            .document_javascripts
+            .iter()
+            .map(|(name, source)| {
+                let ref_ = remapped_ref.bump();
+                let mut action = pdf.indirect(ref_).start::<pdf_writer::writers::Action>();
+                action
+                    .action_type(pdf_writer::types::ActionType::JavaScript)
+                    .js_string(TextStr(source));
+                action.finish();
+                (name.clone(), ref_)
+            })
+            .collect();
+
+        let document_event_refs: Vec<(crate::interchange::metadata::DocumentEvent, Ref)> = metadata
+            .document_event_scripts
+            .iter()
+            .map(|(event, source)| {
+                let ref_ = remapped_ref.bump();
+                let mut action = pdf.indirect(ref_).start::<pdf_writer::writers::Action>();
+                action
+                    .action_type(pdf_writer::types::ActionType::JavaScript)
+                    .js_string(TextStr(source));
+                action.finish();
+                (*event, ref_)
+            })
+            .collect();
+
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
         // useful to not write a document catalog if we don't actually need it for the test.
@@ -516,7 +555,10 @@ impl ChunkContainer {
             let write_embedded_files = self.non_stream.embedded_files.len() != 0
                 || validators.requires_embedded_files_when_empty();
 
-            if !named_destinations.is_empty() || write_embedded_files {
+            if !named_destinations.is_empty()
+                || write_embedded_files
+                || !document_js_refs.is_empty()
+            {
                 // Cannot use pdf-writer API here because it requires Ref's, while
                 // we write our destinations directly into the array.
                 let mut names = catalog.names();
@@ -560,6 +602,27 @@ impl ChunkContainer {
                     for (name, (ref_, _location)) in &embedded_files {
                         embedded_name_entries.insert(Str(name.as_bytes()), remapper[ref_]);
                     }
+                }
+
+                // G64 — `/Names /JavaScript` name tree (ISO 32000-2
+                // §12.6.4.16). Document-level JavaScript actions
+                // declared via `Metadata::document_javascript`. Each
+                // entry is written as a leaf-level (`/Names [key val
+                // ...]`) name tree; the keys MUST be sorted lexically
+                // per ISO 32000-1 §7.9.6 so a single leaf node is
+                // valid. Author duplicates are pre-deduplicated at
+                // the Metadata builder boundary.
+                if !document_js_refs.is_empty() {
+                    let mut js_name_tree = names.javascript();
+                    let mut js_entries = js_name_tree.names();
+
+                    let mut sorted: Vec<&(String, Ref)> = document_js_refs.iter().collect();
+                    sorted.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+                    for (name, ref_) in sorted {
+                        js_entries.insert(Str(name.as_bytes()), *ref_);
+                    }
+                    js_entries.finish();
+                    js_name_tree.finish();
                 }
             }
 
@@ -641,6 +704,42 @@ impl ChunkContainer {
                 }
                 default.finish();
                 oc.finish();
+            }
+
+            // G64 — catalogue-level `/AA` additional-actions
+            // dictionary (ISO 32000-2 §12.6.3 Table 200). One slot
+            // per event keyword (`/WC`, `/WS`, `/DS`, `/WP`, `/DP`)
+            // pointing at the indirect JavaScript-action dict
+            // written above. pdf-writer exposes typed setters for
+            // each catalogue-level event; we emit them by indirect
+            // reference rather than building a fresh action dict
+            // inline so the actions can be shared with future
+            // viewer-side callers that need a stable ref.
+            if !document_event_refs.is_empty() {
+                use crate::interchange::metadata::DocumentEvent;
+                let mut aa = catalog.additional_actions();
+                for (event, ref_) in &document_event_refs {
+                    let key: &[u8] = match event {
+                        DocumentEvent::WillClose => b"WC",
+                        DocumentEvent::WillSave => b"WS",
+                        DocumentEvent::DidSave => b"DS",
+                        DocumentEvent::WillPrint => b"WP",
+                        DocumentEvent::DidPrint => b"DP",
+                    };
+                    // `pdf-writer` does not expose a typed setter for
+                    // a Ref reference on the catalogue `/AA` keys
+                    // (each `cat_before_close()` / `cat_before_save()`
+                    // / etc. starts a fresh inline `Action` writer).
+                    // We need the indirect-ref shape so the action
+                    // dict can be shared and validators that crawl
+                    // `/Names /JavaScript` plus `/AA` see one source
+                    // of truth. The deref escape hatch keeps the
+                    // emitted bytes spec-conformant (`/AA /<KEY>` is
+                    // either an inline dict or an indirect ref per
+                    // ISO 32000-2 §12.6.3).
+                    aa.deref_mut().pair(Name(key), *ref_);
+                }
+                aa.finish();
             }
 
             catalog.finish();
