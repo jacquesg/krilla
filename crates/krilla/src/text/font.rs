@@ -26,7 +26,9 @@ pub struct Font(Arc<Prehashed<Repr>>);
 
 impl Font {
     /// Create a new font from some data. If you want to create a variable font at a specific
-    /// location, use [`Font::new_variable`] instead.
+    /// location, use [`Font::new_variable`] instead. To select a non-default CPAL palette
+    /// for COLR-coloured glyphs, use [`Font::new_with_palette`] or
+    /// [`Font::new_variable_with_palette`].
     ///
     /// The `index` indicates the index that should be
     /// associated with this font for TrueType collections, otherwise this value should be
@@ -34,13 +36,41 @@ impl Font {
     ///
     /// Returns `None` if the index is invalid or the font couldn't be read.
     pub fn new(data: Data, index: u32) -> Option<Self> {
-        Self::new_variable(data, index, &[])
+        Self::new_variable_with_palette(data, index, &[], 0)
     }
 
     /// Like [`Font::new`], creates a new font from some data, but allows you to specify
     /// variation coordinates in case the font is variable.
     pub fn new_variable(data: Data, index: u32, variation_coords: &[(Tag, f32)]) -> Option<Self> {
-        let font_info = FontInfo::new(data.as_ref(), index, variation_coords)?;
+        Self::new_variable_with_palette(data, index, variation_coords, 0)
+    }
+
+    /// Like [`Font::new`], but selects a non-default CPAL palette for
+    /// COLR-coloured glyph rendering.
+    ///
+    /// `palette_base` is the zero-based index into the font's `CPAL`
+    /// table — palette `0` is the default. When the supplied index is
+    /// out of range for the font's palette count, krilla falls back to
+    /// palette `0` at draw time; fonts without a `CPAL` table ignore
+    /// the parameter entirely.
+    ///
+    /// Moegoe constructs a separate `Font` instance per cascade-resolved
+    /// `font-palette` value so the per-call surface (`Surface::draw_glyphs`)
+    /// stays palette-free.
+    pub fn new_with_palette(data: Data, index: u32, palette_base: u16) -> Option<Self> {
+        Self::new_variable_with_palette(data, index, &[], palette_base)
+    }
+
+    /// Combined constructor: variable-font location + CPAL palette
+    /// selection. See [`Font::new_variable`] and
+    /// [`Font::new_with_palette`] for the per-parameter semantics.
+    pub fn new_variable_with_palette(
+        data: Data,
+        index: u32,
+        variation_coords: &[(Tag, f32)],
+        palette_base: u16,
+    ) -> Option<Self> {
+        let font_info = FontInfo::new(data.as_ref(), index, variation_coords, palette_base)?;
 
         Font::new_with_info(data.clone(), Arc::new(font_info))
     }
@@ -123,6 +153,14 @@ impl Font {
     /// The units per em of the font.
     pub fn units_per_em(&self) -> f32 {
         self.0.font_info.units_per_em as f32
+    }
+
+    /// The CPAL palette index this font instance reads colour records
+    /// from when drawing COLR glyphs. Returns `0` when the embedder
+    /// constructed the font without an explicit palette selection or
+    /// when the font carries no `CPAL` table.
+    pub fn palette_base(&self) -> u16 {
+        self.0.font_info.palette_base
     }
 
     pub(crate) fn bbox(&self) -> Rect {
@@ -230,6 +268,11 @@ pub(crate) struct FontInfo {
     has_cff: bool,
     has_cff2: bool,
     stretch: FiniteF32,
+    /// CPAL palette index for COLR glyph rendering. Zero is the
+    /// default palette per OpenType CPAL §5.7.11.1. Stored on
+    /// `FontInfo` so two `Font` instances differing only in palette
+    /// selection hash distinctly.
+    palette_base: u16,
 }
 
 struct Repr {
@@ -250,7 +293,12 @@ impl Hash for Repr {
 }
 
 impl FontInfo {
-    pub(crate) fn new(data: &[u8], index: u32, var_coords: &[(Tag, f32)]) -> Option<Self> {
+    pub(crate) fn new(
+        data: &[u8],
+        index: u32,
+        var_coords: &[(Tag, f32)],
+        palette_base: u16,
+    ) -> Option<Self> {
         let font_ref = FontRef::from_index(data, index).ok()?;
         let location = font_ref.axes().location(
             var_coords
@@ -333,6 +381,7 @@ impl FontInfo {
             stretch,
             italic_angle,
             global_bbox,
+            palette_base,
         })
     }
 
@@ -348,4 +397,51 @@ struct FontRefYoke<'a> {
     pub font_ref: FontRef<'a>,
     pub glyph_metrics: GlyphMetrics<'a>,
     pub outline_glyphs: OutlineGlyphCollection<'a>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Embedded COLR/CPAL test font from the workspace assets — has a
+    /// CPAL table with multiple palettes, which is what the palette
+    /// support needs to exercise.
+    const COLR_TEST_FONT: &[u8] =
+        include_bytes!("../../../../assets/fonts/colr_test_glyphs.ttf");
+
+    fn test_font_data() -> Data {
+        Data::from(COLR_TEST_FONT.to_vec())
+    }
+
+    /// Default constructor reports palette 0.
+    #[test]
+    fn font_default_palette_base_is_zero() {
+        let font = Font::new(test_font_data(), 0).expect("font load");
+        assert_eq!(font.palette_base(), 0);
+    }
+
+    /// Explicit palette base round-trips through the accessor.
+    #[test]
+    fn font_palette_base_round_trips() {
+        let font = Font::new_with_palette(test_font_data(), 0, 3).expect("font load");
+        assert_eq!(font.palette_base(), 3);
+    }
+
+    /// Two `Font` instances differing only in the palette selection
+    /// hash distinctly — the palette index participates in the
+    /// `FontInfo` hash so colour-glyph caching keys correctly.
+    #[test]
+    fn font_palette_base_participates_in_hash() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        let f0 = Font::new_with_palette(test_font_data(), 0, 0).expect("font load");
+        let f1 = Font::new_with_palette(test_font_data(), 0, 1).expect("font load");
+
+        let mut h0 = DefaultHasher::new();
+        f0.hash(&mut h0);
+        let mut h1 = DefaultHasher::new();
+        f1.hash(&mut h1);
+        assert_ne!(h0.finish(), h1.finish(), "palette base must affect hash");
+    }
 }
