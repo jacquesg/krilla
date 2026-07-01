@@ -363,6 +363,67 @@ impl TableHeaderScope {
     }
 }
 
+/// The role of a non-interactive form control structure element, mapped onto
+/// the PDF `/PrintField` attribute owner's `/Role` entry (ISO 32000-2
+/// §14.7.4.4 Table 359, §14.8.4.4 "Form structure type"). The PDF/UA-1
+/// (§7.18) / PDF/UA-2 (§8.13) accessibility profiles require non-
+/// interactive form controls in tagged PDF to declare their role so a
+/// screen reader can announce them as buttons, checkboxes, radio
+/// buttons, or text fields.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FormFieldRole {
+    /// A push-button control (PDF `/Role /pb`).
+    Button,
+    /// A checkbox control (PDF `/Role /cb`).
+    CheckBox,
+    /// A radio button control (PDF `/Role /rb`).
+    RadioButton,
+    /// A text field control (PDF `/Role /tv`).
+    TextField,
+    /// A list-box control (PDF `/Role /lb`). PDF 2.0+ only.
+    ListBox,
+}
+
+impl FormFieldRole {
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::FieldRole {
+        match self {
+            FormFieldRole::Button => pdf_writer::types::FieldRole::Button,
+            FormFieldRole::CheckBox => pdf_writer::types::FieldRole::CheckBox,
+            FormFieldRole::RadioButton => pdf_writer::types::FieldRole::RadioButton,
+            FormFieldRole::TextField => pdf_writer::types::FieldRole::TextField,
+            FormFieldRole::ListBox => pdf_writer::types::FieldRole::ListBox,
+        }
+    }
+}
+
+/// The checked state of a non-interactive form control structure
+/// element, mapped onto the PDF `/PrintField` attribute owner's
+/// `/checked` (PDF 1.x) / `/Checked` (PDF 2.0+) entry. Used by checkbox
+/// and radio button form roles to describe whether the control was
+/// checked at print time (ISO 32000-2 §14.7.4.4 Table 359).
+#[derive(Debug, Copy, Clone, Default, Eq, PartialEq, Hash)]
+pub enum FormFieldState {
+    /// The control was unchecked (`/off`).
+    #[default]
+    Off,
+    /// The control was checked (`/on`).
+    On,
+    /// The control was in the indeterminate / mixed / "quantum
+    /// superstate" (`/neutral`). Mirrors HTML's `aria-checked: mixed`
+    /// and PDFreactor's `-ro-pdf-tag-form-checked: neutral`.
+    Mixed,
+}
+
+impl FormFieldState {
+    pub(crate) fn to_pdf(self) -> pdf_writer::types::FieldState {
+        match self {
+            FormFieldState::Off => pdf_writer::types::FieldState::Unchecked,
+            FormFieldState::On => pdf_writer::types::FieldState::Checked,
+            FormFieldState::Mixed => pdf_writer::types::FieldState::Neutral,
+        }
+    }
+}
+
 /// The positioning of the element with respect to the enclosing reference area
 /// and other content.
 /// When applied to an ILSE, any value except Inline shall cause the element to
