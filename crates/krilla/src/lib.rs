@@ -161,9 +161,11 @@ pub(crate) mod data;
 
 pub mod configure;
 pub mod document;
+pub mod encryption;
 pub mod error;
 pub mod geom;
 pub mod num;
+pub mod optional_content;
 pub mod page;
 #[cfg(feature = "pdf")]
 pub mod pdf;

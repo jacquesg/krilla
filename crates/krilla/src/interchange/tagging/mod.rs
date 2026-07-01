@@ -131,7 +131,7 @@ use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write as _;
 
-use pdf_writer::types::{RoleMapOpts, StructRole, StructRole2};
+use pdf_writer::types::{RoleMapOpts, StructRole2};
 use pdf_writer::writers::{PropertyList, StructElement};
 use pdf_writer::{Chunk, Finish, Name, Ref, Str, TextStr};
 use smallvec::SmallVec;
@@ -145,6 +145,14 @@ use crate::page::page_root_transform;
 use crate::serialize::SerializeContext;
 
 pub use tag::*;
+
+/// A standard PDF structure type (re-exported from `pdf-writer`).
+///
+/// Used as the target of [`TagTree::with_role_map`] when teaching
+/// the consumer how to interpret a custom structure element name.
+/// Maps directly to the names defined in ISO 32000-1 §14.8.4 and
+/// ISO 32000-2 §14.8.4.
+pub use pdf_writer::types::StructRole;
 
 pub mod fmt;
 mod tag;
@@ -533,44 +541,46 @@ impl TagKind {
             return;
         }
 
+        let ns = resolve_ns_override(sc, self.as_any().namespace);
+
         match self {
-            Self::Part(_) => write_kind_compat(sc, struct_elem, StructRole2::Part),
-            Self::Article(_) => write_kind_1_7(struct_elem, StructRole::Art),
-            Self::Section(_) => write_kind_compat(sc, struct_elem, StructRole2::Sect),
-            Self::Div(_) => write_kind_compat(sc, struct_elem, StructRole2::Div),
-            Self::BlockQuote(_) => write_kind_1_7(struct_elem, StructRole::BlockQuote),
-            Self::Caption(_) => write_kind_compat(sc, struct_elem, StructRole2::Caption),
-            Self::TOC(_) => write_kind_1_7(struct_elem, StructRole::TOC),
-            Self::TOCI(_) => write_kind_1_7(struct_elem, StructRole::TOCI),
-            Self::Index(_) => write_kind_1_7(struct_elem, StructRole::Index),
-            Self::P(_) => write_kind_compat(sc, struct_elem, StructRole2::P),
-            Self::L(_) => write_kind_compat(sc, struct_elem, StructRole2::L),
-            Self::LI(_) => write_kind_compat(sc, struct_elem, StructRole2::LI),
-            Self::Lbl(_) => write_kind_compat(sc, struct_elem, StructRole2::Lbl),
-            Self::LBody(_) => write_kind_compat(sc, struct_elem, StructRole2::LBody),
-            Self::Table(_) => write_kind_compat(sc, struct_elem, StructRole2::Table),
-            Self::TR(_) => write_kind_compat(sc, struct_elem, StructRole2::TR),
-            Self::TH(_) => write_kind_compat(sc, struct_elem, StructRole2::TH),
-            Self::TD(_) => write_kind_compat(sc, struct_elem, StructRole2::TD),
-            Self::THead(_) => write_kind_compat(sc, struct_elem, StructRole2::THead),
-            Self::TBody(_) => write_kind_compat(sc, struct_elem, StructRole2::TBody),
-            Self::TFoot(_) => write_kind_compat(sc, struct_elem, StructRole2::TFoot),
-            Self::Span(_) => write_kind_compat(sc, struct_elem, StructRole2::Span),
-            Self::InlineQuote(_) => write_kind_1_7(struct_elem, StructRole::Quote),
-            Self::Note(_) => write_kind_1_7(struct_elem, StructRole::Note),
-            Self::Reference(_) => write_kind_1_7(struct_elem, StructRole::Reference),
-            Self::BibEntry(_) => write_kind_1_7(struct_elem, StructRole::BibEntry),
-            Self::Code(_) => write_kind_1_7(struct_elem, StructRole::Code),
-            Self::Link(_) => write_kind_compat(sc, struct_elem, StructRole2::Link),
-            Self::Annot(_) => write_kind_compat(sc, struct_elem, StructRole2::Annot),
-            Self::Figure(_) => write_kind_compat(sc, struct_elem, StructRole2::Figure),
-            Self::Formula(_) => write_kind_compat(sc, struct_elem, StructRole2::Formula),
-            Self::Form(_) => write_kind_compat(sc, struct_elem, StructRole2::Form),
-            Self::NonStruct(_) => write_kind_compat(sc, struct_elem, StructRole2::NonStruct),
+            Self::Part(_) => write_kind_compat(sc, struct_elem, StructRole2::Part, ns),
+            Self::Article(_) => write_kind_1_7(sc, struct_elem, StructRole::Art, ns),
+            Self::Section(_) => write_kind_compat(sc, struct_elem, StructRole2::Sect, ns),
+            Self::Div(_) => write_kind_compat(sc, struct_elem, StructRole2::Div, ns),
+            Self::BlockQuote(_) => write_kind_1_7(sc, struct_elem, StructRole::BlockQuote, ns),
+            Self::Caption(_) => write_kind_compat(sc, struct_elem, StructRole2::Caption, ns),
+            Self::TOC(_) => write_kind_1_7(sc, struct_elem, StructRole::TOC, ns),
+            Self::TOCI(_) => write_kind_1_7(sc, struct_elem, StructRole::TOCI, ns),
+            Self::Index(_) => write_kind_1_7(sc, struct_elem, StructRole::Index, ns),
+            Self::P(_) => write_kind_compat(sc, struct_elem, StructRole2::P, ns),
+            Self::L(_) => write_kind_compat(sc, struct_elem, StructRole2::L, ns),
+            Self::LI(_) => write_kind_compat(sc, struct_elem, StructRole2::LI, ns),
+            Self::Lbl(_) => write_kind_compat(sc, struct_elem, StructRole2::Lbl, ns),
+            Self::LBody(_) => write_kind_compat(sc, struct_elem, StructRole2::LBody, ns),
+            Self::Table(_) => write_kind_compat(sc, struct_elem, StructRole2::Table, ns),
+            Self::TR(_) => write_kind_compat(sc, struct_elem, StructRole2::TR, ns),
+            Self::TH(_) => write_kind_compat(sc, struct_elem, StructRole2::TH, ns),
+            Self::TD(_) => write_kind_compat(sc, struct_elem, StructRole2::TD, ns),
+            Self::THead(_) => write_kind_compat(sc, struct_elem, StructRole2::THead, ns),
+            Self::TBody(_) => write_kind_compat(sc, struct_elem, StructRole2::TBody, ns),
+            Self::TFoot(_) => write_kind_compat(sc, struct_elem, StructRole2::TFoot, ns),
+            Self::Span(_) => write_kind_compat(sc, struct_elem, StructRole2::Span, ns),
+            Self::InlineQuote(_) => write_kind_1_7(sc, struct_elem, StructRole::Quote, ns),
+            Self::Note(_) => write_kind_1_7(sc, struct_elem, StructRole::Note, ns),
+            Self::Reference(_) => write_kind_1_7(sc, struct_elem, StructRole::Reference, ns),
+            Self::BibEntry(_) => write_kind_1_7(sc, struct_elem, StructRole::BibEntry, ns),
+            Self::Code(_) => write_kind_1_7(sc, struct_elem, StructRole::Code, ns),
+            Self::Link(_) => write_kind_compat(sc, struct_elem, StructRole2::Link, ns),
+            Self::Annot(_) => write_kind_compat(sc, struct_elem, StructRole2::Annot, ns),
+            Self::Figure(_) => write_kind_compat(sc, struct_elem, StructRole2::Figure, ns),
+            Self::Formula(_) => write_kind_compat(sc, struct_elem, StructRole2::Formula, ns),
+            Self::Form(_) => write_kind_compat(sc, struct_elem, StructRole2::Form, ns),
+            Self::NonStruct(_) => write_kind_compat(sc, struct_elem, StructRole2::NonStruct, ns),
             // Custom structure roles that are registered in the `RoleMap`.
-            Self::Datetime(_) => write_kind_custom(sc, struct_elem, Name(b"Datetime")),
-            Self::Terms(_) => write_kind_custom(sc, struct_elem, Name(b"Terms")),
-            Self::Title(_) => write_kind_custom(sc, struct_elem, Name(b"Title")),
+            Self::Datetime(_) => write_kind_custom(sc, struct_elem, Name(b"Datetime"), ns),
+            Self::Terms(_) => write_kind_custom(sc, struct_elem, Name(b"Terms"), ns),
+            Self::Title(_) => write_kind_custom(sc, struct_elem, Name(b"Title"), ns),
             // PDF 2.0 structure roles that are conditionally registered.
             Self::Hn(tag) => {
                 let role2 = StructRole2::Heading(tag.level());
@@ -583,21 +593,24 @@ impl TagKind {
                     }
                     struct_elem.custom_kind(role2.to_name(&mut [0; 6]));
                 } else {
-                    struct_elem.kind_2(role2, sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    struct_elem.kind_2(role2, ns_ref);
                 }
             }
             Self::Strong(_) => {
                 if pdf_version < PdfVersion::Pdf20 {
                     struct_elem.custom_kind(Name(b"Strong"));
                 } else {
-                    struct_elem.kind_2(StructRole2::Strong, sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    struct_elem.kind_2(StructRole2::Strong, ns_ref);
                 }
             }
             Self::Em(_) => {
                 if pdf_version < PdfVersion::Pdf20 {
                     struct_elem.custom_kind(Name(b"Em"));
                 } else {
-                    struct_elem.kind_2(StructRole2::Em, sc.pdf2_ns.ssn_ref);
+                    let ns_ref = ns.unwrap_or(sc.pdf2_ns.ssn_ref);
+                    struct_elem.kind_2(StructRole2::Em, ns_ref);
                 }
             }
         };
@@ -659,8 +672,32 @@ impl TagKind {
     }
 }
 
-fn write_kind_1_7(struct_elem: &mut StructElement, role: StructRole) {
+/// Resolve a user-supplied [`TagNamespace`] override to the
+/// indirect ref of the namespace dictionary krilla allocates at
+/// document level. Returns `None` if the caller did not set an
+/// override; the per-kind writers then use their default binding.
+fn resolve_ns_override(sc: &SerializeContext, ns: Option<TagNamespace>) -> Option<Ref> {
+    ns.map(|ns| match ns {
+        TagNamespace::Pdf2Ssn => sc.pdf2_ns.ssn_ref,
+        TagNamespace::Krilla => sc.pdf2_ns.krilla_ref,
+    })
+}
+
+fn write_kind_1_7(
+    sc: &SerializeContext,
+    struct_elem: &mut StructElement,
+    role: StructRole,
+    ns_override: Option<Ref>,
+) {
     struct_elem.kind(role);
+    // PDF 2.0 is the only version where `/NS` is honoured;
+    // emitting it below 2.0 risks confusing pre-2.0 readers that
+    // do not understand the namespace model.
+    if let Some(ns_ref) = ns_override {
+        if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf20 {
+            struct_elem.namespace(ns_ref);
+        }
+    }
 }
 
 /// If serializing a PDF 2.0 document, write a PDF 2.0 structure role, otherwise
@@ -669,21 +706,29 @@ fn write_kind_compat(
     sc: &mut SerializeContext,
     struct_elem: &mut StructElement,
     role: StructRole2,
+    ns_override: Option<Ref>,
 ) {
     if sc.serialize_settings().pdf_version() < PdfVersion::Pdf20 {
         let compat = role.compatibility_1_7(RoleMapOpts::default());
         struct_elem.kind(compat.role());
     } else {
-        struct_elem.kind_2(role, sc.pdf2_ns.ssn_ref);
+        let ns_ref = ns_override.unwrap_or(sc.pdf2_ns.ssn_ref);
+        struct_elem.kind_2(role, ns_ref);
     }
 }
 
 /// Write a custom role-mapped structure role. If serializing a PDF 2.0 document
-/// also write the custom krilla namespace.
-fn write_kind_custom(sc: &mut SerializeContext, struct_elem: &mut StructElement, name: Name) {
+/// also write the custom krilla namespace (or the caller's override).
+fn write_kind_custom(
+    sc: &mut SerializeContext,
+    struct_elem: &mut StructElement,
+    name: Name,
+    ns_override: Option<Ref>,
+) {
     struct_elem.custom_kind(name);
     if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf20 {
-        struct_elem.namespace(sc.pdf2_ns.krilla_ref);
+        let ns_ref = ns_override.unwrap_or(sc.pdf2_ns.krilla_ref);
+        struct_elem.namespace(ns_ref);
     }
 }
 
@@ -1119,6 +1164,10 @@ pub struct TagTree {
     pub children: Vec<Node>,
     /// Language attribute for the auto-generated Document root structure element.
     pub lang: Option<String>,
+    /// Caller-supplied `/RoleMap` entries — custom structure element
+    /// names mapped to their standard PDF role. Populated via
+    /// [`TagTree::with_role_map`] / [`TagTree::add_role_mapping`].
+    pub(crate) role_map: BTreeMap<Vec<u8>, StructRole>,
 }
 
 impl From<Vec<Node>> for TagTree {
@@ -1126,6 +1175,7 @@ impl From<Vec<Node>> for TagTree {
         Self {
             children,
             lang: None,
+            role_map: BTreeMap::new(),
         }
     }
 }
@@ -1136,6 +1186,7 @@ impl TagTree {
         Self {
             children: vec![],
             lang: None,
+            role_map: BTreeMap::new(),
         }
     }
 
@@ -1147,6 +1198,37 @@ impl TagTree {
     pub fn with_lang(mut self, lang: Option<String>) -> Self {
         self.lang = lang;
         self
+    }
+
+    /// Replace the caller-supplied `/RoleMap` entries with `entries`.
+    ///
+    /// Each entry pairs a custom structure element name (the
+    /// `Name` written into the PDF) with the standard
+    /// [`StructRole`] a consumer that does not know about the
+    /// custom name should fall back to.
+    ///
+    /// User-supplied entries are merged into the built-in role map
+    /// at serialisation time and **win on key collision** — e.g.
+    /// supplying `("Strong", StructRole::H1)` overrides the
+    /// built-in `Strong → Span` mapping.
+    ///
+    /// Only takes effect for PDF versions below 2.0. In PDF 2.0+
+    /// krilla emits namespaces instead of a `/RoleMap` dict
+    /// (ISO 32000-2 §14.8.6); per-element namespace overrides are
+    /// the corresponding extension point for that path.
+    pub fn with_role_map<I, K>(mut self, entries: I) -> Self
+    where
+        I: IntoIterator<Item = (K, StructRole)>,
+        K: Into<Vec<u8>>,
+    {
+        self.role_map = entries.into_iter().map(|(k, r)| (k.into(), r)).collect();
+        self
+    }
+
+    /// Add or override a single caller-supplied `/RoleMap` entry.
+    /// See [`TagTree::with_role_map`] for the merge semantics.
+    pub fn add_role_mapping(&mut self, name: impl Into<Vec<u8>>, role: StructRole) {
+        self.role_map.insert(name.into(), role);
     }
 
     /// Append a new child to the tag tree.

@@ -13,13 +13,19 @@ use krilla::tagging::{
     Artifact, ArtifactType, BBox, ColumnDimensions, ContentTag, NaiveRgbColor, Node, Sides,
     SpanTag, TagGroup, TagTree,
 };
-use krilla::tagging::{ListNumbering, Placement, TableHeaderScope, Tag, TagId, WritingMode};
+use krilla::tagging::{
+    ListNumbering, Placement, StructRole, TableHeaderScope, Tag, TagId, TagNamespace,
+    WritingMode,
+};
 use krilla::text::{Font, TextDirection};
-use krilla::Document;
+use krilla::{Document, SerializeSettings};
 use krilla_macros::snapshot;
 use krilla_svg::{SurfaceExt, SvgSettings};
 
-use crate::{green_fill, load_png_image, loc, rect_to_path, red_stroke, NOTO_SANS, SVGS_PATH};
+use crate::{
+    green_fill, load_png_image, loc, rect_to_path, red_stroke, settings_1, settings_25,
+    NOTO_SANS, SVGS_PATH,
+};
 
 pub trait SurfaceTaggingExt {
     fn fill_text_(&mut self, y: f32, content: &str);
@@ -798,6 +804,145 @@ fn tagging_annotation_identifer_appears_twice() {
     document.set_tag_tree(tag_tree);
 
     let _ = document.finish();
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+fn pretty(settings: SerializeSettings) -> SerializeSettings {
+    SerializeSettings {
+        pretty: true,
+        ..settings
+    }
+}
+
+fn document_with(settings: SerializeSettings, tag_tree: TagTree) -> Vec<u8> {
+    let mut document = Document::new_with(settings);
+    document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+    document.set_tag_tree(tag_tree);
+    document.finish().unwrap()
+}
+
+#[test]
+fn role_map_user_entry_added_to_pdf_17_dict() {
+    let tag_tree = TagTree::new().with_role_map([("MyCustom", StructRole::P)]);
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/RoleMap"),
+        "/RoleMap dict missing from PDF 1.7 output"
+    );
+    assert!(
+        contains(&pdf, b"/MyCustom /P"),
+        "user-supplied role mapping missing from /RoleMap"
+    );
+}
+
+#[test]
+fn role_map_user_override_replaces_builtin_in_place() {
+    // Built-in: Strong -> Span. User overrides Strong -> H1.
+    let tag_tree = TagTree::new().with_role_map([("Strong", StructRole::H1)]);
+    let pdf = document_with(pretty(settings_1()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/Strong /H1"),
+        "user override (Strong -> H1) missing"
+    );
+    assert!(
+        !contains(&pdf, b"/Strong /Span"),
+        "built-in Strong -> Span survived user override"
+    );
+}
+
+#[test]
+fn namespace_override_changes_pdf_20_bytes() {
+    // Same document, same tag — only difference is the per-tag
+    // namespace override. The two produced PDFs must differ
+    // somewhere: the struct element for Tag::P binds to the SSN by
+    // default, and to the krilla namespace under the override.
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let overridden_doc = {
+        let mut document = Document::new_with(pretty(settings_25()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_ne!(
+        default_doc, overridden_doc,
+        "namespace override on Tag::P produced identical bytes — override did not take effect"
+    );
+    // Both files declare the krilla namespace URL at the document
+    // level; the override doesn't change that. What changes is
+    // which dict the struct element's /NS pair points at.
+    let url = b"https://github.com/LaurenzV/krilla";
+    assert!(
+        contains(&default_doc, url),
+        "krilla namespace URL missing from default PDF 2.0 output"
+    );
+    assert!(
+        contains(&overridden_doc, url),
+        "krilla namespace URL missing from overridden PDF 2.0 output"
+    );
+}
+
+#[test]
+fn namespace_override_ignored_on_pdf_17() {
+    // Under PDF 1.7 the namespace model does not exist; the
+    // override must be silently dropped so the produced bytes
+    // match the no-override baseline byte-for-byte.
+    let default_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+    let overridden_doc = {
+        let mut document = Document::new_with(pretty(settings_1()));
+        document.start_page_with(PageSettings::from_wh(10.0, 10.0).unwrap());
+        let mut tag_tree = TagTree::new();
+        tag_tree.push(TagGroup::new(Tag::P.with_namespace(Some(TagNamespace::Krilla))));
+        document.set_tag_tree(tag_tree);
+        document.finish().unwrap()
+    };
+
+    assert_eq!(
+        default_doc, overridden_doc,
+        "namespace override leaked into PDF 1.7 output — should be silently ignored below PDF 2.0"
+    );
+}
+
+#[test]
+fn role_map_omitted_under_pdf_20_namespaces() {
+    // PDF 2.0 uses /Namespaces + /RoleMapNS (a namespace-keyed
+    // mapping inside each namespace dict) instead of the flat
+    // /RoleMap dict; krilla intentionally ignores the user
+    // role_map on that path because the mapping is not directly
+    // expressible in the namespace model without also telling
+    // krilla which namespace to bind the custom name to.
+    let tag_tree = TagTree::new().with_role_map([("MyCustom", StructRole::P)]);
+    let pdf = document_with(pretty(settings_25()), tag_tree);
+
+    assert!(
+        contains(&pdf, b"/Namespaces"),
+        "/Namespaces array missing from PDF 2.0 output"
+    );
+    assert!(
+        !contains(&pdf, b"/MyCustom /P"),
+        "user role mapping leaked into PDF 2.0 output"
+    );
 }
 
 #[test]

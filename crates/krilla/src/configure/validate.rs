@@ -318,6 +318,16 @@ pub enum ValidationError {
     /// non-`'CMYK'` profile (e.g. an `'4CLR'` DeviceN profile, reserved for the
     /// PDF/X-5n/-6n levels krilla does not implement) is therefore rejected.
     InvalidOutputProfileColorSpace(Option<Location>),
+    /// The document was configured to be encrypted (via
+    /// [`SerializeSettings::encryption`](crate::SerializeSettings::encryption))
+    /// while an archival or print validator that forbids the `/Encrypt`
+    /// dictionary is also active.
+    ///
+    /// PDF/A (ISO 19005, every profile) and PDF/X (ISO 15930, every profile)
+    /// both reject encrypted files because a conforming long-term-preservation
+    /// or print-exchange document must be readable without a password by anyone.
+    /// The two settings are therefore mutually exclusive: pick one.
+    ContainsEncryption,
 }
 
 /// Features that may require a later PDF version than the current one.
@@ -329,6 +339,12 @@ pub enum VersionedFeature {
     HeaderFooterArtifactSubtypes,
     /// Scope attribute for table header cells.
     TableHeaderScope,
+    /// Optional content (layers): OCGs, `/OCProperties`, and `/OC` marked
+    /// content.
+    OptionalContent,
+    /// A cross-reference stream (`/Type /XRef`) together with compressed
+    /// object streams (ISO 32000-2 §7.5.8).
+    CrossReferenceStream,
 }
 
 impl VersionedFeature {
@@ -338,6 +354,8 @@ impl VersionedFeature {
             VersionedFeature::StructureOrderTabbing => PdfVersion::Pdf15,
             VersionedFeature::HeaderFooterArtifactSubtypes => PdfVersion::Pdf17,
             VersionedFeature::TableHeaderScope => PdfVersion::Pdf15,
+            VersionedFeature::OptionalContent => PdfVersion::Pdf15,
+            VersionedFeature::CrossReferenceStream => PdfVersion::Pdf15,
         }
     }
 }
@@ -925,6 +943,33 @@ pub enum Archival {
 impl Archival {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // Every PDF/A profile mandates embedded font programmes.
+            (
+                _,
+                ValidationError::NonEmbeddedFont(_)
+                | ValidationError::NonEmbeddedStandardFont(_)
+                | ValidationError::ThumbnailNonDeviceColorSpace(_),
+            ) => true,
+            // /OPM 1 with overprinting over ICCBased CMYK is forbidden by
+            // PDF/A-2/-3/-4 (§6.2.4.2). PDF/A-1 uses DeviceCMYK rather than
+            // ICCBased, so the ICCBased-specific rule does not reach it.
+            (
+                Self::A2_A
+                | Self::A2_B
+                | Self::A2_U
+                | Self::A3_A
+                | Self::A3_B
+                | Self::A3_U
+                | Self::A4
+                | Self::A4F
+                | Self::A4E,
+                ValidationError::OverprintOpmOne(_),
+            ) => true,
+            (_, ValidationError::OverprintOpmOne(_)) => false,
+            // ISO 19005 (every PDF/A revision) forbids the `/Encrypt` dictionary
+            // — a conformant archival document must be openable without a
+            // password by future preservation tooling.
+            (_, ValidationError::ContainsEncryption) => true,
             // PDF/X-specific errors have a uniform verdict across every PDF/A
             // profile: PDF/A normalizes mixed gradient color spaces and never
             // makes use of an external output profile, but it permits RGB,
@@ -1623,6 +1668,20 @@ pub enum Accessibility {
 impl Accessibility {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // PDF/UA (and WTPDF) require embedded font programmes for reliable
+            // reflow and text extraction.
+            (
+                _,
+                ValidationError::NonEmbeddedFont(_)
+                | ValidationError::NonEmbeddedStandardFont(_)
+                | ValidationError::ThumbnailNonDeviceColorSpace(_),
+            ) => true,
+            // Overprint is a prepress/colour concern; the accessibility
+            // validators are silent on it.
+            (_, ValidationError::OverprintOpmOne(_)) => false,
+            // ISO 14289 (PDF/UA-1, PDF/UA-2) and WTPDF are silent on encryption
+            // — accessibility conformance is orthogonal to the security handler.
+            (_, ValidationError::ContainsEncryption) => false,
             // PDF/X-specific errors: PDF/UA normalizes mixed gradient color
             // spaces and never makes use of an external output profile, but it
             // permits RGB, annotations, and pages without a TrimBox/ArtBox.
@@ -1938,6 +1997,63 @@ pub enum Prepress {
 impl Prepress {
     fn prohibits(self, error: &ValidationError) -> bool {
         match (self, error) {
+            // Every PDF/X revision mandates embedded font programmes.
+            (
+                _,
+                ValidationError::NonEmbeddedFont(_)
+                | ValidationError::NonEmbeddedStandardFont(_)
+                | ValidationError::ThumbnailNonDeviceColorSpace(_),
+            ) => true,
+            // /OPM 1 with overprinting over ICCBased CMYK is forbidden by
+            // PDF/X-4/-4p (ISO 15930-7 §6.4.3.3) and PDF/X-6/-6p; X-1a and X-3
+            // predate ICCBased CMYK output and do not impose it.
+            (Self::X4 | Self::X4P | Self::X6 | Self::X6P, ValidationError::OverprintOpmOne(_)) => {
+                true
+            }
+            (_, ValidationError::OverprintOpmOne(_)) => false,
+            // ISO 15930 (every PDF/X revision) forbids the `/Encrypt` dictionary
+            // — print-exchange RIPs cannot be assumed to know a password.
+            (_, ValidationError::ContainsEncryption) => true,
+            // PDF/X-6/-6p (ISO 15930-9 §6.14.2) permit JavaScript actions to be
+            // present in a conforming file; PDF/X-1a/-3/-4/-4p forbid all
+            // actions (ISO 15930-4/-6 §6.14, -7 §6.18).
+            (Self::X6 | Self::X6P, ValidationError::ContainsJavaScriptAction(_)) => false,
+            (_, ValidationError::ContainsJavaScriptAction(_)) => true,
+            // The catalogue `/AA`, a widget/field `/AA`, and non-standard named
+            // actions are forbidden by every PDF/X revision — X-6/-6p prohibit
+            // a widget/field or catalogue `/AA` entry outright (ISO 15930-9
+            // §6.14.3), and the earlier parts forbid all actions.
+            (
+                _,
+                ValidationError::ContainsCatalogAdditionalActions(_)
+                | ValidationError::ContainsWidgetAdditionalActions(_)
+                | ValidationError::NonStandardNamedAction(_),
+            ) => true,
+            // Optional content and cross-reference streams both require PDF
+            // 1.5; PDF/X-1a and PDF/X-3 are PDF 1.4, so either conflicts there.
+            // X-4/-6 (>= 1.6) never fire the emission gate.
+            (
+                Self::X1A | Self::X3,
+                ValidationError::RequiresNewerPdfVersion(
+                    VersionedFeature::OptionalContent | VersionedFeature::CrossReferenceStream,
+                    _,
+                ),
+            ) => true,
+            (
+                _,
+                ValidationError::RequiresNewerPdfVersion(
+                    VersionedFeature::OptionalContent | VersionedFeature::CrossReferenceStream,
+                    _,
+                ),
+            ) => false,
+            // The .notdef glyph is forbidden only by PDF/X-4/-4p (ISO 15930-7
+            // §6.5.2) and PDF/X-6/-6p (ISO 15930-9 §6.8.3); ISO 15930-4 (X-1a)
+            // and ISO 15930-6 (X-3) impose no such rule.
+            (
+                Self::X4 | Self::X4P | Self::X6 | Self::X6P,
+                ValidationError::ContainsNotDefGlyph(_, _, _),
+            ) => true,
+            (_, ValidationError::ContainsNotDefGlyph(_, _, _)) => false,
             // Forbidden by every PDF/X standard.
             (
                 _,

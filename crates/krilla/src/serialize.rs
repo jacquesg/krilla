@@ -330,6 +330,45 @@ pub struct SerializeSettings {
     ///
     /// [`no_device_cs`]: SerializeSettings::no_device_cs
     pub preserve_black: bool,
+    /// Encrypt the document with AES-256 (Standard Security Handler
+    /// V=5, R=6 — ISO 32000-2 §7.6.4 "AESV3"). When `Some`, krilla
+    /// applies the configuration to the underlying `Pdf` before any
+    /// indirect object is written, so every string and stream the
+    /// document subsequently emits is encrypted under the document's
+    /// file key. The `/Encrypt` dict and the trailer `/ID` strings stay in
+    /// clear per §7.6.2; and when
+    /// [`Encryption::with_encrypt_metadata`](crate::encryption::Encryption::with_encrypt_metadata)
+    /// is `false` the `/Metadata` stream is also written in clear, carrying
+    /// an Identity `/Crypt` filter (§7.6.6).
+    ///
+    /// Compatibility note: the AESV3 cipher suite was introduced by
+    /// PDF 2.0; most modern readers (Acrobat 9+, MuPDF, pdf.js) accept
+    /// it on PDF 1.7 documents as well, but readers limited to PDF
+    /// 1.6 or older will refuse to open the file.
+    ///
+    /// Default is `None` (no encryption).
+    ///
+    /// [`Encryption`]: crate::encryption::Encryption
+    pub encryption: Option<crate::encryption::Encryption>,
+    /// Write the file's cross-reference information as a
+    /// `/Type /XRef` stream (ISO 32000-1 §7.5.8 / 32000-2 §7.5.8)
+    /// instead of the traditional plain `xref` table.
+    ///
+    /// Cross-reference streams allow the xref to be compressed
+    /// alongside the rest of the file body and are a prerequisite
+    /// for any document that uses object streams (also ISO
+    /// 32000-1 §7.5.7).
+    ///
+    /// **Version constraint.** Cross-reference streams require
+    /// PDF 1.5 or later. krilla does not downgrade silently — if
+    /// this flag is set while the active PDF version is below 1.5
+    /// the resulting file will not be readable by PDF 1.4
+    /// consumers. PDF/A-1 (PDF 1.4) callers must keep this
+    /// `false`.
+    ///
+    /// The default is `false`, preserving the traditional
+    /// `xref` + `trailer` layout.
+    pub xref_streams: bool,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -767,6 +806,8 @@ impl Default for SerializeSettings {
             shape_optimization: ShapeOptimization::Auto,
             rgb_gray_to_devicegray: false,
             preserve_black: false,
+            encryption: None,
+            xref_streams: false,
         }
     }
 }
@@ -1068,6 +1109,12 @@ pub(crate) struct SerializeContext {
     serialize_settings: Arc<SerializeSettings>,
     /// Settings used for all PDF object chunks.
     chunk_settings: Settings,
+    /// The document's encryption state, derived once from
+    /// [`SerializeSettings::encryption`] so that every content chunk (built
+    /// separately, possibly on background threads) and the final `Pdf` encrypt
+    /// their strings and streams under the same file key. `None` when the
+    /// document is not encrypted.
+    pub(crate) encryption_state: Option<pdf_writer::EncryptionState>,
     /// The limits created as part of the serialization process. In principle, we could
     /// just keep track of this in `ChunkContainer`, where all used chunks are stored.
     /// The only reason why `SerializeContext` needs to know about them is that we also
@@ -1127,6 +1174,7 @@ impl SerializeContext {
             validation_errors: vec![],
             serialize_settings: Arc::new(serialize_settings),
             chunk_settings,
+            encryption_state,
             limits: Limits::new(),
             validation_store: ValidationStore::new(),
         };
@@ -1200,6 +1248,47 @@ impl SerializeContext {
         self.cur_ref.bump()
     }
 
+    /// Register an optional content group, allocating its indirect
+    /// `/OCG` ref eagerly. Returns the opaque handle the caller will
+    /// use with [`crate::surface::Surface::push_layer`].
+    pub(crate) fn add_layer(
+        &mut self,
+        layer: crate::optional_content::Layer,
+    ) -> crate::optional_content::LayerHandle {
+        let ref_ = self.new_ref();
+        // LayerHandle wraps a u32; refuse rather than silently
+        // truncate if a pathological caller manages to register
+        // more than 4G layers. The realistic upper bound is in the
+        // low thousands.
+        let index = self.global_objects.layers.len();
+        assert!(
+            index < u32::MAX as usize,
+            "exceeded the {} layer registration limit",
+            u32::MAX,
+        );
+        let handle = crate::optional_content::LayerHandle(index as u32);
+        self.global_objects.layers.push(LayerRecord { layer, ref_ });
+        handle
+    }
+
+    /// Resolve a [`LayerHandle`](crate::optional_content::LayerHandle)
+    /// back to the indirect ref of its `/OCG` dictionary.
+    ///
+    /// # Panics
+    /// Panics if the handle does not correspond to a layer registered
+    /// on this document (which can only happen if the handle was
+    /// fabricated by hand or originated on a different `Document`).
+    pub(crate) fn layer_ref(
+        &self,
+        handle: crate::optional_content::LayerHandle,
+    ) -> Ref {
+        self.global_objects
+            .layers
+            .get(handle.0 as usize)
+            .map(|r| r.ref_)
+            .expect("LayerHandle out of bounds — was it created on a different Document?")
+    }
+
     /// Indirect ref of the document-level Type1 Helvetica font dict
     /// used for AcroForm widget appearance streams (ISO 32000-2 §12.7.4).
     ///
@@ -1256,7 +1345,16 @@ impl SerializeContext {
     // flags are applied consistently across all chunks.
 
     pub(crate) fn new_chunk(&self) -> Chunk {
-        Chunk::with_settings(self.chunk_settings)
+        let mut chunk = Chunk::with_settings(self.chunk_settings);
+        if let Some(state) = &self.encryption_state {
+            // Encrypt this content chunk's strings and streams under the
+            // document's shared file key. Content is built into separate chunks
+            // (often on background threads) then merged, so the encryption must
+            // happen here at build time rather than at the final `Pdf` (ISO
+            // 32000-2 §7.6.2: encryption applies to all strings and streams).
+            chunk.set_encryption(state.clone());
+        }
+        chunk
     }
 
     pub(crate) fn new_content(&self) -> Content {
@@ -1324,7 +1422,7 @@ impl SerializeContext {
         &mut self.validation_store
     }
 
-    pub(crate) fn finish(mut self, mut chunk_container: ChunkContainer) -> KrillaResult<Pdf> {
+    pub(crate) fn finish(mut self, mut chunk_container: ChunkContainer) -> KrillaResult<Vec<u8>> {
         // We need to be careful here that we serialize the objects in the right order,
         // as in some cases we use MaybeTake::take to remove an object, which means that
         // no object that is serialized afterwards must depend on it.
@@ -1347,8 +1445,12 @@ impl SerializeContext {
         // and when serializing the parent tree map we need to know the refs of the annotations
         self.serialize_tag_tree(&mut chunk_container)?;
 
-        // Create the final PDF.
-        let pdf = chunk_container.finish(&mut self)?;
+        // Create the final PDF. The companion `xref_stream_ref` is
+        // pre-allocated alongside the other final-numbering refs in
+        // `ChunkContainer::finish`; this finalises whether the trailer
+        // is written as a `xref` table (default) or as a `/Type /XRef`
+        // stream (when `xref_streams` is enabled).
+        let (pdf, xref_stream_ref) = chunk_container.finish(&mut self)?;
         self.register_limits(pdf.limits());
 
         self.check_validator_limits();
@@ -1375,7 +1477,10 @@ impl SerializeContext {
         // Just a sanity check that we've actually processed all items.
         self.global_objects.assert_all_taken();
 
-        Ok(pdf)
+        Ok(match xref_stream_ref {
+            Some(r) => pdf.finish_with_xref_stream(r),
+            None => pdf.finish(),
+        })
     }
 }
 
@@ -1932,18 +2037,38 @@ impl SerializeContext {
             let mut sub_chunks = vec![];
 
             if self.serialize_settings.pdf_version() < PdfVersion::Pdf20 {
-                let mut role_map = tree.role_map();
-                // Custom structure elements.
-                role_map.insert(Name(b"Datetime"), StructRole::Span);
-                role_map.insert(Name(b"Terms"), StructRole::Part);
-
-                // PDF 2.0 exclusive structure elements.
-                role_map.insert(Name(b"Title"), StructRole::P);
-                role_map.insert(Name(b"Strong"), StructRole::Span);
-                role_map.insert(Name(b"Em"), StructRole::Span);
+                // Built-in /RoleMap entries, in the historical
+                // emission order (snapshot tests pin the dict's byte
+                // layout). User-supplied entries below override
+                // values in place when the key already exists, and
+                // are appended otherwise — so the on-disk dict never
+                // carries duplicate keys (PDF dict behaviour for
+                // duplicates is implementation-defined).
+                let mut entries: Vec<(Vec<u8>, StructRole)> = vec![
+                    // Custom structure elements.
+                    (b"Datetime".to_vec(), StructRole::Span),
+                    (b"Terms".to_vec(), StructRole::Part),
+                    // PDF 2.0 exclusive structure elements.
+                    (b"Title".to_vec(), StructRole::P),
+                    (b"Strong".to_vec(), StructRole::Span),
+                    (b"Em".to_vec(), StructRole::Span),
+                ];
                 for level in self.global_objects.custom_heading_roles.iter() {
                     let role2 = StructRole2::Heading(*level);
-                    role_map.insert(role2.to_name(&mut [0; 6]), StructRole::P);
+                    let mut buf = [0; 6];
+                    let name = role2.to_name(&mut buf);
+                    entries.push((name.0.to_vec(), StructRole::P));
+                }
+                for (name, role) in root.role_map.iter() {
+                    match entries.iter_mut().find(|(k, _)| k == name) {
+                        Some(slot) => slot.1 = *role,
+                        None => entries.push((name.clone(), *role)),
+                    }
+                }
+
+                let mut role_map = tree.role_map();
+                for (name, role) in &entries {
+                    role_map.insert(Name(name.as_slice()), *role);
                 }
             } else {
                 let mut namespaces = tree.namespaces();
@@ -2192,9 +2317,24 @@ pub(crate) struct GlobalObjects {
     pub(crate) embedded_files: MaybeTaken<BTreeMap<String, Ref>>,
     /// A list of custom headings numbers used in the document.
     pub(crate) custom_heading_roles: BTreeSet<NonZeroU16>,
+    /// Optional content groups (layers) registered via
+    /// [`crate::Document::add_layer`]. Each entry carries the
+    /// caller-supplied [`crate::optional_content::Layer`] descriptor
+    /// plus the indirect [`Ref`] krilla pre-allocated for the
+    /// underlying `/OCG` object. Taken at finalise time when the
+    /// catalogue's `/OCProperties` dict is written.
+    pub(crate) layers: MaybeTaken<Vec<LayerRecord>>,
     /// The context tracking all of the pdfs and their pages that have been inserted.
     #[cfg(feature = "pdf")]
     pub(crate) pdf_ctx: MaybeTaken<PdfSerializerContext>,
+}
+
+/// A registered optional content group together with the indirect ref
+/// of the `/OCG` dictionary that will represent it in the final PDF.
+#[derive(Debug, Clone)]
+pub(crate) struct LayerRecord {
+    pub(crate) layer: crate::optional_content::Layer,
+    pub(crate) ref_: Ref,
 }
 
 impl GlobalObjects {
@@ -2209,6 +2349,7 @@ impl GlobalObjects {
         assert!(self.outline.is_taken());
         assert!(self.tag_tree.is_taken());
         assert!(self.embedded_files.is_taken());
+        assert!(self.layers.is_taken());
         #[cfg(feature = "pdf")]
         assert!(self.pdf_ctx.is_taken());
     }

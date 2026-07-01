@@ -51,11 +51,13 @@ mod color_conversion;
 mod color_options;
 mod destination;
 mod embed;
+mod encryption;
 mod font;
 mod graphic;
 mod image;
 mod mask;
 mod metadata;
+mod optional_content;
 mod outline;
 mod page;
 mod path;
@@ -69,6 +71,7 @@ mod svg;
 mod tagging;
 mod text;
 mod validate;
+mod xref;
 
 const REPLACE: Option<&str> = option_env!("REPLACE");
 const STORE: Option<&str> = option_env!("STORE");
@@ -928,6 +931,8 @@ pub fn settings_1() -> SerializeSettings {
         shape_optimization: krilla::ShapeOptimization::Auto,
         rgb_gray_to_devicegray: false,
         preserve_black: false,
+        encryption: None,
+        xref_streams: false,
     }
 }
 

@@ -97,7 +97,10 @@ impl ChunkContainer {
         }
     }
 
-    pub(crate) fn finish(self, sc: &mut SerializeContext) -> KrillaResult<Pdf> {
+    pub(crate) fn finish(
+        self,
+        sc: &mut SerializeContext,
+    ) -> KrillaResult<(Pdf, Option<Ref>)> {
         let mut remapped_ref = Ref::new(1);
         let mut remapper = HashMap::new();
 
@@ -119,6 +122,47 @@ impl ChunkContainer {
             chunks_byte_len += chunk.len();
         })?;
 
+        // Reserve final renumbered refs for every optional-content
+        // group (`Document::add_layer`) and update the remapper so
+        // that any `/OC <build_ref>` written into a content stream's
+        // BDC property dict gets remapped to the matching `OCG` dict
+        // when the chunk is renumbered. The build-time refs live on
+        // `global_objects.layers`; the renumbered refs are kept here
+        // alongside the original layer descriptors so the catalogue
+        // writer can later reference them directly.
+        let layers_taken = sc.global_objects.layers.take();
+        let layer_final_refs: Vec<(Ref, crate::optional_content::Layer)> = layers_taken
+            .into_iter()
+            .map(|record| {
+                let final_ref = remapped_ref.bump();
+                remapper.insert(record.ref_, final_ref);
+                (final_ref, record.layer)
+            })
+            .collect();
+
+        // Reserve an indirect ref for the `/Encrypt` dictionary if
+        // the document is to be encrypted. Allocated here — after the
+        // chunk refs have all been mapped but before any object is
+        // written — so the slot never collides with a chunk's
+        // renumbered ref or with a downstream metadata/info object.
+        let encrypt_ref = sc
+            .serialize_settings()
+            .encryption
+            .as_ref()
+            .map(|_| remapped_ref.bump());
+
+        // Reserve the indirect ref for the cross-reference stream
+        // (`/Type /XRef`) when `xref_streams` is enabled. Allocated
+        // from the SAME final-numbering counter as everything else
+        // emitted into the PDF so it can't collide with chunk refs,
+        // layer refs, the encrypt ref or downstream metadata refs.
+        // pdf-writer's `Pdf::finish_with_xref_stream` consumes it on
+        // the way out.
+        let xref_stream_ref = sc
+            .serialize_settings()
+            .xref_streams
+            .then(|| remapped_ref.bump());
+
         // Chunk length is not an exact number because the length might change as we renumber,
         // so we add a bit of a padding by multiplying with 1.1. The 200 is additional padding
         // for the document catalog. This hopefully allows us to avoid re-alloactions in the general
@@ -134,6 +178,36 @@ impl ChunkContainer {
                 .requires_binary_header()
         {
             pdf.set_binary_marker(b"AAAA")
+        }
+
+        // Apply AES-256 encryption to the underlying `Pdf` BEFORE any
+        // indirect object body is written. From this point on,
+        // pdf-writer transparently encrypts every string and stream
+        // emitted into the buffer with a per-object IV under the
+        // document's file encryption key. The `/Encrypt` dict (written
+        // by `Pdf::encrypt` itself), the trailer `/ID` strings, and —
+        // when the caller disables `encrypt_metadata` — the metadata
+        // stream remain in clear per ISO 32000-2 §7.6.
+        if let (Some(ref_), Some(enc)) = (
+            encrypt_ref,
+            sc.serialize_settings().encryption.as_ref(),
+        ) {
+            // ISO 19005 (PDF/A) and ISO 15930 (PDF/X) both ban
+            // `/Encrypt`. Surface that mismatch through the standard
+            // validation-error channel — the file is still encrypted
+            // (it would otherwise silently lose its security setting),
+            // but the caller now receives a hard error at finish time
+            // explaining why their archival/print configuration is
+            // inconsistent with the encryption request. PDF/UA is
+            // silent on encryption, so combinations with that
+            // validator pass through unflagged.
+            //
+            // Apply the SAME state already installed on every content chunk
+            // (via `SerializeContext::new_chunk`) so the `/Encrypt` dict and
+            // the directly-written objects share the chunks' file key — content
+            // is otherwise built in separate chunks and would be left in clear.
+            sc.register_validation_error(ValidationError::ContainsEncryption);
+            pdf.encrypt_with_state(ref_, state);
         }
 
         // Write the chunks in all the fields.
@@ -209,6 +283,16 @@ impl ChunkContainer {
         let calculate_order_fields = sc.global_objects.calculate_order_fields.take();
         let helvetica_ref = sc.global_objects.standard_helvetica_font;
 
+        // Emit one `/Type /OCG` indirect object per registered layer.
+        // The refs were pre-allocated above so any `/OC <ref>` in a
+        // content stream's BDC property dict resolves correctly after
+        // chunk renumbering.
+        for (ref_, layer) in &layer_final_refs {
+            let mut ocg = pdf.optional_content_group(*ref_);
+            ocg.name(TextStr(&layer.name));
+            ocg.intent(layer.intent.to_pdf_writer());
+        }
+
         // We only write a catalog if a page tree exists. Every valid PDF must have one
         // and krilla ensures that there always is one, but for snapshot tests, it can be
         // useful to not write a document catalog if we don't actually need it for the test.
@@ -262,9 +346,7 @@ impl ChunkContainer {
             } else if sc.serialize_settings().xmp_metadata {
                 let meta_ref = remapped_ref.bump();
                 let xmp_buf = xmp.finish(None);
-                pdf.stream(meta_ref, xmp_buf.as_bytes())
-                    .pair(Name(b"Type"), Name(b"Metadata"))
-                    .pair(Name(b"Subtype"), Name(b"XML"));
+                write_metadata(&mut pdf, meta_ref, xmp_buf.as_bytes());
                 Some(meta_ref)
             } else {
                 None
@@ -474,10 +556,64 @@ impl ChunkContainer {
                 acro_form.finish();
             }
 
+            // /OCProperties (ISO 32000-2 §8.11.4). Required whenever
+            // the document declares at least one optional content
+            // group; `/OCGs` enumerates every registered layer and
+            // `/D` carries the default configuration that drives
+            // initial visibility.
+            if !layer_final_refs.is_empty() {
+                // Optional content is a PDF 1.5 feature (ISO 32000-2 §8.11).
+                // Under an earlier declared version (e.g. PDF/A-1, which forces
+                // PDF 1.4) emitting layers is a conformance error.
+                if sc.serialize_settings().pdf_version() < PdfVersion::Pdf15 {
+                    sc.register_validation_error(ValidationError::RequiresNewerPdfVersion(
+                        crate::configure::VersionedFeature::OptionalContent,
+                        None,
+                    ));
+                }
+                let mut oc = catalog.oc_properties();
+                {
+                    let mut ocgs = oc.groups();
+                    for (ref_, _) in &layer_final_refs {
+                        ocgs.item(*ref_);
+                    }
+                }
+                let mut default = oc.default_config();
+                {
+                    let mut on = default.on();
+                    for (ref_, layer) in &layer_final_refs {
+                        if layer.default_visible {
+                            on.item(*ref_);
+                        }
+                    }
+                }
+                {
+                    let mut off = default.off();
+                    for (ref_, layer) in &layer_final_refs {
+                        if !layer.default_visible {
+                            off.item(*ref_);
+                        }
+                    }
+                }
+                {
+                    let mut order = default.order();
+                    for (ref_, _) in &layer_final_refs {
+                        order.item(*ref_);
+                    }
+                }
+                // ISO 32000-2 Table 99: the `/D` configuration dictionary may
+                // carry a `/Name`; PDF/A-2/-3/-4 and PDF/X-4/-6 REQUIRE it as
+                // the configuration's variant identifier. Emitting it
+                // unconditionally is harmless for plain output.
+                default.name(TextStr("Default"));
+                default.finish();
+                oc.finish();
+            }
+
             catalog.finish();
         }
 
-        Ok(pdf)
+        Ok((pdf, xref_stream_ref))
     }
 }
 

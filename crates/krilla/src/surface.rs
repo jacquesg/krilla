@@ -680,7 +680,25 @@ impl<'a> Surface<'a> {
                     .get_mut()
                     .draw_isolated(self.sc, self.chunk_container, stream);
             }
+            PushInstruction::Layer => self.bd.get_mut().end_layer(),
         }
+    }
+
+    /// Bracket subsequent drawing operations with the optional
+    /// content group identified by `handle`. The matching
+    /// [`Surface::pop`] closes the marked-content sequence.
+    ///
+    /// `handle` must have been returned by
+    /// [`Document::add_layer`](crate::Document::add_layer) on the
+    /// same document; passing a handle from a different document
+    /// panics.
+    pub fn push_layer(&mut self, handle: crate::optional_content::LayerHandle) {
+        let layer_ref = self.sc.layer_ref(handle);
+        // Stable per-handle name so re-using the same layer on the
+        // same page collapses to a single `/Properties` entry.
+        let name = format!("L{}", handle.0);
+        self.bd.get_mut().start_layer(&name, layer_ref);
+        self.push_instructions.push(PushInstruction::Layer);
     }
 
     #[cfg(feature = "raster-images")]
@@ -826,4 +844,8 @@ pub(crate) enum PushInstruction {
     TextRendering,
     Mask(Box<Mask>),
     Isolated,
+    /// Optional-content bracket: the matching `pop` emits the EMC
+    /// that closes the `/OC` marked-content sequence opened by
+    /// [`Surface::push_layer`].
+    Layer,
 }
