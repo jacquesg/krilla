@@ -2462,6 +2462,21 @@ pub struct WidgetAnnotation {
     /// for numeric range bounds. The action may reject the change by
     /// setting `event.rc = false` so the viewer reverts the field.
     pub(crate) validate_action: Option<Action>,
+    /// `/AA /C` — calculate action. Fires when any field in the
+    /// document changes value so the script can recompute this field
+    /// from other field values (e.g. `event.value = this.getField("a")
+    /// .value + this.getField("b").value;`). Calculation order is
+    /// determined by the catalogue's `/AcroForm /CO` array, which the
+    /// embedder controls.
+    pub(crate) calculate_action: Option<Action>,
+    /// `/AA /Fo` — focus action. Fires when the annotation gains
+    /// keyboard focus. Typical use: capture the field's pre-edit value
+    /// for revert or audit.
+    pub(crate) focus_action: Option<Action>,
+    /// `/AA /Bl` — blur action. Fires when the annotation loses
+    /// keyboard focus. Typical use: post-edit cleanup or background
+    /// validation that should not block keystroke entry.
+    pub(crate) blur_action: Option<Action>,
     /// `/MK /I` — pushbutton icon appearance (ISO 32000-2 §12.5.6.19
     /// Table 167). When set, krilla emits a Form XObject wrapping
     /// the image and threads its indirect reference into the
@@ -2511,6 +2526,9 @@ impl WidgetAnnotation {
             keystroke_action: None,
             format_action: None,
             validate_action: None,
+            calculate_action: None,
+            focus_action: None,
+            blur_action: None,
             #[cfg(feature = "raster-images")]
             icon_image: None,
             default_appearance: None,
@@ -2576,6 +2594,46 @@ impl WidgetAnnotation {
     /// on a numeric or range field.
     pub fn with_validate_action(mut self, action: Action) -> Self {
         self.validate_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /C` (calculate) additional action —
+    /// per ISO 32000-2 §12.6.4.16 Table 230 + §12.7.4.4. Fires when
+    /// any field's value changes so the script can recompute this
+    /// field's value from other fields. Calculation order is governed
+    /// by the AcroForm `/CO` array; the script typically sets
+    /// `event.value = <expression>` to publish the recomputed value.
+    ///
+    /// Typical use:
+    /// `Action::JavaScript(JavaScriptAction::new("event.value =
+    /// this.getField(\"subtotal\").value * 0.20;"))` for a VAT-on-
+    /// subtotal field that mirrors any change to `subtotal`.
+    pub fn with_calculate_action(mut self, action: Action) -> Self {
+        self.calculate_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /Fo` (focus-gained) additional action —
+    /// per ISO 32000-2 §12.6.4.16 Table 230. Fires when the annotation
+    /// gains the keyboard focus (e.g. user tabs into the field). The
+    /// action runs before any keystroke is processed so it cannot
+    /// reject the focus shift, only react to it. Typical use: capture
+    /// the field's pre-edit value into a script variable so a later
+    /// `/Bl` action can detect whether the value actually changed.
+    pub fn with_focus_action(mut self, action: Action) -> Self {
+        self.focus_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /Bl` (focus-lost / blur) additional
+    /// action — per ISO 32000-2 §12.6.4.16 Table 230. Fires when the
+    /// annotation loses the keyboard focus (e.g. user tabs out, clicks
+    /// elsewhere). Typical use: post-edit cleanup or background
+    /// validation that should not block keystroke entry — `event.rc`
+    /// is ignored on `/Bl` so the script cannot revert the change at
+    /// this point.
+    pub fn with_blur_action(mut self, action: Action) -> Self {
+        self.blur_action = Some(action);
         self
     }
 
@@ -3035,10 +3093,11 @@ impl WidgetAnnotation {
             self.appearance_characteristics.as_ref(),
         );
 
-        // `/AA` additional-actions dictionary (ISO 32000-2 §12.7.4
-        // Table 230). Emitted only when at least one of the
-        // form-field action slots — keystroke (`/K`), format (`/F`),
-        // validate (`/V`) — is populated; the dict is otherwise
+        // `/AA` additional-actions dictionary (ISO 32000-2 §12.6.4.16
+        // Table 230 + §12.7.4 form-field overlay). Emitted only when
+        // at least one of the action slots — keystroke (`/K`), format
+        // (`/F`), validate (`/V`), calculate (`/C`), focus-gained
+        // (`/Fo`), blur (`/Bl`) — is populated; the dict is otherwise
         // omitted because an empty `/AA` is meaningless to viewers.
         // Each populated slot gets its own action sub-dictionary
         // routed through `Action::serialize`, which selects the
@@ -3054,7 +3113,10 @@ impl WidgetAnnotation {
         if !is_radio_group_child
             && (self.keystroke_action.is_some()
                 || self.format_action.is_some()
-                || self.validate_action.is_some())
+                || self.validate_action.is_some()
+                || self.calculate_action.is_some()
+                || self.focus_action.is_some()
+                || self.blur_action.is_some())
         {
             let mut aa = annotation.insert(Name(b"AA")).dict();
             if let Some(action) = &self.keystroke_action {
@@ -3067,6 +3129,26 @@ impl WidgetAnnotation {
             }
             if let Some(action) = &self.validate_action {
                 let action_writer = aa.insert(Name(b"V")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            // Form-field calculation action. Multiple fields with `/C`
+            // actions are evaluated in the order recorded in the
+            // catalogue's `/AcroForm /CO` array — the embedder owns
+            // that array; krilla emits the per-field slot only.
+            if let Some(action) = &self.calculate_action {
+                let action_writer = aa.insert(Name(b"C")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            // Annotation lifecycle: focus-gained (`/Fo`) and
+            // focus-lost (`/Bl`) fire on the keyboard-focus boundary.
+            // `event.rc` is ignored for these slots so the script
+            // cannot reject the focus change, only observe it.
+            if let Some(action) = &self.focus_action {
+                let action_writer = aa.insert(Name(b"Fo")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            if let Some(action) = &self.blur_action {
+                let action_writer = aa.insert(Name(b"Bl")).start();
                 action.serialize(sc, action_writer)?;
             }
             aa.finish();
@@ -4199,6 +4281,60 @@ mod tests {
         assert!(contains(&pdf, b"/K <<"), "missing /K");
         assert!(contains(&pdf, b"/F <<"), "missing /F");
         assert!(contains(&pdf, b"/V <<"), "missing /V");
+    }
+
+    #[test]
+    fn widget_annotation_calculate_action_emits_aa_c_javascript() {
+        let widget = empty_text_widget("vat").with_calculate_action(Action::JavaScript(
+            JavaScriptAction::new(
+                "event.value = this.getField(\"subtotal\").value * 0.20;",
+            ),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/C <<"), "missing /AA /C key");
+        assert!(contains(&pdf, b"getField"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_focus_action_emits_aa_fo_javascript() {
+        let widget = empty_text_widget("comment").with_focus_action(Action::JavaScript(
+            JavaScriptAction::new("event.target.scrollIntoView();"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/Fo <<"), "missing /AA /Fo key");
+        assert!(contains(&pdf, b"scrollIntoView"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_blur_action_emits_aa_bl_javascript() {
+        let widget = empty_text_widget("comment").with_blur_action(Action::JavaScript(
+            JavaScriptAction::new("/* persist field state */"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/Bl <<"), "missing /AA /Bl key");
+        assert!(contains(&pdf, b"persist field state"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_all_six_actions_emit_six_keys() {
+        let widget = empty_text_widget("multi")
+            .with_keystroke_action(Action::JavaScript(JavaScriptAction::new("/* k */")))
+            .with_format_action(Action::JavaScript(JavaScriptAction::new("/* f */")))
+            .with_validate_action(Action::JavaScript(JavaScriptAction::new("/* v */")))
+            .with_calculate_action(Action::JavaScript(JavaScriptAction::new("/* c */")))
+            .with_focus_action(Action::JavaScript(JavaScriptAction::new("/* fo */")))
+            .with_blur_action(Action::JavaScript(JavaScriptAction::new("/* bl */")));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/K <<"), "missing /K");
+        assert!(contains(&pdf, b"/F <<"), "missing /F");
+        assert!(contains(&pdf, b"/V <<"), "missing /V");
+        assert!(contains(&pdf, b"/C <<"), "missing /C");
+        assert!(contains(&pdf, b"/Fo <<"), "missing /Fo");
+        assert!(contains(&pdf, b"/Bl <<"), "missing /Bl");
     }
 
     #[test]
