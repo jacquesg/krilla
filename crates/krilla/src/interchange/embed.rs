@@ -52,6 +52,29 @@ pub struct EmbeddedFile {
     pub location: Option<Location>,
 }
 
+impl EmbeddedFile {
+    /// Get the error-reporting location associated with this file.
+    pub fn location(&self) -> Option<Location> {
+        self.location
+    }
+
+    /// Set the error-reporting location associated with this file.
+    pub fn set_location(&mut self, location: Option<Location>) {
+        self.location = location;
+    }
+
+    /// Set the error-reporting location associated with this file.
+    ///
+    /// `Location` is an opaque caller-supplied identifier (see
+    /// [`crate::surface::Location`]) used to backtrack any validation
+    /// error raised during serialisation to the source position the
+    /// caller chose. It is not written into the PDF.
+    pub fn with_location(mut self, location: Option<Location>) -> Self {
+        self.location = location;
+        self
+    }
+}
+
 impl Cacheable for EmbeddedFile {
     fn serialize(
         self,

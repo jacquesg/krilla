@@ -15,7 +15,7 @@ use ::image::{load_from_memory, DynamicImage, GenericImageView, Rgba, RgbaImage}
 use difference::{Changeset, Difference};
 use krilla::action::LinkAction;
 use krilla::annotation::{Annotation, LinkAnnotation, Target};
-use krilla::color::{cmyk, luma, rgb};
+use krilla::color::{cmyk, luma, rgb, ColorConversion};
 use krilla::configure::{
     Accessibility, Archival, Configuration, ConfigurationBuilder, PdfVersion, Prepress,
 };
@@ -47,6 +47,8 @@ use skrifa::raw::TableProvider;
 use skrifa::{FontRef, MetadataProvider};
 
 mod annotation;
+mod color_conversion;
+mod color_options;
 mod destination;
 mod embed;
 mod font;
@@ -60,6 +62,8 @@ mod path;
 mod pattern;
 mod pdf;
 mod separation;
+mod shape_optimization;
+mod signature;
 mod stream;
 mod svg;
 mod tagging;
@@ -920,6 +924,10 @@ pub fn settings_1() -> SerializeSettings {
         text_rendering: krilla::TextRendering::Glyphs,
         font_embedding: krilla::FontEmbedding::Subset,
         glyph_layout: krilla::GlyphLayout::Optical,
+        color_conversion: ColorConversion::Auto,
+        shape_optimization: krilla::ShapeOptimization::Auto,
+        rgb_gray_to_devicegray: false,
+        preserve_black: false,
     }
 }
 

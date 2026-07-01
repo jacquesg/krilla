@@ -1214,11 +1214,28 @@ impl ContentBuilder {
                 }
                 if let Some((color, opacity)) = gradient_props.single_stop_color() {
                     // Write gradients with one stop as a solid color fill.
+                    // Apply the same projection policy as the
+                    // `InnerPaint::Color` arm below: a single-stop
+                    // gradient is semantically a solid paint and must
+                    // therefore travel through the same colour
+                    // conversion. Multi-stop gradients deliberately
+                    // skip projection because converting individual
+                    // stops would alter interpolation.
                     content_builder.set_fill_opacity(opacity);
-                    let cs = color.color_space(sc);
+                    let policy = sc.serialize_settings().color_conversion;
+                    // Compose color_conversion projection with the
+                    // `rgb_gray_to_devicegray` promotion: project
+                    // first (e.g. ForceRgb materialises an RGB
+                    // triple), then promote `r == g == b` to Luma so
+                    // the final fill emits as `g` instead of `rg`.
+                    let projected = color
+                        .clone()
+                        .project(policy)
+                        .maybe_promote_grey_to_luma(sc);
+                    let cs = projected.color_space(sc);
                     let color_space_resource =
                         Self::cs_to_content_cs(content_builder, sc, chunk_container, cs);
-                    set_solid_fn(&mut content_builder.content, color_space_resource, color);
+                    set_solid_fn(&mut content_builder.content, color_space_resource, &projected);
                 } else {
                     let shading_mask = Mask::new_from_shading(
                         gradient_props.clone(),
@@ -1258,9 +1275,28 @@ impl ContentBuilder {
 
         match &paint.0 {
             InnerPaint::Color(c) => {
-                let cs = c.color_space(sc);
+                // Project the source colour through the configured
+                // [`ColorConversion`] policy before colour-space
+                // selection. `Auto` (the default) passes the value
+                // through unchanged, preserving existing behaviour.
+                // This is the only solid-paint dispatch point in the
+                // content builder; it covers fill, stroke, and the
+                // glyph paint paths (all routed through `set_solid_fn`).
+                //
+                // After projection, the `rgb_gray_to_devicegray`
+                // setting promotes `r == g == b` to Luma so the fill
+                // emits as `g` (DeviceGray) instead of `rg`. The
+                // `preserve_black` setting is consumed inside
+                // `color_space()` to bypass per-paint ICC routing for
+                // pure black.
+                let policy = sc.serialize_settings().colour_conversion;
+                let projected = c
+                    .clone()
+                    .project(policy)
+                    .maybe_promote_grey_to_luma(sc);
+                let cs = projected.color_space(sc);
                 let color_space_resource = Self::cs_to_content_cs(self, sc, chunk_container, cs);
-                set_solid_fn(&mut self.content, color_space_resource, c);
+                set_solid_fn(&mut self.content, color_space_resource, &projected);
             }
             InnerPaint::LinearGradient(lg) => {
                 let (gradient_props, transform) = lg.clone().gradient_properties(bounds);

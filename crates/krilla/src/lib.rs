@@ -173,11 +173,12 @@ pub mod text;
 
 pub use data::*;
 pub use document::*;
+pub use graphics::color::ColorConversion;
 pub use graphics::*;
 pub use interactive::*;
 pub use interchange::*;
 pub use serialize::{
     CustomOutputIntent, CustomOutputIntentError, CustomOutputIntentSubtype, ExternalOutputProfile,
     ExternalOutputProfileError, FontEmbedding, GlyphLayout, OutputIntentProfile, SerializeSettings,
-    TextRendering,
+    ShapeOptimization, TextRendering,
 };

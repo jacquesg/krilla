@@ -16,7 +16,7 @@ use crate::configure::validate::ValidationStore;
 use crate::configure::{Configuration, PdfVersion, ValidationError, Validators};
 use crate::error::{KrillaError, KrillaResult, LimitError};
 use crate::geom::Size;
-use crate::graphics::color::{rgb, ColorSpace};
+use crate::graphics::color::{rgb, ColorSpace, ColourConversion};
 use crate::graphics::icc::{GenericICCProfile, ICCBasedColorSpace, ICCColorSpace, ICCProfile};
 #[cfg(feature = "raster-images")]
 use crate::graphics::image::Image;
@@ -243,6 +243,93 @@ pub struct SerializeSettings {
     /// runs without an `x_offset` always use `Tj` regardless (this
     /// predates the setting and is unrelated to it).
     pub glyph_layout: GlyphLayout,
+    /// How regular colours should be projected before being written
+    /// to the content stream.
+    ///
+    /// [`ColorConversion::Auto`] (the default) preserves the
+    /// existing krilla behaviour: every colour is emitted in its
+    /// source space (RGB, CMYK, Luma, or Separation). The
+    /// `Force*` variants project regular colours into the requested
+    /// target space using ISO 32000-2 §8.6.4 (RGB <-> CMYK) and
+    /// Rec. 709 (RGB -> Y) at every fill, stroke, and glyph paint
+    /// dispatch in [`crate::content`].
+    ///
+    /// See [`ColorConversion`] for the variant-by-variant contract.
+    ///
+    /// Single-stop gradients that route through the solid-fill path
+    /// at `content.rs` are also projected; multi-stop gradients are
+    /// **not** projected because doing so would alter interpolation.
+    pub color_conversion: ColorConversion,
+    /// How aggressively path geometry should be simplified before
+    /// being written to the PDF content stream.
+    ///
+    /// [`ShapeOptimization::Auto`] is the default and preserves
+    /// krilla's existing behaviour: every path segment supplied to
+    /// the surface is written verbatim into the content stream.
+    /// [`ShapeOptimization::None`] disables every form of path
+    /// simplification (it is currently equivalent to `Auto` because
+    /// krilla does not simplify paths, but the contract is that no
+    /// simplification will ever be applied under this mode).
+    /// [`ShapeOptimization::Full`] permits krilla to apply the most
+    /// aggressive path simplification it can without changing the
+    /// rendered appearance of the page.
+    ///
+    /// Krilla does not currently perform any path simplification, so
+    /// this setting is a no-op at the content-stream level. It exists
+    /// so consumers can carry an authored shape-optimisation value
+    /// through to the serialiser without losing it; a real
+    /// simplification pass is future work.
+    pub shape_optimization: ShapeOptimization,
+    /// Promote RGB greys to `/DeviceGray` at paint dispatch.
+    ///
+    /// When `true`, every solid RGB colour whose channels are equal
+    /// (`r == g == b`) is reclassified as a Luma colour before colour-
+    /// space selection, so the content stream emits a `g` (DeviceGray)
+    /// operator instead of `rg`. Implements ISO 32000-2 §8.6.4 by
+    /// choosing the narrowest device space that represents the source
+    /// value exactly.
+    ///
+    /// Print workflows that route greyscale content through
+    /// `/DeviceGray` avoid an unnecessary three-channel representation
+    /// and the slight ink-laydown asymmetry that comes with it.
+    ///
+    /// The default is `false`, preserving the source colour space
+    /// exactly (existing behaviour).
+    ///
+    /// This setting composes with [`color_conversion`]: projection
+    /// runs first, then `r == g == b` promotion is applied to the
+    /// projected value. A `ForceRgb` policy with this flag therefore
+    /// still produces `/DeviceGray` for greyscale inputs.
+    ///
+    /// [`color_conversion`]: SerializeSettings::color_conversion
+    pub rgb_gray_to_devicegray: bool,
+    /// Bypass the ICC reclassification path for pure black at paint
+    /// dispatch.
+    ///
+    /// When `true`, solid paints sourced from `rgb(0, 0, 0)` or
+    /// `device-cmyk(0, 0, 0, 1)` are emitted in their device space
+    /// (`DeviceRGB` / `DeviceCMYK`) regardless of [`no_device_cs`].
+    /// This short-circuits the per-paint sRGB / cmyk-profile routing
+    /// that would otherwise replace pure black with the ICC-transformed
+    /// equivalent — which, through a fallback CMYK profile, can become
+    /// a near-black mixed value rather than the intended single-channel
+    /// black.
+    ///
+    /// Authors who set this flag are asserting that pure black must
+    /// remain device-black in print, even when the rest of the
+    /// document is colour-managed.
+    ///
+    /// The default is `false`, preserving existing behaviour.
+    ///
+    /// **Validator interaction.** PDF/A and PDF/X variants force
+    /// [`no_device_cs`] to `true` and forbid device colour spaces in
+    /// many content positions; combining `preserve_black` with such a
+    /// validator may cause emission of a device-space colour that the
+    /// validator subsequently rejects. The flag is intended for
+    /// non-validated, print-oriented workflows.
+    ///
+    /// [`no_device_cs`]: SerializeSettings::no_device_cs
+    pub preserve_black: bool,
 }
 
 /// How embedded font programmes are written into the PDF.
@@ -300,6 +387,39 @@ pub enum GlyphLayout {
     /// by the caller are discarded; the content stream is smaller but
     /// kerning may degrade.
     Metric,
+}
+
+/// How aggressively path geometry should be simplified before being
+/// written to the PDF content stream.
+///
+/// See [`SerializeSettings::shape_optimization`] for the full
+/// contract. Krilla does not currently apply any path simplification,
+/// so all three variants behave identically at the content-stream
+/// level; the enum exists so callers can plumb an authored value
+/// through to the serialiser without losing it.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum ShapeOptimization {
+    /// Let krilla decide whether to simplify path geometry.
+    ///
+    /// This is the default. Krilla currently writes every path
+    /// segment verbatim into the content stream; that behaviour is
+    /// not guaranteed by this contract and may change once a
+    /// simplification pass is added.
+    #[default]
+    Auto,
+    /// Never simplify path geometry.
+    ///
+    /// Every supplied path segment is written verbatim into the
+    /// content stream. The contract is that no path simplification
+    /// will ever be applied under this mode, regardless of what
+    /// future heuristics `Auto` may grow.
+    None,
+    /// Apply the most aggressive path simplification krilla can
+    /// without changing the rendered appearance of the page.
+    ///
+    /// Reserved for a future simplification pass; equivalent to
+    /// `Auto` today.
+    Full,
 }
 
 /// How text should be emitted into the PDF content stream.
@@ -643,6 +763,10 @@ impl Default for SerializeSettings {
             font_embedding: FontEmbedding::Subset,
             glyph_layout: GlyphLayout::Optical,
             fallback_cmyk_profile: None,
+            color_conversion: ColorConversion::Auto,
+            shape_optimization: ShapeOptimization::Auto,
+            rgb_gray_to_devicegray: false,
+            preserve_black: false,
         }
     }
 }
