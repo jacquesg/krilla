@@ -161,6 +161,43 @@ impl ContentBuilder {
         self.active_marked_content = false;
     }
 
+    /// Begin an `/Artifact` marked-content section in the content stream,
+    /// regardless of whether the page is tagged. Artifacts carry no MCID and
+    /// are not part of the structure tree, so this is independent of the
+    /// tagging machinery driven by the page identifier. Returns `false`
+    /// (emitting nothing) when a marked-content section is already open —
+    /// marked content does not nest here.
+    pub(crate) fn try_begin_artifact_content(&mut self) -> bool {
+        if self.active_marked_content {
+            return false;
+        }
+        self.start_marked_content(Name(b"Artifact"));
+        true
+    }
+
+    /// Begin a `/Span` marked-content section carrying `/ActualText` — the
+    /// reading-order text for the bracketed glyphs — regardless of whether the
+    /// page is tagged. Structure tagging (`start_tagged`) is gated on the page
+    /// identifier and emits nothing on an untagged page, so right-to-left /
+    /// bidi-reordered glyph runs reach a plain content stream in visual order
+    /// and extract reversed. This writes `/Span <</ActualText (…)>> BDC`
+    /// directly so the run extracts in logical order in untagged PDFs too.
+    ///
+    /// Returns `false` (emitting nothing) when a marked-content section is
+    /// already open — marked content does not nest here. Pass the returned
+    /// flag to [`end_marked_content`](Self::end_marked_content).
+    pub(crate) fn try_begin_actual_text_content(&mut self, actual_text: &str) -> bool {
+        if self.active_marked_content {
+            return false;
+        }
+        self.start_marked_content_prelude();
+        let mut mc = self
+            .content
+            .begin_marked_content_with_properties(Name(b"Span"));
+        mc.properties().actual_text(TextStr(actual_text));
+        true
+    }
+
     /// Begin a `/OC` marked-content sequence pointing at the OCG
     /// dictionary identified by `(name, layer_ref)`.
     ///
@@ -1180,7 +1217,8 @@ impl ContentBuilder {
             // and ensures pdfium correctly extracts font metadata from
             // text within CSS transforms.
             if self.root_transform != Transform::identity() {
-                self.content.transform(self.root_transform.to_pdf_transform());
+                self.content
+                    .transform(self.root_transform.to_pdf_transform());
             }
             let user_transform = self.cur_transform();
             if user_transform != Transform::identity() {
@@ -1253,14 +1291,15 @@ impl ContentBuilder {
                     // first (e.g. ForceRgb materialises an RGB
                     // triple), then promote `r == g == b` to Luma so
                     // the final fill emits as `g` instead of `rg`.
-                    let projected = color
-                        .clone()
-                        .project(policy)
-                        .maybe_promote_grey_to_luma(sc);
+                    let projected = color.clone().project(policy).maybe_promote_grey_to_luma(sc);
                     let cs = projected.color_space(sc);
                     let color_space_resource =
                         Self::cs_to_content_cs(content_builder, sc, chunk_container, cs);
-                    set_solid_fn(&mut content_builder.content, color_space_resource, &projected);
+                    set_solid_fn(
+                        &mut content_builder.content,
+                        color_space_resource,
+                        &projected,
+                    );
                 } else {
                     let shading_mask = Mask::new_from_shading(
                         gradient_props.clone(),
@@ -1314,11 +1353,8 @@ impl ContentBuilder {
                 // `preserve_black` setting is consumed inside
                 // `color_space()` to bypass per-paint ICC routing for
                 // pure black.
-                let policy = sc.serialize_settings().colour_conversion;
-                let projected = c
-                    .clone()
-                    .project(policy)
-                    .maybe_promote_grey_to_luma(sc);
+                let policy = sc.serialize_settings().color_conversion;
+                let projected = c.clone().project(policy).maybe_promote_grey_to_luma(sc);
                 let cs = projected.color_space(sc);
                 let color_space_resource = Self::cs_to_content_cs(self, sc, chunk_container, cs);
                 set_solid_fn(&mut self.content, color_space_resource, &projected);
@@ -1409,6 +1445,17 @@ impl ContentBuilder {
                             "IccBased wide-gamut colours must route through ContentColorSpace::Named"
                         )
                     }
+                    Color::Regular(crate::color::RegularColor::CalRgb { .. })
+                    | Color::Regular(crate::color::RegularColor::CalGray { .. })
+                    | Color::Regular(crate::color::RegularColor::Lab { .. }) => {
+                        // Calibrated CIE-based variants always resolve to
+                        // `CieBasedColorSpace::{CalRgb,CalGray,Lab}` and
+                        // land in the `Named(n)` arm. Reaching `Device`
+                        // here is a routing regression.
+                        unreachable!(
+                            "Calibrated CIE-based colours must route through ContentColorSpace::Named"
+                        )
+                    }
                     Color::Special(_) => {
                         panic!("Device color space cannot be used with special colors")
                     }
@@ -1460,6 +1507,13 @@ impl ContentBuilder {
                     Color::Regular(crate::color::RegularColor::IccBased { .. }) => {
                         unreachable!(
                             "IccBased wide-gamut colours must route through ContentColorSpace::Named"
+                        )
+                    }
+                    Color::Regular(crate::color::RegularColor::CalRgb { .. })
+                    | Color::Regular(crate::color::RegularColor::CalGray { .. })
+                    | Color::Regular(crate::color::RegularColor::Lab { .. }) => {
+                        unreachable!(
+                            "Calibrated CIE-based colours must route through ContentColorSpace::Named"
                         )
                     }
                     Color::Special(_) => {

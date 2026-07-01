@@ -172,11 +172,31 @@ pub enum ValidationError {
     /// [`SerializeSettings::external_output_profile`]:
     /// crate::SerializeSettings::external_output_profile
     ExternalOutputProfileUnsupportedByValidator,
-    /// The PDF contains an RGB color, which is forbidden by PDF/X-1a.
+    /// The overprint mode `/OPM` is set to 1 ("ignore zero-valued components")
+    /// while overprinting is enabled for stroking and/or non-stroking.
     ///
-    /// Occurs if an RGB color was used in fills, strokes, gradients, images,
-    /// or separation fallback colors when exporting to PDF/X-1a. Grayscale
-    /// colors are permitted.
+    /// PDF/A-2/-3/-4 (ISO 19005-2/-3/-4 §6.2.4.2) and PDF/X-4/-4p/-6/-6p forbid
+    /// `/OPM 1` when an ICCBased CMYK colour space is used with overprinting.
+    /// Under those validators device colours are promoted to ICCBased and the
+    /// overprint mode is only meaningful for CMYK, so this state is treated as
+    /// the forbidden combination.
+    OverprintOpmOne(Option<Location>),
+    /// A page's `/Thumb` thumbnail image uses a colour space other than
+    /// DeviceGray, DeviceRGB, or an Indexed space based on those.
+    ///
+    /// ISO 32000-2 §12.3.4 restricts thumbnail images to those spaces. krilla
+    /// embeds images with their source colour space and never converts them, so
+    /// a CMYK image, an image carrying an embedded ICC profile, or any image
+    /// under `no_device_cs` (which promotes device colours to a CIE-based
+    /// space) yields a non-conforming thumbnail.
+    ThumbnailNonDeviceColorSpace(Option<Location>),
+    /// The PDF contains a colour in a space forbidden by PDF/X-1a.
+    ///
+    /// PDF/X-1a (ISO 15930-4) admits only DeviceGray, DeviceCMYK and
+    /// Separation/DeviceN content. This is raised for DeviceRGB and for the
+    /// CIE-based spaces (CalRGB, CalGray, Lab and ICCBased) when used in fills,
+    /// strokes, gradients, images, or separation fallback colours. DeviceGray
+    /// is permitted.
     ContainsRgb(Option<Location>),
     /// A gradient's stops are not all in the same color space.
     ///

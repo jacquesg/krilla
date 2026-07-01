@@ -11,7 +11,9 @@ use crate::chunk_container::ChunkContainer;
 use crate::configure::ValidationError;
 use crate::geom::{Rect, Transform};
 use crate::graphics::color::luma;
-use crate::graphics::color::{Color, ColorSpace};
+use crate::graphics::color::{
+    CieBasedColorSpace, Color, ColorSpace, DeviceColorSpace, RegularColor,
+};
 use crate::graphics::paint::{LinearGradient, RadialGradient, SweepGradient};
 use crate::graphics::paint::{SpreadMethod, Stop};
 use crate::num::NormalizedF32;
@@ -473,6 +475,7 @@ fn select_axial_radial_function(
             serialize_exponential(
                 vec![stops[0].opacity.get()],
                 vec![stops[1].opacity.get()],
+                vec![0.0, 1.0],
                 chunk,
                 sc,
             )
@@ -488,6 +491,7 @@ fn select_axial_radial_function(
                     .to_pdf_color()
                     .into_iter()
                     .collect::<Vec<_>>(),
+                color_output_range(&stops[0].color),
                 chunk,
                 sc,
             )
@@ -605,7 +609,7 @@ fn serialize_sweep_postscript(
     if use_opacities {
         postscript_function.range([0.0, 1.0]);
     } else {
-        postscript_function.range([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        postscript_function.range(color_output_range(&stops[0].color));
     }
 
     root_ref
@@ -672,7 +676,7 @@ fn serialize_linear_postscript(
     if use_opacities {
         postscript_function.range([0.0, 1.0]);
     } else {
-        postscript_function.range([0.0, 1.0, 0.0, 1.0, 0.0, 1.0]);
+        postscript_function.range(color_output_range(&stops[0].color));
     }
 
     root_ref
@@ -907,14 +911,58 @@ fn serialize_stitching(
     sc: &mut SerializeContext,
     use_opacities: bool,
 ) -> Ref {
+    // CSS hard colour stops place two stops at the same offset (e.g.
+    // `transparent 0 36pt, black 36pt 72pt`). Emitting a sub-function for that
+    // empty interval yields a zero-width FunctionType 3 sub-domain and a
+    // duplicate Bounds entry — non-increasing Bounds, malformed per PDF
+    // 32000-2 §7.10.4.
+    //
+    // `spread_coincident_offsets` decides, per coincident run, whether to widen
+    // it into a sub-pixel ramp or leave it as an exact step; the `>=` guard in
+    // the loop then drops the zero-width segment any exact step leaves behind.
+    let spread = spread_coincident_offsets(stops, use_opacities);
+    let stops = spread.as_slice();
+
+    // The stitching function and every exponential sub-function share the
+    // shading's output range: a single opacity channel for a soft mask,
+    // otherwise the per-component range of the (uniform) stop colour space.
+    let output_range = if use_opacities {
+        vec![0.0, 1.0]
+    } else {
+        color_output_range(&stops[0].color)
+    };
+
     let root_ref = sc.new_ref();
     let mut functions = vec![];
     let mut bounds = vec![];
     let mut encode = vec![];
-    let mut count = 0;
+
+    // /Bounds shall be strictly increasing (ISO 32000-2 §7.10.4, Table 41:
+    // "Bounds elements shall be in order of increasing value"). The `>=` guard
+    // below only compares each window's own pair, but `spread_coincident_offsets`
+    // nudges a coincident run symmetrically without regard to neighbouring
+    // distinct stops, so a nudged offset can overshoot a later distinct stop. An
+    // increasing adjacent window can then still push a `second.offset` that is
+    // <= a bound already emitted across a skipped window. Track the last bound
+    // pushed (starting at Domain0 = 0.0) and drop any window that fails to
+    // advance past it, so the retained bounds stay strictly increasing.
+    let mut last_bound = 0.0_f32;
 
     for window in stops.windows(2) {
         let (first, second) = (&window[0], &window[1]);
+
+        // Drop degenerate (zero- or negative-width) segments; see above.
+        if first.offset.get() >= second.offset.get() {
+            continue;
+        }
+
+        // Drop a window whose upper offset does not advance past the last
+        // retained bound; see `last_bound` above.
+        if second.offset.get() <= last_bound {
+            continue;
+        }
+        last_bound = second.offset.get();
+
         bounds.push(second.offset.get());
 
         let (c0_components, c1_components) = if use_opacities {
@@ -926,9 +974,13 @@ fn serialize_stitching(
             )
         };
 
-        count = c0_components.len();
-
-        let exp_ref = serialize_exponential(c0_components, c1_components, chunk, sc);
+        let exp_ref = serialize_exponential(
+            c0_components,
+            c1_components,
+            output_range.clone(),
+            chunk,
+            sc,
+        );
 
         functions.push(exp_ref);
         encode.extend([0.0, 1.0]);
@@ -937,7 +989,7 @@ fn serialize_stitching(
     bounds.pop();
     let mut stitching_function = chunk.stitching_function(root_ref);
     stitching_function.domain([0.0, 1.0]);
-    stitching_function.range([0.0, 1.0].repeat(count));
+    stitching_function.range(output_range);
     stitching_function.functions(functions);
     stitching_function.bounds(bounds);
     stitching_function.encode(encode);
@@ -945,9 +997,93 @@ fn serialize_stitching(
     root_ref
 }
 
+/// Spread runs of stops that share an offset into a sub-pixel ramp, so a CSS
+/// hard stop does not reach PDFium as a true discontinuity.
+///
+/// Per run, [`should_spread_run`] decides: an opacity (soft-mask) transition is
+/// always widened — a discontinuous opacity inside a soft-mask group makes
+/// PDFium subdivide without bound (~14 s for one masked box); a colour run is
+/// widened only when it is degenerate (all its stops share a colour, e.g. the
+/// constant black of an alpha-only `transparent`→`black` gradient), so a genuine
+/// colour hard stop (`red 50%, blue 50%`) stays an exact step — cheap for PDFium
+/// as a fill, and left for the caller's `>=` guard to collapse.
+///
+/// Widened runs are spread symmetrically about the shared offset by
+/// [`HARD_STOP_EPSILON`] and clamped to `[0, 1]`. The nudged offsets are then
+/// strictly increasing, except that any nudge reaching a boundary is clamped to
+/// `0.0` or `1.0`; a run crowded against a boundary can therefore leave two or
+/// more stops coincident at that boundary value, which the caller's `>=` guard
+/// then drops.
+fn spread_coincident_offsets(stops: &[Stop], use_opacities: bool) -> Vec<Stop> {
+    /// Spacing inserted between coincident stops — i.e. the ramp width produced
+    /// for a single hard stop — in normalised gradient space. Measured PDFium
+    /// soft-mask knee: a ramp ≤0.1% of the gradient still subdivides
+    /// pathologically (~20 s), whereas ≥0.2% rasterises in microseconds. 0.3%
+    /// sits comfortably past the knee while staying sub-pixel on typical masks
+    /// at print resolution (0.3% × 72 pt ≈ 0.9 px at 300 dpi).
+    const HARD_STOP_EPSILON: f32 = 3.0e-3;
+
+    let mut out = stops.to_vec();
+    let len = out.len();
+    let mut i = 0;
+    while i < len {
+        let offset = out[i].offset.get();
+        let mut j = i + 1;
+        while j < len && out[j].offset.get() == offset {
+            j += 1;
+        }
+        if j - i > 1 && should_spread_run(&out[i..j], use_opacities) {
+            let run = (j - i) as f32;
+            for (k, stop) in out[i..j].iter_mut().enumerate() {
+                let centred = k as f32 - (run - 1.0) / 2.0;
+                let nudged = (offset + centred * HARD_STOP_EPSILON).clamp(0.0, 1.0);
+                if let Some(value) = NormalizedF32::new(nudged) {
+                    stop.offset = value;
+                }
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+/// Whether a run of coincident-offset stops should be widened into a ramp
+/// rather than left as an exact step. See [`spread_coincident_offsets`].
+fn should_spread_run(run: &[Stop], use_opacities: bool) -> bool {
+    if use_opacities {
+        // Any opacity step inside a soft-mask group is the pathological case.
+        return true;
+    }
+    // A colour step is widened only when it carries no actual colour change, so
+    // a genuine hard colour stop stays exact.
+    run.iter().all(|stop| stop.color == run[0].color)
+}
+
+/// The `/Range` array — `[min, max]` for each output component — of a shading
+/// function whose output is a colour in `color`'s colour space. A function's
+/// output is clipped to `/Range` (ISO 32000-2 Table 38), and for a Type 4
+/// PostScript function `/Range` is required and fixes the output-component
+/// count (§7.10.5.3).
+///
+/// Every device, ICC and calibrated space krilla emits normalises each
+/// component to `[0, 1]`. Lab is the exception (ISO 32000-2 §8.6.5.4, Table 64):
+/// its `L*` component spans `[0, 100]` and its `a*`/`b*` components span the
+/// colour space's `Range` (default `[-100, 100]`). A flat `[0, 1]` range would
+/// clip a Lab function's output to the nearest boundary, collapsing every Lab
+/// stop to near-black.
+fn color_output_range(color: &Color) -> Vec<f32> {
+    if let Color::Regular(RegularColor::Lab { params, .. }) = color {
+        let [a_min, a_max, b_min, b_max] = params.range.unwrap_or([-100.0, 100.0, -100.0, 100.0]);
+        vec![0.0, 100.0, a_min, a_max, b_min, b_max]
+    } else {
+        [0.0, 1.0].repeat(color.to_pdf_color().len())
+    }
+}
+
 fn serialize_exponential(
     c0: Vec<f32>,
     c1: Vec<f32>,
+    range: Vec<f32>,
     chunk: &mut Chunk,
     sc: &mut SerializeContext,
 ) -> Ref {
@@ -957,15 +1093,147 @@ fn serialize_exponential(
         c1.len(),
         "cannot create gradient with stops from different color spaces"
     );
-    let num_components = c0.len();
 
     let mut exp = chunk.exponential_function(root_ref);
 
-    exp.range([0.0, 1.0].repeat(num_components));
+    exp.range(range);
     exp.c0(c0);
     exp.c1(c1);
     exp.domain([0.0, 1.0]);
     exp.n(1.0);
     exp.finish();
     root_ref
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graphics::color::rgb;
+
+    fn stop(offset: f32) -> Stop {
+        stop_rgb(offset, 0, 0, 0)
+    }
+
+    fn stop_rgb(offset: f32, r: u8, g: u8, b: u8) -> Stop {
+        Stop {
+            offset: NormalizedF32::new(offset).unwrap(),
+            color: rgb::Color::new(r, g, b).into(),
+            opacity: NormalizedF32::ONE,
+        }
+    }
+
+    fn offsets(stops: &[Stop]) -> Vec<f32> {
+        stops.iter().map(|s| s.offset.get()).collect()
+    }
+
+    fn assert_strictly_increasing(stops: &[Stop]) {
+        for pair in stops.windows(2) {
+            assert!(
+                pair[0].offset.get() < pair[1].offset.get(),
+                "offsets must be strictly increasing, got {:?}",
+                offsets(stops)
+            );
+        }
+    }
+
+    fn assert_non_decreasing(stops: &[Stop]) {
+        for pair in stops.windows(2) {
+            assert!(
+                pair[0].offset.get() <= pair[1].offset.get(),
+                "offsets must be non-decreasing, got {:?}",
+                offsets(stops)
+            );
+        }
+    }
+
+    #[test]
+    fn opacity_spread_separates_a_coincident_pair() {
+        // A CSS hard stop (`transparent 0 50%, black 50% 100%`) yields two stops
+        // at 0.5; without spreading they produce a duplicate Bounds entry.
+        let spread = spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)], true);
+        assert_eq!(spread.len(), 4);
+        assert_strictly_increasing(&spread);
+        // The ramp stays centred on the original offset and narrow.
+        assert!((spread[1].offset.get() - 0.5).abs() < 1.0e-2);
+        assert!((spread[2].offset.get() - 0.5).abs() < 1.0e-2);
+    }
+
+    #[test]
+    fn spread_leaves_distinct_offsets_untouched() {
+        let input = [stop(0.0), stop(0.49), stop(0.51), stop(1.0)];
+        assert_eq!(
+            offsets(&spread_coincident_offsets(&input, true)),
+            offsets(&input)
+        );
+    }
+
+    #[test]
+    fn opacity_spread_keeps_boundary_runs_in_range_and_ordered() {
+        // Coincident stops at both 0 and 1 must stay within [0, 1] yet ordered.
+        let spread = spread_coincident_offsets(&[stop(0.0), stop(0.0), stop(1.0), stop(1.0)], true);
+        assert_strictly_increasing(&spread);
+        assert!(spread.first().unwrap().offset.get() >= 0.0);
+        assert!(spread.last().unwrap().offset.get() <= 1.0);
+    }
+
+    #[test]
+    fn colour_spread_widens_a_degenerate_step() {
+        // An alpha-only gradient is constant black; its coincident colour stops
+        // carry no colour change, so the colour shading is widened too (a step
+        // there is needless and PDFium subdivides it inside a soft-mask group).
+        let spread =
+            spread_coincident_offsets(&[stop(0.0), stop(0.5), stop(0.5), stop(1.0)], false);
+        assert_strictly_increasing(&spread);
+    }
+
+    #[test]
+    fn colour_spread_keeps_a_genuine_hard_stop_exact() {
+        // `red 50%, blue 50%` is a real colour discontinuity: it must stay an
+        // exact step (cheap for PDFium as a fill), so the offsets are untouched.
+        let input = [
+            stop_rgb(0.0, 255, 0, 0),
+            stop_rgb(0.5, 255, 0, 0),
+            stop_rgb(0.5, 0, 0, 255),
+            stop_rgb(1.0, 0, 0, 255),
+        ];
+        assert_eq!(
+            offsets(&spread_coincident_offsets(&input, false)),
+            offsets(&input)
+        );
+    }
+
+    #[test]
+    fn opacity_spread_boundary_run_of_three_stays_non_decreasing_in_range() {
+        // A run of three coincident stops at a boundary cannot stay strictly
+        // increasing after clamping: the centred nudges reach the boundary and
+        // collapse onto it (three at 1.0 -> [0.997, 1.0, 1.0]). The result must
+        // still be non-decreasing and within [0, 1]; the caller's `>=` guard
+        // drops the collapsed segment.
+        let at_zero = [stop(0.0), stop(0.0), stop(0.0), stop(1.0)];
+        let at_one = [stop(0.0), stop(1.0), stop(1.0), stop(1.0)];
+        for run in [at_zero.as_slice(), at_one.as_slice()] {
+            let spread = spread_coincident_offsets(run, true);
+            assert_non_decreasing(&spread);
+            assert!(spread.first().unwrap().offset.get() >= 0.0);
+            assert!(spread.last().unwrap().offset.get() <= 1.0);
+        }
+    }
+
+    #[test]
+    fn sanitize_keeps_uniform_rgb_gradient_with_black_endpoint() {
+        // preserve_black resolves a pure-black RGB stop to DeviceRGB while its
+        // non-black neighbours resolve to sRGB under no_device_cs. That is one
+        // colour model, not a mix: the white stop must keep its colour rather
+        // than be coerced to the first (black) stop's colour.
+        let mut sc = SerializeContext::new(crate::SerializeSettings {
+            preserve_black: true,
+            no_device_cs: true,
+            ..crate::SerializeSettings::default()
+        });
+        let stops = [stop_rgb(0.0, 0, 0, 0), stop_rgb(1.0, 255, 255, 255)];
+        let sanitized = sanitize_gradient_stops(&stops, &mut sc);
+        assert_eq!(sanitized.len(), 2);
+        assert_eq!(sanitized[0].color, stops[0].color);
+        assert_eq!(sanitized[1].color, stops[1].color);
+    }
 }
