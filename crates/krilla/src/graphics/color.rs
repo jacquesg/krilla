@@ -860,16 +860,26 @@ impl RegularColor {
                 CieBasedColorSpace::CalRgb(CalRgbColorSpace(*params)).into()
             }
             Self::CalGray { params, .. } => {
-                // CalGray is a single-component grey space. PDF/X-1a's
-                // CMYK-only check does not fire for grey content
-                // (DeviceGray fallback is unconditional), so no
-                // validation error is registered here.
+                // PDF/X-1a (ISO 15930-4) admits only DeviceGray, DeviceCMYK
+                // and Separation/DeviceN content — CIE-based spaces are
+                // forbidden. CalGray is a *calibrated* (CIE-based) grey, not
+                // DeviceGray, so it is caught by the same `requires_cmyk_only`
+                // rule as the other CIE-based paints. Emission proceeds via the
+                // inline `[/CalGray <<…>>]` colour-space array.
+                if sc.serialize_settings().validators().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
                 CieBasedColorSpace::CalGray(CalGrayColorSpace(*params)).into()
             }
             Self::Lab { params, .. } => {
-                // Lab is device-independent and addressable by
-                // PDF/X-1a; the validator does not flag it as
-                // RGB-equivalent.
+                // Lab is a CIE-based space, which PDF/X-1a (ISO 15930-4) forbids
+                // for content — only DeviceGray/DeviceCMYK/Separation/DeviceN
+                // are permitted. It is caught by the same `requires_cmyk_only`
+                // rule as the other CIE-based paints. Emission proceeds via the
+                // inline `[/Lab <<…>>]` array.
+                if sc.serialize_settings().validators().requires_cmyk_only() {
+                    sc.register_validation_error(ValidationError::ContainsRgb(sc.location));
+                }
                 CieBasedColorSpace::Lab(LabColorSpace(*params)).into()
             }
         }

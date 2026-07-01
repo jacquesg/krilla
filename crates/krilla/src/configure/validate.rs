@@ -161,11 +161,13 @@ pub enum ValidationError {
     /// [`SerializeSettings::external_output_profile`]:
     /// crate::SerializeSettings::external_output_profile
     ExternalOutputProfileUnsupportedByValidator,
-    /// The PDF contains an RGB color, which is forbidden by PDF/X-1a.
+    /// The PDF contains a colour in a space forbidden by PDF/X-1a.
     ///
-    /// Occurs if an RGB color was used in fills, strokes, gradients, images,
-    /// or separation fallback colors when exporting to PDF/X-1a. Grayscale
-    /// colors are permitted.
+    /// PDF/X-1a (ISO 15930-4) admits only DeviceGray, DeviceCMYK and
+    /// Separation/DeviceN content. This is raised for DeviceRGB and for the
+    /// CIE-based spaces (CalRGB, CalGray, Lab and ICCBased) when used in fills,
+    /// strokes, gradients, images, or separation fallback colours. DeviceGray
+    /// is permitted.
     ContainsRgb(Option<Location>),
     /// The PDF contains a DeviceN colour space, which is forbidden by
     /// PDF/A-1 (ISO 19005-1 §6.2.4). PDF/A-2 onward and every PDF/X

@@ -1651,6 +1651,65 @@ fn validate_pdf_x1a_no_rgb() {
 }
 
 #[test]
+fn validate_pdf_x1a_rejects_cie_based_colour() {
+    use krilla::color::{CalGrayParams, Color, LabParams, RegularColor};
+    use krilla::num::NormalizedF32;
+    use krilla::paint::Fill;
+
+    // PDF/X-1a (ISO 15930-4) admits only DeviceGray/DeviceCMYK/Separation/
+    // DeviceN content; the CIE-based CalGray and Lab paints are forbidden and
+    // must surface the forbidden-colour signal, like CalRGB and ICCBased.
+    let cal_gray: Color = RegularColor::cal_gray(
+        CalGrayParams {
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: None,
+            gamma: Some(2.2),
+        },
+        0.5,
+    )
+    .into();
+    let lab: Color = RegularColor::lab(
+        LabParams {
+            white_point: [0.9505, 1.0, 1.089],
+            black_point: None,
+            range: Some([-128.0, 127.0, -128.0, 127.0]),
+        },
+        [50.0, 20.0, -30.0],
+    )
+    .into();
+
+    for color in [cal_gray, lab] {
+        let mut document = Document::new_with(settings_36());
+        let mut page = document.start_page_with(pdfx_page_settings());
+        let mut surface = page.surface();
+        surface.set_fill(Some(Fill {
+            paint: color.into(),
+            opacity: NormalizedF32::ONE,
+            rule: Default::default(),
+        }));
+        surface.draw_path(&rect_to_path(0.0, 0.0, 50.0, 50.0));
+        surface.finish();
+        page.finish();
+        document.set_metadata(
+            Metadata::new()
+                .language("en".to_string())
+                .creation_date(DateTime::new(2001))
+                .title("PDF/X-1a".to_string()),
+        );
+
+        match document.finish() {
+            Err(KrillaError::Validation(errors)) => assert!(
+                errors
+                    .iter()
+                    .any(|(e, _)| matches!(e, ValidationError::ContainsRgb(_))),
+                "a CIE-based colour must be rejected under PDF/X-1a"
+            ),
+            other => panic!("expected ContainsRgb error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
 fn validate_pdf_x1a_no_rgb_image() {
     use krilla::image::Image;
 
