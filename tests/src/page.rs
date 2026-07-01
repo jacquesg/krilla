@@ -6,7 +6,7 @@ use krilla::Document;
 use krilla_macros::{snapshot, visreg};
 use tiny_skia_path::PathBuilder;
 
-use crate::{blue_fill, green_fill, load_pdf, purple_fill, rect_to_path, red_fill};
+use crate::{blue_fill, green_fill, load_pdf, load_png_image, purple_fill, rect_to_path, red_fill};
 
 fn media_box_impl(d: &mut Document, media_box: Rect) {
     let mut page = d.start_page_with(
@@ -94,4 +94,26 @@ fn page_media_box_bottom_right(d: &mut Document) {
 #[visreg(document)]
 fn page_media_box_zoomed_out(d: &mut Document) {
     media_box_impl(d, Rect::from_xywh(-150.0, -200.0, 500.0, 500.0).unwrap())
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// [`Page::set_thumbnail`] must register the image and emit a `/Thumb`
+/// entry in the page dictionary (ISO 32000-2 §12.3.4).
+#[test]
+fn page_set_thumbnail_emits_thumb() {
+    let mut document = Document::new();
+    let mut page = document.start_page_with(PageSettings::from_wh(200.0, 200.0).unwrap());
+    page.set_thumbnail(load_png_image("rgb8.png"));
+    let surface = page.surface();
+    surface.finish();
+    page.finish();
+
+    let pdf = document.finish().expect("finish should succeed");
+    assert!(
+        contains(&pdf, b"/Thumb"),
+        "page dictionary should carry a /Thumb entry",
+    );
 }
