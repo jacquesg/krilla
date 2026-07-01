@@ -1,7 +1,6 @@
 use skrifa::color::{Brush, ColorPainter, ColorStop, CompositeMode};
 use skrifa::outline::DrawSettings;
 use skrifa::raw::types::BoundingBox;
-use skrifa::raw::TableProvider;
 use skrifa::MetadataProvider;
 use tiny_skia_path::{Path, PathBuilder};
 
@@ -240,19 +239,38 @@ impl ColrBuilder {
 }
 
 impl ColrBuilder {
+    /// Resolve a per-glyph CPAL palette index into an RGBA colour.
+    ///
+    /// Per OpenType `CPAL` §5.7.11.1 each palette locates its colours
+    /// through the explicit `colorRecordIndices[palette]` array, and
+    /// palettes may share or overlap colour records — so a palette's
+    /// base is not `palette * num_palette_entries`. krilla therefore
+    /// delegates palette resolution to skrifa's `color_palettes`,
+    /// selecting the palette from [`Font::palette_base`] — embedders
+    /// authoring a non-default `font-palette` construct a distinct
+    /// [`Font`] instance per palette so the per-draw-call surface
+    /// remains palette-free.
+    ///
+    /// Out-of-range palette selections fall back to palette `0` so a
+    /// misconfigured cascade still produces visible glyphs instead of
+    /// silently dropping the glyph; `palette_index == u16::MAX`
+    /// continues to resolve to the [`Self::context_color`] foreground.
     fn palette_index_to_color(
         &self,
         palette_index: u16,
         alpha: f32,
     ) -> Option<(rgb::Color, NormalizedF32)> {
         if palette_index != u16::MAX {
-            let color = self
-                .font
-                .font_ref()
-                .cpal()
-                .ok()?
-                .color_records_array()?
-                .ok()?[palette_index as usize];
+            // Resolve the palette through skrifa, which honours the CPAL
+            // `colorRecordIndices[palette]` array (palettes may share or
+            // overlap colour records). An out-of-range palette base
+            // falls back to palette `0` so the glyph still draws with a
+            // defined colour.
+            let palettes = self.font.font_ref().color_palettes();
+            let palette = palettes
+                .get(self.font.palette_base())
+                .or_else(|| palettes.get(0))?;
+            let color = palette.colors().get(usize::from(palette_index))?;
 
             Some((
                 rgb::Color::new(color.red, color.green, color.blue),

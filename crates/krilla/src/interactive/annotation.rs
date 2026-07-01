@@ -513,6 +513,69 @@ impl Annotation {
         }
     }
 
+    /// Create a new sound annotation per ISO 32000-2 §12.5.6.16.
+    ///
+    /// The annotation embeds an audio stream and displays a speaker /
+    /// microphone glyph (or author-defined name) at the annotation
+    /// rectangle; activating the glyph plays back the audio. The alt
+    /// text may be required by certain export profiles (e.g. PDF/UA).
+    /// See [`SoundAnnotation`] for the available fields.
+    pub fn new_sound(annotation: SoundAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Sound(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
+    /// Create a new movie annotation per ISO 32000-2 §12.5.6.17.
+    ///
+    /// PDF 2.0 deprecates the `/Movie` subtype in favour of
+    /// [`Annotation::new_screen`] + a rendition action; the variant
+    /// remains supported for legacy viewer parity. See
+    /// [`MovieAnnotation`] for the available fields.
+    pub fn new_movie(annotation: MovieAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Movie(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
+    /// Create a new screen annotation per ISO 32000-2 §12.5.6.18.
+    ///
+    /// Screen annotations are the rich-media container the PDF 2.0
+    /// rendition framework targets. The annotation itself is a passive
+    /// rectangle; full rendition wiring (`/A` rendition action,
+    /// `/MediaClip` dictionaries) is the embedder's concern. See
+    /// [`ScreenAnnotation`] for the available fields.
+    pub fn new_screen(annotation: ScreenAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Screen(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
+    /// Create a new rubber-stamp annotation per ISO 32000-2 §12.5.6.12.
+    ///
+    /// Stamp annotations display a predefined or author-defined stamp
+    /// glyph (Approved, Confidential, Draft, …) over the annotation
+    /// rectangle. The alt text may be required by certain export
+    /// profiles (e.g. PDF/UA). See [`StampAnnotation`] for the
+    /// available fields.
+    pub fn new_stamp(annotation: StampAnnotation, alt_text: Option<String>) -> Self {
+        Self {
+            annotation_type: AnnotationType::Stamp(annotation),
+            alt: alt_text,
+            struct_parent: None,
+            location: None,
+        }
+    }
+
     /// Sets the location of the annotation.
     pub fn with_location(mut self, location: Option<Location>) -> Self {
         self.location = location;
@@ -587,6 +650,50 @@ impl From<FileAttachmentAnnotation> for Annotation {
     fn from(value: FileAttachmentAnnotation) -> Self {
         Self {
             annotation_type: AnnotationType::FileAttachment(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<StampAnnotation> for Annotation {
+    fn from(value: StampAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Stamp(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<SoundAnnotation> for Annotation {
+    fn from(value: SoundAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Sound(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<MovieAnnotation> for Annotation {
+    fn from(value: MovieAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Movie(value),
+            alt: None,
+            struct_parent: None,
+            location: None,
+        }
+    }
+}
+
+impl From<ScreenAnnotation> for Annotation {
+    fn from(value: ScreenAnnotation) -> Self {
+        Self {
+            annotation_type: AnnotationType::Screen(value),
             alt: None,
             struct_parent: None,
             location: None,
@@ -756,6 +863,62 @@ impl Annotation {
             _ => None,
         };
 
+        // Sound annotations carry their audio payload as a separate
+        // sound stream object referenced from `/Sound`. Allocate the
+        // ref + emit the stream up front so the annotation dict can
+        // name it; analogous to the FileAttachment `/FS` wiring.
+        let sound_stream_ref: Option<Ref> = match &self.annotation_type {
+            AnnotationType::Sound(s) => {
+                let stream_ref = sc.new_ref();
+                let mut chunk = Chunk::new();
+                {
+                    let mut stream = chunk.stream(stream_ref, &s.audio_bytes);
+                    // Sound object stream dictionary entries per ISO
+                    // 32000-2 §13.3 Table 305: `/Type /Sound`, `/R`
+                    // sample rate, `/C` channels, `/B` bits/sample,
+                    // `/E` encoding. Values are written verbatim from
+                    // the [`SoundAnnotation`] fields.
+                    stream.pair(Name(b"Type"), Name(b"Sound"));
+                    stream.pair(Name(b"R"), s.sample_rate);
+                    stream.pair(Name(b"C"), i32::from(s.channels));
+                    stream.pair(Name(b"B"), i32::from(s.bits_per_sample));
+                    stream.pair(Name(b"E"), Name(s.format.as_pdf_name()));
+                    stream.finish();
+                }
+                // Sound streams piggyback on the `x_objects` chunk
+                // bucket — both are indirect-stream chunks the
+                // remapper threads through `ChunkContainer::finish`
+                // without any container-side type discrimination.
+                chunk_container.streams.x_objects.push(chunk);
+                Some(stream_ref)
+            }
+            _ => None,
+        };
+
+        // Signature-field `/Lock` (`SigFieldLock`) dictionaries shall be
+        // an indirect reference, not an inline dictionary (ISO 32000-2
+        // §12.7.5.5 Table 235: the `/Lock` entry "shall be an indirect
+        // reference"). Emit the dictionary as its own indirect object up
+        // front — mirroring `/FS` and `/Sound` — so the widget's `/Lock`
+        // entry can name it. Written into the annotations chunk before
+        // the widget dict opens so the borrow of `chunk_container` stays
+        // acyclic.
+        let signature_lock_ref: Option<Ref> = match &self.annotation_type {
+            AnnotationType::Widget(w) => match &w.field {
+                WidgetField::Signature(sig) if !matches!(sig.lock, SignatureLock::None) => {
+                    let lock_ref = sc.new_ref();
+                    write_sig_field_lock(
+                        &mut chunk_container.non_stream.annotations,
+                        lock_ref,
+                        &sig.lock,
+                    );
+                    Some(lock_ref)
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+
         let chunk = &mut chunk_container.non_stream.annotations;
         let mut annotation = chunk
             .indirect(root_ref)
@@ -769,9 +932,21 @@ impl Annotation {
             annotation.pair(Name(b"FS"), fs_ref);
         }
 
-        let appearance_job = self
-            .annotation_type
-            .serialize_type(sc, &mut annotation, page_height, widget_icon_refs)?;
+        // Wire the pre-resolved signature-field lock ref onto the widget
+        // dict. ISO 32000-2 §12.7.5.5 Table 235 requires `/Lock` to be an
+        // indirect reference; the dictionary object itself was emitted
+        // above.
+        if let Some(lock_ref) = signature_lock_ref {
+            annotation.pair(Name(b"Lock"), lock_ref);
+        }
+
+        let appearance_job = self.annotation_type.serialize_type(
+            sc,
+            &mut annotation,
+            page_height,
+            widget_icon_refs,
+            sound_stream_ref,
+        )?;
 
         // Link annotations get /F Print only when borderless (nothing visible
         // leaks into print) or when a validator forces it (PDF/A); a link with a
@@ -989,6 +1164,17 @@ pub enum AnnotationType {
     Widget(WidgetAnnotation),
     /// A file-attachment annotation (ISO 32000-2 §12.5.6.15).
     FileAttachment(FileAttachmentAnnotation),
+    /// A rubber-stamp annotation (ISO 32000-2 §12.5.6.12).
+    Stamp(StampAnnotation),
+    /// A sound annotation (ISO 32000-2 §12.5.6.16).
+    Sound(SoundAnnotation),
+    /// A movie annotation (ISO 32000-2 §12.5.6.17). Deprecated in
+    /// PDF 2.0 in favour of [`AnnotationType::Screen`] + a rendition
+    /// action.
+    Movie(MovieAnnotation),
+    /// A screen annotation (ISO 32000-2 §12.5.6.18) — rich-media
+    /// container targeted by rendition actions.
+    Screen(ScreenAnnotation),
 }
 
 impl AnnotationType {
@@ -1000,6 +1186,10 @@ impl AnnotationType {
             AnnotationType::Markup(m) => m.rect,
             AnnotationType::Widget(w) => w.rect,
             AnnotationType::FileAttachment(f) => f.rect,
+            AnnotationType::Stamp(s) => s.rect,
+            AnnotationType::Sound(s) => s.rect,
+            AnnotationType::Movie(m) => m.rect,
+            AnnotationType::Screen(s) => s.rect,
         }
     }
 
@@ -1011,12 +1201,15 @@ impl AnnotationType {
     /// Widget annotations have no `contents` field and return `None`.
     pub(crate) fn contents(&self) -> Option<&str> {
         match self {
-            AnnotationType::Link(l) => l.border.as_ref().map(|b| &b.color),
-            AnnotationType::Text(t) => t.color.as_ref(),
-            AnnotationType::Markup(m) => m.color.as_ref(),
-            AnnotationType::Widget(_) => None,
-            // FileAttachment annotations carry no `/C` colour entry.
-            AnnotationType::FileAttachment(_) => None,
+            AnnotationType::Text(t) => t.contents.as_deref(),
+            AnnotationType::Markup(m) => m.contents.as_deref(),
+            AnnotationType::FileAttachment(f) => f.contents.as_deref(),
+            AnnotationType::Stamp(s) => s.contents.as_deref(),
+            AnnotationType::Sound(s) => s.contents.as_deref(),
+            AnnotationType::Movie(m) => m.contents.as_deref(),
+            AnnotationType::Screen(s) => s.contents.as_deref(),
+            // Link and Widget annotations carry no `/Contents` of their own.
+            AnnotationType::Link(_) | AnnotationType::Widget(_) => None,
         }
     }
 
@@ -1026,6 +1219,7 @@ impl AnnotationType {
         annotation: &mut pdf_writer::writers::Annotation,
         page_height: f32,
         widget_icon_refs: WidgetIconRefs,
+        sound_stream_ref: Option<Ref>,
     ) -> KrillaResult<Option<AppearanceJob>> {
         match self {
             AnnotationType::Link(l) => l.serialize_type(sc, annotation, page_height),
@@ -1035,6 +1229,19 @@ impl AnnotationType {
                 w.serialize_type(sc, annotation, page_height, widget_icon_refs)
             }
             AnnotationType::FileAttachment(f) => f.serialize_type(sc, annotation, page_height),
+            AnnotationType::Stamp(s) => s.serialize_type(sc, annotation, page_height),
+            AnnotationType::Sound(s) => {
+                // The sound stream ref is pre-resolved by the outer
+                // `Annotation::serialize` so the annotation dict can
+                // name it via `/Sound`. The branch is unreachable
+                // without a matching pre-resolution above; the
+                // `expect` documents the invariant.
+                let stream_ref = sound_stream_ref
+                    .expect("sound annotation must carry a pre-allocated stream ref");
+                s.serialize_type(sc, annotation, page_height, stream_ref)
+            }
+            AnnotationType::Movie(m) => m.serialize_type(sc, annotation, page_height),
+            AnnotationType::Screen(s) => s.serialize_type(sc, annotation, page_height),
         }
     }
 }
@@ -1083,6 +1290,7 @@ pub struct LinkBorder {
     pub(crate) width: f32,
     pub(crate) color: Color,
     pub(crate) style: Option<LinkBorderStyle>,
+    pub(crate) dash_array: Option<Vec<f32>>,
 }
 
 impl LinkBorder {
@@ -1091,7 +1299,12 @@ impl LinkBorder {
     /// `width`: The width of the border in pt.
     /// `color`: The color of the border.
     pub fn new(width: f32, color: Color) -> Self {
-        Self { width, color, style: None }
+        Self {
+            width,
+            color,
+            style: None,
+            dash_array: None,
+        }
     }
 
     /// Set the `/BS << /S … >>` style code. When set, the resulting
@@ -1101,6 +1314,27 @@ impl LinkBorder {
     /// array is emitted.
     pub fn with_style(mut self, style: LinkBorderStyle) -> Self {
         self.style = Some(style);
+        self
+    }
+
+    /// Override the `/BS /D` dash pattern array emitted when the
+    /// border style is [`LinkBorderStyle::Dashed`] (ISO 32000-2
+    /// §12.5.4 Table 168). Krilla's default emission is `[3 3]`,
+    /// which corresponds to a CSS `dashed` border; CSS `dotted`
+    /// link borders are conventionally projected onto a tighter
+    /// `[1 1]` pattern, and PDF generators may carry richer
+    /// patterns (`[2 1]`, `[4 2 1 2]`, …) sourced from CSS
+    /// `border-style`-equivalent author input.
+    ///
+    /// The override is honoured only when [`with_style`] has been
+    /// called with [`LinkBorderStyle::Dashed`]; other styles ignore
+    /// `/D` per the spec. The dash array must contain at least one
+    /// entry; an empty array is silently dropped at serialisation
+    /// time and falls back to the krilla default.
+    ///
+    /// [`with_style`]: Self::with_style
+    pub fn with_dash_array(mut self, dash_array: Vec<f32>) -> Self {
+        self.dash_array = Some(dash_array);
         self
     }
 }
@@ -1265,16 +1499,31 @@ impl LinkAnnotation {
         if let Some(border) = &self.border {
             write_color(annotation, &border.color);
             // ISO 32000-2 §12.5.4 — `/BS << /Type /Border /W /S [/D]
-            // >>`. PDF 1.6+ viewers prefer the `/BS` sub-dictionary
-            // over the legacy `/Border` array; krilla emits both so
-            // older readers continue to see the border width.
-            if let Some(style) = border.style {
-                let mut bs = annotation.border_style();
-                bs.width(border.width).style(style.to_pdf());
-                // Dashed borders need a `/D` pattern array (default
-                // `[3 3]`); other styles ignore the entry.
-                if matches!(style, LinkBorderStyle::Dashed) {
-                    bs.dashes([3.0_f32, 3.0_f32]);
+            // >>`. Table 176 introduces the `/BS` sub-dictionary for
+            // link annotations at PDF 1.6, so gate it on the configured
+            // version (matching the `/QuadPoints` gate below); sub-1.6
+            // targets keep the `/Border` array's width and drop only
+            // the 1.6-only style / dash detail.
+            if sc.serialize_settings().pdf_version() >= PdfVersion::Pdf16 {
+                if let Some(style) = border.style {
+                    let mut bs = annotation.border_style();
+                    bs.width(border.width).style(style.to_pdf());
+                    // Dashed borders need a `/D` pattern array; other
+                    // styles ignore the entry. When the embedder has
+                    // supplied an explicit pattern (e.g. `[1 1]` for a
+                    // CSS `dotted` link border) honour it; otherwise
+                    // fall back to the krilla default `[3 3]`.
+                    if matches!(style, LinkBorderStyle::Dashed) {
+                        match border.dash_array.as_deref() {
+                            Some(pattern) if !pattern.is_empty() => {
+                                bs.dashes(pattern.iter().copied());
+                            }
+                            _ => {
+                                bs.dashes([3.0_f32, 3.0_f32]);
+                            }
+                        }
+                    }
+                    bs.finish();
                 }
             }
         }
@@ -1355,6 +1604,7 @@ pub struct TextAnnotation {
     pub(crate) open: bool,
     pub(crate) creation_date: Option<String>,
     pub(crate) modification_date: Option<String>,
+    pub(crate) subject: Option<String>,
 }
 
 impl TextAnnotation {
@@ -1372,12 +1622,20 @@ impl TextAnnotation {
             open: false,
             creation_date: None,
             modification_date: None,
+            subject: None,
         }
     }
 
     /// Set the `/Contents` text — the body of the pop-up.
     pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
         self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the annotation subject line per
+    /// ISO 32000-2 §12.5.6.2 Table 172. PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
         self
     }
 
@@ -1462,6 +1720,10 @@ impl TextAnnotation {
             self.modification_date.as_deref(),
         );
 
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
+
         Ok(None)
     }
 }
@@ -1516,6 +1778,7 @@ pub struct MarkupAnnotation {
     pub(crate) color: Option<Color>,
     pub(crate) creation_date: Option<String>,
     pub(crate) modification_date: Option<String>,
+    pub(crate) subject: Option<String>,
 }
 
 impl MarkupAnnotation {
@@ -1570,6 +1833,7 @@ impl MarkupAnnotation {
             color: None,
             creation_date: None,
             modification_date: None,
+            subject: None,
         }
     }
 
@@ -1582,6 +1846,13 @@ impl MarkupAnnotation {
     /// Set the `/T` text — the title bar of the markup pop-up.
     pub fn with_title(mut self, title: impl Into<String>) -> Self {
         self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the annotation subject line per
+    /// ISO 32000-2 §12.5.6.2 Table 172. PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
         self
     }
 
@@ -1652,6 +1923,10 @@ impl MarkupAnnotation {
             self.creation_date.as_deref(),
             self.modification_date.as_deref(),
         );
+
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
 
         Ok(None)
     }
@@ -1754,9 +2029,11 @@ impl FileAttachmentAnnotation {
     }
 
     /// Set the `/Contents` text — the body of the pop-up shown when
-    /// the user hovers over or activates the annotation. If the
-    /// embedder also sets an `alt_text` on [`Annotation::new_file_attachment`]
-    /// the outer alt-text wins (it is written after `/Contents` here).
+    /// the user hovers over or activates the annotation. This owns the
+    /// annotation's single `/Contents` key; an `alt_text` supplied on
+    /// [`Annotation::new_file_attachment`] is used only as a fallback
+    /// when no `/Contents` is set here, so the dictionary never carries
+    /// two `/Contents` keys.
     pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
         self.contents = Some(contents.into());
         self
@@ -1821,6 +2098,668 @@ impl FileAttachmentAnnotation {
             self.creation_date.as_deref(),
             self.modification_date.as_deref(),
         );
+
+        Ok(None)
+    }
+}
+
+/// `/Name` (icon) keyword on a [`StampAnnotation`] per ISO 32000-2
+/// §12.5.6.12 Table 184. The keyword selects one of the predefined
+/// rubber-stamp glyphs every conforming PDF reader provides
+/// (Approved, Confidential, Draft, Final, …) or, via [`Self::Custom`],
+/// an author-defined name string for an embedder-supplied stamp
+/// appearance.
+///
+/// The default ([`Self::Draft`]) matches the spec's "no explicit
+/// `/Name` shall default to Draft" behaviour for stamp annotations.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub enum StampIcon {
+    /// `/Approved` — green checkmark.
+    Approved,
+    /// `/AsIs` — slanted "AS IS" label.
+    AsIs,
+    /// `/Confidential` — red "CONFIDENTIAL" label.
+    Confidential,
+    /// `/Departmental` — blue "DEPARTMENTAL" label.
+    Departmental,
+    /// `/Draft` — red "DRAFT" label. Default per ISO 32000-2 §12.5.6.12.
+    #[default]
+    Draft,
+    /// `/Experimental` — blue "EXPERIMENTAL" label.
+    Experimental,
+    /// `/Expired` — red "EXPIRED" label.
+    Expired,
+    /// `/Final` — green "FINAL" label.
+    Final,
+    /// `/ForComment` — green "FOR COMMENT" label.
+    ForComment,
+    /// `/ForPublicRelease` — green "FOR PUBLIC RELEASE" label.
+    ForPublicRelease,
+    /// `/NotApproved` — red "NOT APPROVED" label.
+    NotApproved,
+    /// `/NotForPublicRelease` — red "NOT FOR PUBLIC RELEASE" label.
+    NotForPublicRelease,
+    /// `/Sold` — blue "SOLD" label.
+    Sold,
+    /// `/TopSecret` — red "TOP SECRET" label.
+    TopSecret,
+    /// Author-defined name. The string is emitted verbatim as the
+    /// `/Name` value; the embedder is responsible for accompanying it
+    /// with an `/AP` appearance stream so viewers without a built-in
+    /// rendering for the name still display the stamp.
+    Custom(String),
+}
+
+impl StampIcon {
+    /// Project onto the bytes the `/Name` entry will carry. Returns a
+    /// borrowed slice that lives as long as `self` so the caller can
+    /// forward it into a `pdf_writer::Name`.
+    pub fn as_pdf_name(&self) -> &[u8] {
+        match self {
+            Self::Approved => b"Approved",
+            Self::AsIs => b"AsIs",
+            Self::Confidential => b"Confidential",
+            Self::Departmental => b"Departmental",
+            Self::Draft => b"Draft",
+            Self::Experimental => b"Experimental",
+            Self::Expired => b"Expired",
+            Self::Final => b"Final",
+            Self::ForComment => b"ForComment",
+            Self::ForPublicRelease => b"ForPublicRelease",
+            Self::NotApproved => b"NotApproved",
+            Self::NotForPublicRelease => b"NotForPublicRelease",
+            Self::Sold => b"Sold",
+            Self::TopSecret => b"TopSecret",
+            Self::Custom(name) => name.as_bytes(),
+        }
+    }
+}
+
+/// A rubber-stamp annotation per ISO 32000-2 §12.5.6.12.
+///
+/// Stamp annotations display a predefined or author-defined rubber-
+/// stamp glyph over the annotation rectangle. Conforming PDF readers
+/// supply a built-in appearance for every standard `/Name` keyword
+/// (Approved, Draft, Confidential, …); for [`StampIcon::Custom`]
+/// names the embedder is expected to also supply an `/AP` appearance
+/// stream — krilla does not synthesise one.
+///
+/// Build with [`StampAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_stamp`]
+/// or [`From<StampAnnotation>`].
+pub struct StampAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) icon: StampIcon,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) subject: Option<String>,
+    /// `/IT` (intent) entry per ISO 32000-2 §12.5.6.2. Stamp
+    /// annotations admit `/StampImage` and `/StampSnapshot` intents;
+    /// the embedder may also pass an author-defined intent string.
+    pub(crate) intent: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl StampAnnotation {
+    /// Create a new stamp annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; krilla applies the
+    /// same page-root transform as the other annotation kinds. `icon`
+    /// selects the predefined or author-defined stamp glyph.
+    pub fn new(rect: Rect, icon: StampIcon) -> Self {
+        Self {
+            rect,
+            icon,
+            contents: None,
+            title: None,
+            subject: None,
+            intent: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the stamp pop-up. Used
+    /// by assistive technology as the alternate description for a
+    /// custom stamp without an `/AP` appearance.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the stamp pop-up.
+    /// Typically the author's name.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Subj` entry — the stamp subject line per ISO 32000-2
+    /// §12.5.6.2 Table 172 (the field is shared across markup-style
+    /// annotations including stamps). PDF 1.5+.
+    pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
+        self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the `/IT` (intent) entry per ISO 32000-2 §12.5.6.12 Table
+    /// 184. The two spec-defined values are `/StampImage` (the stamp
+    /// renders an image annotation glyph) and `/StampSnapshot` (the
+    /// stamp captures a snapshot of underlying page content); custom
+    /// names are admitted but only round-trip through readers that
+    /// recognise them. The string is emitted verbatim as a PDF name.
+    pub fn with_intent(mut self, intent: impl Into<String>) -> Self {
+        self.intent = Some(intent.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — the date the annotation was
+    /// created, formatted as a PDF date string per ISO 32000-2 §7.9.4
+    /// (e.g. `D:20260515120000Z`). The caller is responsible for
+    /// constructing a syntactically valid date string; krilla emits
+    /// the value verbatim as a literal string.
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` entry — the date the annotation was last modified,
+    /// formatted as a PDF date string per ISO 32000-2 §7.9.4. The
+    /// caller is responsible for constructing a syntactically valid
+    /// date string; krilla emits the value verbatim as a literal
+    /// string.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // `/Subtype /Stamp` per ISO 32000-2 §12.5.6.12. The
+        // pdf-writer crate's typed AnnotationType enum doesn't yet
+        // model Stamp, so write the name directly via the dict
+        // surface.
+        annotation.pair(Name(b"Subtype"), Name(b"Stamp"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        // `/Name` (icon) — the keyword selects the predefined stamp
+        // glyph; custom names rely on an embedder-supplied `/AP`
+        // stream. Table 184 (§12.5.6.12): if `/IT` is present and its
+        // value is not `Stamp`, `/Name` shall not be present.
+        if self.intent.as_deref().is_none_or(|it| it == "Stamp") {
+            annotation.pair(Name(b"Name"), Name(self.icon.as_pdf_name()));
+        }
+
+        if let Some(intent) = &self.intent {
+            annotation.pair(Name(b"IT"), Name(intent.as_bytes()));
+        }
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        if let Some(subject) = &self.subject {
+            annotation.subject(TextStr(subject));
+        }
+
+        Ok(None)
+    }
+}
+
+/// `/Name` (icon) keyword on a [`SoundAnnotation`] per ISO 32000-2
+/// §12.5.6.16 Table 188. Conforming readers display the corresponding
+/// glyph at the annotation rectangle; activating the icon plays the
+/// embedded sound stream.
+#[derive(Clone, Debug, Eq, PartialEq, Default)]
+pub enum SoundIcon {
+    /// `/Speaker` — speaker glyph. Default per ISO 32000-2 §12.5.6.16.
+    #[default]
+    Speaker,
+    /// `/Mic` — microphone glyph.
+    Mic,
+    /// Author-defined name. The string is emitted verbatim as the
+    /// `/Name` value; embedders supplying a custom name should also
+    /// supply an `/AP` appearance stream.
+    Custom(String),
+}
+
+impl SoundIcon {
+    /// The bytes the `/Name` entry carries on the annotation dict.
+    pub fn as_pdf_name(&self) -> &[u8] {
+        match self {
+            Self::Speaker => b"Speaker",
+            Self::Mic => b"Mic",
+            Self::Custom(name) => name.as_bytes(),
+        }
+    }
+}
+
+/// Encoding format for the embedded PCM data carried by a
+/// [`SoundAnnotation`] (ISO 32000-2 §13.3 Table 305). The
+/// keyword selects the `/E` entry on the sound stream dictionary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum SoundFormat {
+    /// `/E /Raw` — linear PCM samples, native endian, unsigned for
+    /// 8-bit samples, signed for 16/32-bit samples. Default per
+    /// ISO 32000-2 §12.5.6.16.
+    #[default]
+    Raw,
+    /// `/E /Signed` — linear PCM samples, signed integers.
+    Signed,
+    /// `/E /muLaw` — 8-bit µ-law compressed samples.
+    MuLaw,
+    /// `/E /ALaw` — 8-bit A-law compressed samples.
+    ALaw,
+}
+
+impl SoundFormat {
+    /// The bytes the sound stream's `/E` (encoding) entry carries.
+    pub fn as_pdf_name(self) -> &'static [u8] {
+        match self {
+            Self::Raw => b"Raw",
+            Self::Signed => b"Signed",
+            Self::MuLaw => b"muLaw",
+            Self::ALaw => b"ALaw",
+        }
+    }
+}
+
+/// A sound annotation per ISO 32000-2 §12.5.6.16.
+///
+/// Sound annotations pin an embedded audio stream to a page
+/// rectangle. The annotation displays one of the predefined `/Name`
+/// icons ([`SoundIcon`]); activating the icon plays back the embedded
+/// audio. The audio data is carried as raw PCM (or µ/A-law compressed)
+/// bytes plus the sample-rate / channels / bits-per-sample geometry —
+/// krilla emits the bytes verbatim into a sound stream object and
+/// references it via the annotation's `/Sound` entry.
+///
+/// PDF 2.0 deprecates this annotation type in favour of [`ScreenAnnotation`]
+/// + a rendition action, but every major viewer still honours it.
+///
+/// PDF/A-1 (ISO 19005-1 §6.5.2) forbids the `Sound` subtype outright
+/// (alongside `FileAttachment` and `Movie`); PDF/A-2 and later permit
+/// it. As with [`FileAttachmentAnnotation`], krilla emits the
+/// annotation under every validator and leaves PDF/A-1's rejection to
+/// the embedder to enforce — the validator's `forbids_annotations`
+/// path is PDF/X-1a only.
+///
+/// Build with [`SoundAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_sound`]
+/// or [`From<SoundAnnotation>`].
+pub struct SoundAnnotation {
+    pub(crate) rect: Rect,
+    pub(crate) icon: SoundIcon,
+    /// Embedded audio payload. Emitted as a sound stream object
+    /// referenced from the annotation's `/Sound` entry.
+    pub(crate) audio_bytes: Vec<u8>,
+    /// Sound stream `/E` (encoding) entry.
+    pub(crate) format: SoundFormat,
+    /// Sound stream `/R` (sampling rate, samples per second). Per
+    /// ISO 32000-2 §13.3 Table 305 this is a number; krilla
+    /// writes it verbatim as an `f32`.
+    pub(crate) sample_rate: f32,
+    /// Sound stream `/C` (channel count). Most viewers expect
+    /// `1` (mono) or `2` (stereo).
+    pub(crate) channels: u8,
+    /// Sound stream `/B` (bits per sample). Typical values: 8, 16, 32.
+    pub(crate) bits_per_sample: u8,
+    pub(crate) contents: Option<String>,
+    pub(crate) title: Option<String>,
+    pub(crate) creation_date: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl SoundAnnotation {
+    /// Create a new sound annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; `icon` selects the
+    /// predefined or author-defined display glyph; `audio_bytes`
+    /// carries the raw audio payload; `format`, `sample_rate`,
+    /// `channels`, and `bits_per_sample` describe the audio geometry
+    /// for the embedded sound stream.
+    pub fn new(
+        rect: Rect,
+        icon: SoundIcon,
+        audio_bytes: Vec<u8>,
+        format: SoundFormat,
+        sample_rate: f32,
+        channels: u8,
+        bits_per_sample: u8,
+    ) -> Self {
+        Self {
+            rect,
+            icon,
+            audio_bytes,
+            format,
+            sample_rate,
+            channels,
+            bits_per_sample,
+            contents: None,
+            title: None,
+            creation_date: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/T` text — the title bar of the annotation pop-up.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
+    }
+
+    /// Set the `/CreationDate` entry — formatted per ISO 32000-2
+    /// §7.9.4 (e.g. `D:20260515120000Z`).
+    pub fn with_creation_date(mut self, date: impl Into<String>) -> Self {
+        self.creation_date = Some(date.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+        sound_stream_ref: Ref,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.16 — `/Subtype /Sound`. pdf-writer's
+        // typed AnnotationType enum does not model Sound, so write
+        // the name directly via the dict surface.
+        annotation.pair(Name(b"Subtype"), Name(b"Sound"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+        annotation.pair(Name(b"Name"), Name(self.icon.as_pdf_name()));
+        // `/Sound` indirect reference to the sound stream object
+        // emitted by the outer serialiser (analogous to the `/FS`
+        // wiring on FileAttachment).
+        annotation.pair(Name(b"Sound"), sound_stream_ref);
+
+        if let Some(title) = &self.title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        write_annotation_dates(
+            annotation,
+            self.creation_date.as_deref(),
+            self.modification_date.as_deref(),
+        );
+
+        // Sound annotations do not produce krilla appearance Form
+        // XObjects; the viewer renders the predefined icon glyph.
+        let _ = sc;
+        Ok(None)
+    }
+}
+
+/// A movie annotation per ISO 32000-2 §12.5.6.17.
+///
+/// PDF 2.0 deprecates the `/Movie` subtype in favour of
+/// [`ScreenAnnotation`] + a rendition action, but legacy viewers
+/// still honour it. The annotation references an external movie file
+/// via its file specification entry; krilla emits the file path
+/// verbatim and does not embed the movie bytes inline.
+///
+/// PDF/A-1 (ISO 19005-1 §6.5.2) forbids the `Movie` subtype outright
+/// (alongside `FileAttachment` and `Sound`); PDF/A-2 and later permit
+/// it. As with [`FileAttachmentAnnotation`], krilla emits the
+/// annotation under every validator and leaves PDF/A-1's rejection to
+/// the embedder to enforce — the validator's `forbids_annotations`
+/// path is PDF/X-1a only.
+///
+/// Build with [`MovieAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via [`Annotation::new_movie`]
+/// or [`From<MovieAnnotation>`].
+pub struct MovieAnnotation {
+    pub(crate) rect: Rect,
+    /// External movie file reference written into the movie
+    /// dictionary's `/F` entry. Typically a relative path or URL; the
+    /// embedder owns resolution semantics.
+    pub(crate) movie_file: String,
+    /// `/Movie /Poster` — when true, the viewer displays a poster
+    /// image (the first frame) when the movie is not playing. Off by
+    /// default per ISO 32000-2 §12.5.6.17.
+    pub(crate) poster: bool,
+    pub(crate) contents: Option<String>,
+    pub(crate) annotation_title: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl MovieAnnotation {
+    /// Create a new movie annotation referencing an external movie
+    /// file.
+    ///
+    /// `rect` is in user-space (page) coordinates; `movie_file` is the
+    /// path/URL of the external movie resource.
+    pub fn new(rect: Rect, movie_file: impl Into<String>) -> Self {
+        Self {
+            rect,
+            movie_file: movie_file.into(),
+            poster: false,
+            contents: None,
+            annotation_title: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/Movie /Poster` flag — show a still poster when the
+    /// movie is paused.
+    pub fn with_poster(mut self, poster: bool) -> Self {
+        self.poster = poster;
+        self
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the annotation's `/T` text — the title bar of the
+    /// annotation pop-up (ISO 32000-2 Table 189). Typically the
+    /// author's name.
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.annotation_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.17 — `/Subtype /Movie`. Movie
+        // annotations remain in the PDF 2.0 spec as a deprecated
+        // sub-type kept for backward compatibility.
+        annotation.pair(Name(b"Subtype"), Name(b"Movie"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+
+        // `/Movie` dictionary (ISO 32000-2 §13.4 Table 306) — `/F` is
+        // the file specification and `/Poster` the optional boolean.
+        // `/F` is written as a byte-string file specification per
+        // §7.11.2; Table 306 defines no `/T` entry, so the movie
+        // annotation's title lives on the annotation dict's `/T`
+        // (Table 189, set via `with_title`).
+        let mut movie = annotation.insert(Name(b"Movie")).dict();
+        movie.pair(Name(b"F"), Str(self.movie_file.as_bytes()));
+        if self.poster {
+            movie.pair(Name(b"Poster"), true);
+        }
+        movie.finish();
+
+        if let Some(title) = &self.annotation_title {
+            annotation.author(TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        // Movie is not a markup annotation (ISO 32000-2 §12.5.6.2), so
+        // `/CreationDate` (markup-only, Table 172) is not emitted; `/M`
+        // is common to all annotations (Table 166).
+        write_annotation_dates(annotation, None, self.modification_date.as_deref());
+
+        Ok(None)
+    }
+}
+
+/// A screen annotation per ISO 32000-2 §12.5.6.18.
+///
+/// Screen annotations are the rich-media replacement for the
+/// deprecated [`MovieAnnotation`]: they identify a region of the
+/// page that displays media (video, audio, animation) under the
+/// control of a rendition action. The actual playback geometry and
+/// codec wiring live on the rendition action; the screen annotation
+/// itself is a passive container that the rendition action targets
+/// via the `/AN` (annotation) entry.
+///
+/// krilla emits the minimum dictionary the spec requires
+/// (`/Subtype /Screen`, `/Rect`, optional `/T` title) so a downstream
+/// pipeline can extend the dict with rendition wiring; full rendition
+/// support (`/A` action of type `/Rendition`, `/MediaClip` dicts,
+/// `/MediaPlayers`) is not modelled.
+///
+/// PDF/A-1 (based on PDF 1.4) does not define the `Screen` subtype, so
+/// ISO 19005-1 §6.5.2 forbids it (annotation types not defined in the
+/// PDF Reference are not permitted); PDF/A-2 and later permit it. As
+/// with [`FileAttachmentAnnotation`], krilla emits the annotation under
+/// every validator and leaves PDF/A-1's rejection to the embedder to
+/// enforce.
+///
+/// Build with [`ScreenAnnotation::new`] and the chainable setter
+/// methods; wrap into an [`Annotation`] via
+/// [`Annotation::new_screen`] or [`From<ScreenAnnotation>`].
+pub struct ScreenAnnotation {
+    pub(crate) rect: Rect,
+    /// `/T` (annotation title) emitted on the screen dict (ISO 32000-2
+    /// Table 190). Screen defines exactly one `/T` slot.
+    pub(crate) screen_title: Option<String>,
+    pub(crate) contents: Option<String>,
+    pub(crate) modification_date: Option<String>,
+}
+
+impl ScreenAnnotation {
+    /// Create a new screen annotation.
+    ///
+    /// `rect` is in user-space (page) coordinates; the playback
+    /// geometry of the eventual rendition is controlled by the
+    /// rendition action's `/MediaClip` dictionary, not this rectangle.
+    pub fn new(rect: Rect) -> Self {
+        Self {
+            rect,
+            screen_title: None,
+            contents: None,
+            modification_date: None,
+        }
+    }
+
+    /// Set the `/T` entry on the screen annotation dict — the screen
+    /// annotation's title (ISO 32000-2 Table 190). Screen is a
+    /// non-markup annotation with a single `/T` slot.
+    pub fn with_screen_title(mut self, title: impl Into<String>) -> Self {
+        self.screen_title = Some(title.into());
+        self
+    }
+
+    /// Set the `/Contents` text — the body of the annotation pop-up.
+    pub fn with_contents(mut self, contents: impl Into<String>) -> Self {
+        self.contents = Some(contents.into());
+        self
+    }
+
+    /// Set the `/M` (modification date) entry — formatted per
+    /// ISO 32000-2 §7.9.4.
+    pub fn with_modification_date(mut self, date: impl Into<String>) -> Self {
+        self.modification_date = Some(date.into());
+        self
+    }
+
+    fn serialize_type(
+        &self,
+        _sc: &mut SerializeContext,
+        annotation: &mut pdf_writer::writers::Annotation,
+        page_height: f32,
+    ) -> KrillaResult<Option<AppearanceJob>> {
+        // ISO 32000-2 §12.5.6.18 — `/Subtype /Screen`. pdf-writer's
+        // typed AnnotationType enum does have a Screen variant
+        // (`pdf_writer::types::AnnotationType::Screen`) but we go
+        // through the dict surface for consistency with the other
+        // multimedia subtypes.
+        annotation.pair(Name(b"Subtype"), Name(b"Screen"));
+
+        let actual_rect = self
+            .rect
+            .transform(page_root_transform(page_height))
+            .unwrap();
+        annotation.rect(actual_rect.to_pdf_rect());
+
+        if let Some(title) = &self.screen_title {
+            // Screen defines a single `/T` entry (ISO 32000-2 Table
+            // 190); it is written exactly once.
+            annotation.pair(Name(b"T"), TextStr(title));
+        }
+
+        if let Some(contents) = &self.contents {
+            annotation.contents(TextStr(contents));
+        }
+
+        // Screen is not a markup annotation (ISO 32000-2 §12.5.6.2), so
+        // `/CreationDate` (markup-only, Table 172) is not emitted; `/M`
+        // is common to all annotations (Table 166).
+        write_annotation_dates(annotation, None, self.modification_date.as_deref());
 
         Ok(None)
     }
@@ -2426,6 +3365,21 @@ pub struct WidgetAnnotation {
     /// for numeric range bounds. The action may reject the change by
     /// setting `event.rc = false` so the viewer reverts the field.
     pub(crate) validate_action: Option<Action>,
+    /// `/AA /C` — calculate action. Fires when any field in the
+    /// document changes value so the script can recompute this field
+    /// from other field values (e.g. `event.value = this.getField("a")
+    /// .value + this.getField("b").value;`). Calculation order is
+    /// determined by the catalogue's `/AcroForm /CO` array, which the
+    /// embedder controls.
+    pub(crate) calculate_action: Option<Action>,
+    /// `/AA /Fo` — focus action. Fires when the annotation gains
+    /// keyboard focus. Typical use: capture the field's pre-edit value
+    /// for revert or audit.
+    pub(crate) focus_action: Option<Action>,
+    /// `/AA /Bl` — blur action. Fires when the annotation loses
+    /// keyboard focus. Typical use: post-edit cleanup or background
+    /// validation that should not block keystroke entry.
+    pub(crate) blur_action: Option<Action>,
     /// `/MK /I` — pushbutton icon appearance (ISO 32000-2 §12.5.6.19
     /// Table 192). When set, krilla emits a Form XObject wrapping
     /// the image and threads its indirect reference into the
@@ -2475,6 +3429,9 @@ impl WidgetAnnotation {
             keystroke_action: None,
             format_action: None,
             validate_action: None,
+            calculate_action: None,
+            focus_action: None,
+            blur_action: None,
             #[cfg(feature = "raster-images")]
             icon_image: None,
             default_appearance: None,
@@ -2540,6 +3497,46 @@ impl WidgetAnnotation {
     /// on a numeric or range field.
     pub fn with_validate_action(mut self, action: Action) -> Self {
         self.validate_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /C` (calculate) additional action —
+    /// per ISO 32000-2 §12.6.3 Table 199 + §12.7.3. Fires when
+    /// any field's value changes so the script can recompute this
+    /// field's value from other fields. Calculation order is governed
+    /// by the AcroForm `/CO` array; the script typically sets
+    /// `event.value = <expression>` to publish the recomputed value.
+    ///
+    /// Typical use:
+    /// `Action::JavaScript(JavaScriptAction::new("event.value =
+    /// this.getField(\"subtotal\").value * 0.20;"))` for a VAT-on-
+    /// subtotal field that mirrors any change to `subtotal`.
+    pub fn with_calculate_action(mut self, action: Action) -> Self {
+        self.calculate_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /Fo` (focus-gained) additional action —
+    /// per ISO 32000-2 §12.6.3 Table 197. Fires when the annotation
+    /// gains the keyboard focus (e.g. user tabs into the field). The
+    /// action runs before any keystroke is processed so it cannot
+    /// reject the focus shift, only react to it. Typical use: capture
+    /// the field's pre-edit value into a script variable so a later
+    /// `/Bl` action can detect whether the value actually changed.
+    pub fn with_focus_action(mut self, action: Action) -> Self {
+        self.focus_action = Some(action);
+        self
+    }
+
+    /// Set the widget's `/AA /Bl` (focus-lost / blur) additional
+    /// action — per ISO 32000-2 §12.6.3 Table 197. Fires when the
+    /// annotation loses the keyboard focus (e.g. user tabs out, clicks
+    /// elsewhere). Typical use: post-edit cleanup or background
+    /// validation that should not block keystroke entry — `event.rc`
+    /// is ignored on `/Bl` so the script cannot revert the change at
+    /// this point.
+    pub fn with_blur_action(mut self, action: Action) -> Self {
+        self.blur_action = Some(action);
         self
     }
 
@@ -3028,10 +4025,11 @@ impl WidgetAnnotation {
             self.appearance_characteristics.as_ref(),
         );
 
-        // `/AA` additional-actions dictionary (ISO 32000-2 §12.7.4
-        // Table 230). Emitted only when at least one of the
-        // form-field action slots — keystroke (`/K`), format (`/F`),
-        // validate (`/V`) — is populated; the dict is otherwise
+        // `/AA` additional-actions dictionary (ISO 32000-2 §12.6.3
+        // Table 197 + §12.7.4 form-field overlay). Emitted only when
+        // at least one of the action slots — keystroke (`/K`), format
+        // (`/F`), validate (`/V`), calculate (`/C`), focus-gained
+        // (`/Fo`), blur (`/Bl`) — is populated; the dict is otherwise
         // omitted because an empty `/AA` is meaningless to viewers.
         // Each populated slot gets its own action sub-dictionary
         // routed through `Action::serialize`, which selects the
@@ -3047,7 +4045,10 @@ impl WidgetAnnotation {
         if !is_radio_group_child
             && (self.keystroke_action.is_some()
                 || self.format_action.is_some()
-                || self.validate_action.is_some())
+                || self.validate_action.is_some()
+                || self.calculate_action.is_some()
+                || self.focus_action.is_some()
+                || self.blur_action.is_some())
         {
             // A widget/field `/AA` additional-actions dictionary is forbidden
             // outright by the "Trigger events" clause of PDF/A-1/-2/-3 and by
@@ -3066,6 +4067,26 @@ impl WidgetAnnotation {
             }
             if let Some(action) = &self.validate_action {
                 let action_writer = aa.insert(Name(b"V")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            // Form-field calculation action. Multiple fields with `/C`
+            // actions are evaluated in the order recorded in the
+            // catalogue's `/AcroForm /CO` array — the embedder owns
+            // that array; krilla emits the per-field slot only.
+            if let Some(action) = &self.calculate_action {
+                let action_writer = aa.insert(Name(b"C")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            // Annotation lifecycle: focus-gained (`/Fo`) and
+            // focus-lost (`/Bl`) fire on the keyboard-focus boundary.
+            // `event.rc` is ignored for these slots so the script
+            // cannot reject the focus change, only observe it.
+            if let Some(action) = &self.focus_action {
+                let action_writer = aa.insert(Name(b"Fo")).start();
+                action.serialize(sc, action_writer)?;
+            }
+            if let Some(action) = &self.blur_action {
+                let action_writer = aa.insert(Name(b"Bl")).start();
                 action.serialize(sc, action_writer)?;
             }
             aa.finish();
@@ -3658,6 +4679,21 @@ fn write_annotation_dates(
     }
 }
 
+/// Emit `/State` and `/StateModel` entries on a Text or Markup
+/// annotation per ISO 32000-2 §12.5.6.4 Table 170. The two entries
+/// are coupled: a viewer ignores `/State` without a matching
+/// `/StateModel`, so the helper writes both whenever a
+/// [`ReviewState`] is set.
+fn write_review_state(
+    annotation: &mut pdf_writer::writers::Annotation,
+    state: Option<&ReviewState>,
+) {
+    let Some(state) = state else { return };
+    let (state_name, model_name) = state.to_pdf_names();
+    annotation.pair(Name(b"State"), TextStr(state_name));
+    annotation.pair(Name(b"StateModel"), TextStr(model_name));
+}
+
 /// Emit a `/C` colour entry on an annotation using the regular-colour
 /// projection. Centralised so Link, Text and Markup share the same
 /// device-space handling.
@@ -3861,6 +4897,244 @@ mod tests {
         let markup = MarkupAnnotation::new(MarkupSubtype::Underline, vec![quad]);
         let annotation: Annotation = markup.into();
         assert!(matches!(annotation.annotation_type, AnnotationType::Markup(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn stamp_annotation_emits_subtype_and_predefined_icon_name() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 60.0, 24.0).unwrap(),
+            StampIcon::Confidential,
+        )
+        .with_contents("classified")
+        .with_title("reviewer")
+        .with_subject("confidential");
+
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("confidential".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Stamp"), "missing /Subtype /Stamp");
+        assert!(
+            contains(&pdf, b"/Name /Confidential"),
+            "missing /Name /Confidential"
+        );
+        assert!(contains(&pdf, b"(reviewer)"), "missing /T author");
+        assert!(contains(&pdf, b"(confidential)"), "missing /Subj");
+    }
+
+    #[test]
+    fn stamp_annotation_default_icon_is_draft() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::default(),
+        );
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
+        assert!(contains(&pdf, b"/Name /Draft"), "default icon should be Draft");
+    }
+
+    #[test]
+    fn stamp_annotation_custom_icon_emits_author_defined_name() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Custom("MyHouseStamp".into()),
+        );
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("house stamp".into())));
+        assert!(
+            contains(&pdf, b"/Name /MyHouseStamp"),
+            "custom icon name should round-trip"
+        );
+    }
+
+    #[test]
+    fn stamp_annotation_with_intent_emits_it_entry() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Final,
+        )
+        .with_intent("StampImage");
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
+        assert!(contains(&pdf, b"/IT /StampImage"), "missing /IT entry");
+        // Table 184 (§12.5.6.12): with a non-`Stamp` `/IT`, `/Name`
+        // shall not be present, so the icon name is suppressed.
+        assert!(
+            !contains(&pdf, b"/Name /Final"),
+            "/Name must be suppressed when /IT is a non-Stamp intent"
+        );
+    }
+
+    #[test]
+    fn stamp_annotation_stamp_intent_keeps_name() {
+        // `/IT /Stamp` is the one intent that permits `/Name`
+        // (Table 184, §12.5.6.12).
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Final,
+        )
+        .with_intent("Stamp");
+        let pdf = finish_with(Annotation::new_stamp(stamp, Some("alt".into())));
+        assert!(contains(&pdf, b"/IT /Stamp"), "missing /IT /Stamp entry");
+        assert!(
+            contains(&pdf, b"/Name /Final"),
+            "/Name must survive when /IT is Stamp"
+        );
+    }
+
+    #[test]
+    fn sound_annotation_emits_subtype_and_sound_stream() {
+        // Tiny PCM payload so the stream is non-empty without
+        // bloating the test fixture.
+        let pcm = vec![0u8, 1, 2, 3, 4, 5, 6, 7];
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 40.0, 40.0).unwrap(),
+            SoundIcon::Speaker,
+            pcm,
+            SoundFormat::Raw,
+            44_100.0,
+            2,
+            16,
+        )
+        .with_contents("audio note")
+        .with_title("reviewer");
+
+        let pdf = finish_with(Annotation::new_sound(sound, Some("audio".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Sound"), "missing /Subtype /Sound");
+        assert!(contains(&pdf, b"/Name /Speaker"), "missing /Name /Speaker");
+        // Sound stream dict entries.
+        assert!(contains(&pdf, b"/Type /Sound"), "missing /Type /Sound on stream");
+        assert!(contains(&pdf, b"/R 44100"), "missing /R sample rate");
+        assert!(contains(&pdf, b"/C 2"), "missing /C channels");
+        assert!(contains(&pdf, b"/B 16"), "missing /B bits/sample");
+        assert!(contains(&pdf, b"/E /Raw"), "missing /E encoding");
+    }
+
+    #[test]
+    fn sound_annotation_default_icon_is_speaker() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::default(),
+            vec![0u8; 4],
+            SoundFormat::default(),
+            8000.0,
+            1,
+            8,
+        );
+        let pdf = finish_with(Annotation::new_sound(sound, Some("alt".into())));
+        assert!(
+            contains(&pdf, b"/Name /Speaker"),
+            "default icon should be Speaker"
+        );
+        assert!(contains(&pdf, b"/E /Raw"), "default encoding should be Raw");
+    }
+
+    #[test]
+    fn sound_annotation_mulaw_encoding_round_trips() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::Mic,
+            vec![0u8; 16],
+            SoundFormat::MuLaw,
+            8000.0,
+            1,
+            8,
+        );
+        let pdf = finish_with(Annotation::new_sound(sound, Some("recording".into())));
+        assert!(contains(&pdf, b"/E /muLaw"), "missing /E /muLaw");
+        assert!(contains(&pdf, b"/Name /Mic"), "missing /Name /Mic");
+    }
+
+    #[test]
+    fn movie_annotation_emits_subtype_and_movie_dict() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(10.0, 20.0, 80.0, 60.0).unwrap(),
+            "intro.mov",
+        )
+        .with_poster(true)
+        .with_title("reviewer");
+
+        let pdf = finish_with(Annotation::new_movie(movie, Some("video".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Movie"), "missing /Subtype /Movie");
+        assert!(contains(&pdf, b"/Movie <<"), "missing /Movie dict");
+        assert!(contains(&pdf, b"(intro.mov)"), "missing /F file path");
+        assert!(contains(&pdf, b"/Poster true"), "missing /Poster true");
+        // The movie's title lives on the annotation dict's /T (Table
+        // 189), not inside the /Movie sub-dictionary (Table 306 has no
+        // /T entry).
+        assert!(contains(&pdf, b"(reviewer)"), "missing annotation /T");
+        assert!(
+            !contains(&pdf, b"/T (Intro)"),
+            "no /T should be written inside the /Movie dict"
+        );
+    }
+
+    #[test]
+    fn movie_annotation_poster_off_by_default() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            "clip.mov",
+        );
+        let pdf = finish_with(Annotation::new_movie(movie, Some("clip".into())));
+        assert!(
+            !contains(&pdf, b"/Poster"),
+            "/Poster should be omitted when false"
+        );
+    }
+
+    #[test]
+    fn screen_annotation_emits_subtype_screen() {
+        let screen = ScreenAnnotation::new(Rect::from_xywh(10.0, 20.0, 80.0, 60.0).unwrap())
+            .with_screen_title("MainScreen")
+            .with_contents("rendition target");
+
+        let pdf = finish_with(Annotation::new_screen(screen, Some("rendition".into())));
+
+        assert!(contains(&pdf, b"/Subtype /Screen"), "missing /Subtype /Screen");
+        assert!(contains(&pdf, b"(MainScreen)"), "missing screen /T");
+    }
+
+    #[test]
+    fn sound_annotation_from_trait_wraps_without_alt() {
+        let sound = SoundAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            SoundIcon::Speaker,
+            vec![0u8; 4],
+            SoundFormat::Raw,
+            8000.0,
+            1,
+            8,
+        );
+        let annotation: Annotation = sound.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Sound(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn movie_annotation_from_trait_wraps_without_alt() {
+        let movie = MovieAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            "clip.mov",
+        );
+        let annotation: Annotation = movie.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Movie(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn screen_annotation_from_trait_wraps_without_alt() {
+        let screen = ScreenAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap());
+        let annotation: Annotation = screen.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Screen(_)));
+        assert!(annotation.alt.is_none());
+    }
+
+    #[test]
+    fn stamp_annotation_from_trait_wraps_without_alt() {
+        let stamp = StampAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap(),
+            StampIcon::Approved,
+        );
+        let annotation: Annotation = stamp.into();
+        assert!(matches!(annotation.annotation_type, AnnotationType::Stamp(_)));
         assert!(annotation.alt.is_none());
     }
 
@@ -4425,6 +5699,60 @@ mod tests {
         assert!(contains(&pdf, b"/K <<"), "missing /K");
         assert!(contains(&pdf, b"/F <<"), "missing /F");
         assert!(contains(&pdf, b"/V <<"), "missing /V");
+    }
+
+    #[test]
+    fn widget_annotation_calculate_action_emits_aa_c_javascript() {
+        let widget = empty_text_widget("vat").with_calculate_action(Action::JavaScript(
+            JavaScriptAction::new(
+                "event.value = this.getField(\"subtotal\").value * 0.20;",
+            ),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/C <<"), "missing /AA /C key");
+        assert!(contains(&pdf, b"getField"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_focus_action_emits_aa_fo_javascript() {
+        let widget = empty_text_widget("comment").with_focus_action(Action::JavaScript(
+            JavaScriptAction::new("event.target.scrollIntoView();"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/Fo <<"), "missing /AA /Fo key");
+        assert!(contains(&pdf, b"scrollIntoView"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_blur_action_emits_aa_bl_javascript() {
+        let widget = empty_text_widget("comment").with_blur_action(Action::JavaScript(
+            JavaScriptAction::new("/* persist field state */"),
+        ));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/Bl <<"), "missing /AA /Bl key");
+        assert!(contains(&pdf, b"persist field state"), "missing JS body");
+    }
+
+    #[test]
+    fn widget_annotation_all_six_actions_emit_six_keys() {
+        let widget = empty_text_widget("multi")
+            .with_keystroke_action(Action::JavaScript(JavaScriptAction::new("/* k */")))
+            .with_format_action(Action::JavaScript(JavaScriptAction::new("/* f */")))
+            .with_validate_action(Action::JavaScript(JavaScriptAction::new("/* v */")))
+            .with_calculate_action(Action::JavaScript(JavaScriptAction::new("/* c */")))
+            .with_focus_action(Action::JavaScript(JavaScriptAction::new("/* fo */")))
+            .with_blur_action(Action::JavaScript(JavaScriptAction::new("/* bl */")));
+        let pdf = finish_with(Annotation::new_widget(widget, None));
+        assert!(contains(&pdf, b"/AA"), "missing /AA dict");
+        assert!(contains(&pdf, b"/K <<"), "missing /K");
+        assert!(contains(&pdf, b"/F <<"), "missing /F");
+        assert!(contains(&pdf, b"/V <<"), "missing /V");
+        assert!(contains(&pdf, b"/C <<"), "missing /C");
+        assert!(contains(&pdf, b"/Fo <<"), "missing /Fo");
+        assert!(contains(&pdf, b"/Bl <<"), "missing /Bl");
     }
 
     #[test]
@@ -5435,6 +6763,127 @@ mod tests {
         assert!(
             contains(&pdf, b"(inner description)"),
             "inner /Contents must survive when no outer alt-text is set"
+        );
+    }
+
+    #[test]
+    fn annotation_alt_and_contents_emit_single_contents_key() {
+        // A subtype's own `with_contents` and the outer alt text both
+        // target the annotation's /Contents key (ISO 32000-2 §12.5.6.4 /
+        // §14.9.3). Only one may be written: the subtype's contents owns
+        // the slot and the alt text is dropped, so the dictionary never
+        // carries two /Contents keys.
+        let text = TextAnnotation::new(Rect::from_xywh(0.0, 0.0, 10.0, 10.0).unwrap())
+            .with_contents("popup body");
+        let pdf = finish_with(Annotation::new_text(text, Some("alt description".into())));
+        // Annotation /Contents is a literal string `/Contents (…)`; the
+        // page's own `/Contents <ref>` is an indirect reference, so
+        // counting `/Contents (` isolates the annotation's key.
+        let contents_count = pdf
+            .windows(b"/Contents (".len())
+            .filter(|w| w == b"/Contents (")
+            .count();
+        assert_eq!(
+            contents_count, 1,
+            "exactly one /Contents key expected, got {contents_count}"
+        );
+        assert!(
+            contains(&pdf, b"(popup body)"),
+            "the subtype's own contents must own /Contents"
+        );
+        assert!(
+            !contains(&pdf, b"(alt description)"),
+            "alt text must not be written when the subtype owns /Contents"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // `LinkBorder::with_dash_array`. CSS `dotted`
+    // link borders project onto `/BS /D [1 1]` rather than the krilla
+    // default `[3 3]`. The setter lets the embedder override the dash
+    // pattern array per ISO 32000-2 §12.5.4 Table 168 so authors can
+    // distinguish CSS `dotted` (`[1 1]`) from CSS `dashed` (`[3 3]`)
+    // link borders, and carry richer patterns when the source PDF
+    // asks for them.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn link_border_dash_array_override_emits_custom_pattern() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Dashed)
+                .with_dash_array(vec![1.0_f32, 1.0_f32]),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("dotted".into())));
+
+        // The pretty serialiser writes `/D [1 1]` for the override.
+        // Accept either the exact form or `[1.0 1.0]` so the
+        // assertion does not fight pdf-writer's number formatter.
+        assert!(
+            contains(&pdf, b"/D [1 1]") || contains(&pdf, b"/D [1.0 1.0]"),
+            "custom /D [1 1] must appear when with_dash_array([1, 1]) is set"
+        );
+        assert!(
+            !contains(&pdf, b"/D [3 3]") && !contains(&pdf, b"/D [3.0 3.0]"),
+            "default /D [3 3] must not appear once an override has been supplied"
+        );
+    }
+
+    #[test]
+    fn link_border_dashed_without_override_keeps_default_pattern() {
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Dashed),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("dashed".into())));
+
+        assert!(
+            contains(&pdf, b"/D [3 3]") || contains(&pdf, b"/D [3.0 3.0]"),
+            "default /D [3 3] must survive when no override is supplied"
+        );
+    }
+
+    #[test]
+    fn link_border_dash_array_ignored_when_style_is_solid() {
+        // ISO 32000-2 §12.5.4 — the `/D` entry is meaningful only
+        // when `/S /D`. With `/S /S` (solid) the embedder's dash
+        // pattern is irrelevant and must not appear.
+        let link = LinkAnnotation::new(
+            Rect::from_xywh(0.0, 0.0, 50.0, 50.0).unwrap(),
+            Target::Destination(crate::interactive::destination::Destination::Xyz(
+                crate::interactive::destination::XyzDestination::new(
+                    0,
+                    Point::from_xy(0.0, 0.0),
+                ),
+            )),
+        )
+        .with_border(
+            LinkBorder::new(1.0, rgb::Color::new(0, 0, 0).into())
+                .with_style(LinkBorderStyle::Solid)
+                .with_dash_array(vec![1.0_f32, 1.0_f32]),
+        );
+        let pdf = finish_with(Annotation::new_link(link, Some("solid".into())));
+        assert!(
+            !contains(&pdf, b"/D [1 1]") && !contains(&pdf, b"/D [1.0 1.0]"),
+            "custom /D pattern must not leak onto a Solid /BS entry"
         );
     }
 }

@@ -8,6 +8,7 @@
 use pdf_writer::types::TrappingStatus;
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
+use std::collections::BTreeMap;
 use std::ops::DerefMut;
 use xmp_writer::{LangId, Timezone, XmpWriter};
 
@@ -63,6 +64,15 @@ pub struct Metadata {
     /// retain the later value (the builder calls
     /// [`Metadata::custom_property`] with last-wins semantics).
     pub(crate) custom_properties: Vec<(String, String)>,
+    /// K15 — `/PieceInfo` catalogue entry (ISO 32000-2 §14.5).
+    /// Application-private metadata keyed by application name; each
+    /// value is a `(/LastModified, /Private)` pair. Empty map means
+    /// "no piece-info" (the catalogue entry is omitted).
+    pub(crate) piece_info: BTreeMap<String, PieceInfoEntry>,
+    /// K15 — `/LegalContent` catalogue entry (ISO 32000-2 §12.8.7).
+    /// `None` (default) emits no entry. A `LegalContent` value with
+    /// every field unset is treated the same as `None`.
+    pub(crate) legal_content: Option<LegalContent>,
 }
 
 /// PDF catalogue-level additional-action event keys (ISO 32000-2
@@ -243,21 +253,26 @@ impl Metadata {
     /// Three flavours are exposed:
     ///
     /// - [`OpenAction::go_to_page_with_zoom`] — direct-link to a
-    ///   page-and-zoom destination (moegoe G5b: `-bd-initial-page`
-    ///   + `-bd-initial-zoom`). The 0-indexed page reference is
+    ///   page-and-zoom destination, setting the document's initial
+    ///   view page and magnification. The 0-indexed page reference is
     ///   resolved at serialise time against the `PageInfo` table;
     ///   an out-of-range page index is not detected here (it would
     ///   panic during serialisation mirroring
     ///   `XyzDestination::serialize`'s behaviour). Callers must
     ///   clamp into `[0, page_count)` before invoking this setter.
     /// - [`OpenAction::named`] — named-action dispatch
-    ///   (ISO 32000-2 §12.6.4.9 Table 200). Used by the PDFreactor
-    ///   `printDialogPrompt` parity surface to raise the print
-    ///   dialog on document open via [`NamedAction::Print`].
+    ///   (ISO 32000-2 §12.6.4.12, Table 215 (names) /
+    ///   Table 216 (entries)). Raises the print dialog on document
+    ///   open via [`NamedAction::Print`].
+    /// - [`OpenAction::javascript`] — JavaScript-action dispatch
+    ///   (ISO 32000-2 §12.6.4.17). Executes the supplied
+    ///   ECMAScript snippet when the document is opened; the
+    ///   script string is written verbatim into the catalogue's
+    ///   `/OpenAction /JS` entry.
     ///
-    /// Other action types (`/JavaScript`, `/SubmitForm`, etc.) are
-    /// not exposed at this entry; use the appropriate annotation
-    /// or document-event setter instead.
+    /// Other action types (`/SubmitForm`, `/Launch`, etc.) are not
+    /// exposed at this entry; use the appropriate annotation or
+    /// document-event setter instead.
     pub fn open_action(mut self, action: OpenAction) -> Self {
         self.open_action = Some(action);
         self
@@ -306,7 +321,8 @@ impl Metadata {
     ) -> Self {
         let name = name.into();
         let source = source.into();
-        self.document_javascripts.retain(|(existing, _)| existing != &name);
+        self.document_javascripts
+            .retain(|(existing, _)| existing != &name);
         self.document_javascripts.push((name, source));
         self
     }
@@ -327,8 +343,45 @@ impl Metadata {
         source: impl Into<String>,
     ) -> Self {
         let source = source.into();
-        self.document_event_scripts.retain(|(existing, _)| *existing != event);
+        self.document_event_scripts
+            .retain(|(existing, _)| *existing != event);
         self.document_event_scripts.push((event, source));
+        self
+    }
+
+    /// Register a private `/PieceInfo` entry on the document
+    /// catalogue (ISO 32000-2 §14.5).
+    ///
+    /// The application name identifies the entry's owner; conforming
+    /// PDF consumers preserve unknown entries verbatim. `entry`
+    /// carries the `/LastModified` timestamp and an opaque
+    /// `/Private` byte payload the calling application is
+    /// responsible for serialising as well-formed PDF data.
+    ///
+    /// Duplicate `app` names retain the later value (last-wins) so
+    /// the surface is idempotent.
+    pub fn piece_info(mut self, app: impl Into<String>, entry: PieceInfoEntry) -> Self {
+        let app = app.into();
+        if app.is_empty() {
+            return self;
+        }
+        self.piece_info.insert(app, entry);
+        self
+    }
+
+    /// Attach a `/LegalContent` legal-attestation block to the
+    /// document catalogue (ISO 32000-2 §12.8.7).
+    ///
+    /// Calling this setter again replaces the previous block (a
+    /// document carries at most one legal-content dict). Supplying a
+    /// `LegalContent` value with every field unset is a no-op —
+    /// the catalogue entry is omitted in that case.
+    pub fn legal_content(mut self, content: LegalContent) -> Self {
+        if content.is_empty() {
+            self.legal_content = None;
+        } else {
+            self.legal_content = Some(content);
+        }
         self
     }
 
@@ -352,21 +405,17 @@ impl Metadata {
     /// per ISO 32000-2 §7.9.2.2).
     ///
     /// Duplicate `name`s retain the later value (last-wins).
-    pub fn custom_property(
-        mut self,
-        name: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn custom_property(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         let name = name.into();
         let value = value.into();
         if name.is_empty() {
             return self;
         }
-        self.custom_properties.retain(|(existing, _)| existing != &name);
+        self.custom_properties
+            .retain(|(existing, _)| existing != &name);
         self.custom_properties.push((name, value));
         self
     }
-
 
     pub(crate) fn has_document_info(&self) -> bool {
         self.title.is_some()
@@ -858,7 +907,7 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
 
 /// `/OpenAction` document action (ISO 32000-2 §7.7.2 Table 29).
 ///
-/// Two flavours are exposed:
+/// Three flavours are exposed:
 ///
 /// - [`OpenAction::go_to_page_with_zoom`] — the direct-link
 ///   `[<page-ref> <destination>]` form serialised as a single-line
@@ -866,8 +915,18 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
 /// - [`OpenAction::named`] — the named-action form serialised as
 ///   a `<< /S /Named /N /<NamedAction> >>` dictionary. Used to
 ///   trigger viewer-side commands such as the print dialog on
-///   document open (ISO 32000-2 §12.6.4.9 Table 200).
-#[derive(Copy, Clone, Debug)]
+///   document open (ISO 32000-2 §12.6.4.12, Table 215 (names) /
+///   Table 216 (entries)).
+/// - [`OpenAction::javascript`] — the JavaScript-action form
+///   `<< /S /JavaScript /JS (<script>) >>` (ISO 32000-2 §12.6.4.17).
+///   The script string is owned by the action and serialised
+///   verbatim through `pdf_writer`'s `TextStr` writer.
+///
+/// `OpenAction` is intentionally not `Copy` because the
+/// JavaScript variant owns an arbitrarily-long `String`; the
+/// only call site borrows via `.as_ref()` on the parent
+/// `Option`.
+#[derive(Clone, Debug)]
 pub enum OpenAction {
     /// Direct-link destination — opens `page_index` (0-indexed)
     /// at the given destination flavour. Resolved against the
@@ -884,6 +943,18 @@ pub enum OpenAction {
     /// dispatches a viewer-side command (ISO 32000-2 §12.6.4.12,
     /// Table 215 (names) / Table 216 (entries)).
     Named(NamedAction),
+    /// JavaScript action — opens the document and immediately
+    /// executes the supplied ECMAScript snippet
+    /// (ISO 32000-2 §12.6.4.17). The string is written verbatim
+    /// into the catalogue's `/OpenAction /JS` entry; no escaping
+    /// or sanitisation is performed at this layer.
+    ///
+    /// PDF viewers typically gate JavaScript execution through a
+    /// Trust Manager (Acrobat, Foxit). Authors that rely on the
+    /// script firing should keep it to AcroForm helpers or
+    /// `app.alert(...)`-style snippets that all major viewers
+    /// permit by default.
+    JavaScript(String),
 }
 
 impl OpenAction {
@@ -901,6 +972,15 @@ impl OpenAction {
     /// viewer's print dialog immediately on document open.
     pub fn named(action: NamedAction) -> Self {
         Self::Named(action)
+    }
+
+    /// Build an `/OpenAction` JavaScript entry that executes
+    /// `script` on document open (ISO 32000-2 §12.6.4.17).
+    ///
+    /// The script string is owned by the action and serialised
+    /// verbatim as the `/JS` entry; no escaping is performed.
+    pub fn javascript(script: impl Into<String>) -> Self {
+        Self::JavaScript(script.into())
     }
 }
 
@@ -1122,7 +1202,211 @@ impl Duplex {
     }
 }
 
-/// `/ViewerPreferences` dictionary entries (ISO 32000-2 §12.4.4).
+/// Per-application entry for the document's `/PieceInfo` dictionary
+/// (ISO 32000-2 §14.5).
+///
+/// `/PieceInfo` lets authoring applications attach private,
+/// application-specific data to a PDF document; the entry is a
+/// dictionary keyed by application name with each value carrying a
+/// `/LastModified` timestamp plus a `/Private` slot the owning
+/// application uses to record its working data.
+///
+/// krilla's surface keeps the `/Private` payload as a flat
+/// `BTreeMap<String, String>` of name → text-string entries, which
+/// covers the common case where the owning application records a
+/// handful of named properties (e.g. an internal document version,
+/// a job identifier, an author preference). Each key becomes a PDF
+/// name token; each value is written as a PDF text string. More
+/// complex `/Private` shapes (streams, nested dictionaries, arrays)
+/// are deferred to a future surface — the existing `Metadata::raw_xmp`
+/// precedent shows where a byte-payload variant would slot in.
+#[derive(Clone, Debug)]
+pub struct PieceInfoEntry {
+    /// `/LastModified` — when the application last touched the
+    /// private data. PDF 1.3+ permits the entry to be absent; krilla
+    /// requires it because validators (and PDF/A) check it.
+    pub last_modified: DateTime,
+    /// `/Private` — application-private key/value pairs written
+    /// into a sub-dictionary on the entry. Empty map emits an empty
+    /// `<<>>` value (still valid PDF; preserves the `/LastModified`
+    /// timestamp on its own).
+    pub private: BTreeMap<String, String>,
+}
+
+/// `/LegalContent` legal-attestation dictionary (ISO 32000-2
+/// §12.8.7).
+///
+/// PDF supports a document-level legal-attestation block that
+/// enumerates which interactive behaviours (JavaScript, launch
+/// actions, multimedia annotations, etc.) the document depends on
+/// for its visual or interactive presentation. Conforming readers
+/// surface this metadata to viewers reviewing the legal authenticity
+/// of a PDF.
+///
+/// All fields are optional. Boolean fields default to `false`
+/// per the spec when absent; integer fields default to `0`. The
+/// `attestation` string is emitted as a PDF text string.
+#[derive(Default, Clone, Debug)]
+pub struct LegalContent {
+    /// `/JavaScriptActions` — the document contains JavaScript that
+    /// may modify its visual presentation.
+    pub javascript_actions: Option<bool>,
+    /// `/LaunchActions` — the document contains launch actions.
+    pub launch_actions: Option<bool>,
+    /// `/URIActions` — the document contains URI actions.
+    pub uri_actions: Option<bool>,
+    /// `/MovieActions` — the document contains movie actions.
+    pub movie_actions: Option<bool>,
+    /// `/SoundActions` — the document contains sound actions.
+    pub sound_actions: Option<bool>,
+    /// `/HiddenAnnotations` — the document contains hidden annotations.
+    pub hidden_annotations: Option<bool>,
+    /// `/ExternalRefXobjects` — the document references external
+    /// Form XObjects.
+    pub external_ref_xobjects: Option<bool>,
+    /// `/ExternalOPIdicts` — the document references external OPI
+    /// (Open Prepress Interface) dictionaries.
+    pub external_opi_dicts: Option<bool>,
+    /// `/NonEmbeddedFonts` — number of glyphs drawn from fonts that
+    /// are not embedded in the document.
+    pub non_embedded_fonts: Option<u32>,
+    /// `/OptionalContent` — number of visible elements that depend
+    /// on optional-content visibility state at view time.
+    pub optional_content: Option<u32>,
+    /// `/Attestation` — human-readable attestation string supplied
+    /// by the document originator.
+    pub attestation: Option<String>,
+}
+
+impl LegalContent {
+    /// Create a default `LegalContent` block with all fields unset.
+    /// Setters return `Self` for builder-style chaining.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `/Attestation` — supply the human-readable attestation
+    /// string.
+    pub fn attestation(mut self, text: impl Into<String>) -> Self {
+        self.attestation = Some(text.into());
+        self
+    }
+
+    /// `/JavaScriptActions` setter.
+    pub fn javascript_actions(mut self, present: bool) -> Self {
+        self.javascript_actions = Some(present);
+        self
+    }
+
+    /// `/LaunchActions` setter.
+    pub fn launch_actions(mut self, present: bool) -> Self {
+        self.launch_actions = Some(present);
+        self
+    }
+
+    /// `/URIActions` setter.
+    pub fn uri_actions(mut self, present: bool) -> Self {
+        self.uri_actions = Some(present);
+        self
+    }
+
+    /// `/MovieActions` setter.
+    pub fn movie_actions(mut self, present: bool) -> Self {
+        self.movie_actions = Some(present);
+        self
+    }
+
+    /// `/SoundActions` setter.
+    pub fn sound_actions(mut self, present: bool) -> Self {
+        self.sound_actions = Some(present);
+        self
+    }
+
+    /// `/HiddenAnnotations` setter.
+    pub fn hidden_annotations(mut self, present: bool) -> Self {
+        self.hidden_annotations = Some(present);
+        self
+    }
+
+    /// `/ExternalRefXobjects` setter.
+    pub fn external_ref_xobjects(mut self, present: bool) -> Self {
+        self.external_ref_xobjects = Some(present);
+        self
+    }
+
+    /// `/ExternalOPIdicts` setter.
+    pub fn external_opi_dicts(mut self, present: bool) -> Self {
+        self.external_opi_dicts = Some(present);
+        self
+    }
+
+    /// `/NonEmbeddedFonts` setter.
+    pub fn non_embedded_fonts(mut self, count: u32) -> Self {
+        self.non_embedded_fonts = Some(count);
+        self
+    }
+
+    /// `/OptionalContent` setter.
+    pub fn optional_content(mut self, count: u32) -> Self {
+        self.optional_content = Some(count);
+        self
+    }
+
+    /// Whether every field is unset (so the catalogue entry can be
+    /// omitted entirely).
+    pub(crate) fn is_empty(&self) -> bool {
+        self.javascript_actions.is_none()
+            && self.launch_actions.is_none()
+            && self.uri_actions.is_none()
+            && self.movie_actions.is_none()
+            && self.sound_actions.is_none()
+            && self.hidden_annotations.is_none()
+            && self.external_ref_xobjects.is_none()
+            && self.external_opi_dicts.is_none()
+            && self.non_embedded_fonts.is_none()
+            && self.optional_content.is_none()
+            && self.attestation.is_none()
+    }
+}
+
+/// Page-box selector for `/ViewerPreferences` page-display and
+/// printing entries (ISO 32000-2 §12.2 Table 147).
+///
+/// `MediaBox` (the page's full extent) is the spec-defined default
+/// for all four slots when the entry is omitted. The remaining
+/// variants select one of the optional page boxes: `CropBox`
+/// (visible region), `BleedBox` (extent including bleed), `TrimBox`
+/// (final trimmed page), or `ArtBox` (meaningful artwork).
+///
+/// Used by `ViewerPreferences::view_area` / `view_clip` /
+/// `print_area` / `print_clip`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum PageBoxSelector {
+    /// `/MediaBox` — the page's full media extent. Spec default.
+    MediaBox,
+    /// `/CropBox` — the visible region of the page.
+    CropBox,
+    /// `/BleedBox` — the region including any bleed area.
+    BleedBox,
+    /// `/TrimBox` — the intended final trimmed extent.
+    TrimBox,
+    /// `/ArtBox` — the region containing meaningful artwork.
+    ArtBox,
+}
+
+impl PageBoxSelector {
+    pub(crate) fn to_pdf_name(self) -> Name<'static> {
+        match self {
+            PageBoxSelector::MediaBox => Name(b"MediaBox"),
+            PageBoxSelector::CropBox => Name(b"CropBox"),
+            PageBoxSelector::BleedBox => Name(b"BleedBox"),
+            PageBoxSelector::TrimBox => Name(b"TrimBox"),
+            PageBoxSelector::ArtBox => Name(b"ArtBox"),
+        }
+    }
+}
+
+/// `/ViewerPreferences` dictionary entries (ISO 32000-2 §12.2).
 ///
 /// Every field is optional. Setters on this struct return `Self` for
 /// builder-style chaining; absent fields are not emitted in the PDF.
@@ -1141,6 +1425,31 @@ pub struct ViewerPreferences {
     pub(crate) print_scaling: Option<PrintScaling>,
     pub(crate) duplex: Option<Duplex>,
     pub(crate) pick_tray_by_pdf_size: Option<bool>,
+    /// `/NumCopies` — default number of copies for the print dialog
+    /// (ISO 32000-2 §12.2 Table 147). Spec requires a positive
+    /// integer; `0` is silently clamped to `1` at emission time.
+    pub(crate) num_copies: Option<u32>,
+    /// `/PrintPageRange` — default page subset for the print dialog
+    /// expressed as an even-length array of inclusive 1-indexed
+    /// `[from, to]` pairs (ISO 32000-2 §12.2 Table 147). Empty
+    /// vector means "all pages" (the entry is not emitted).
+    pub(crate) print_page_range: Option<Vec<(u32, u32)>>,
+    /// `/ViewArea` — which page box the viewer should display
+    /// (ISO 32000-2 §12.2 Table 147). Default `MediaBox` when
+    /// absent.
+    pub(crate) view_area: Option<PageBoxSelector>,
+    /// `/ViewClip` — which page box the viewer should clip page
+    /// contents to (ISO 32000-2 §12.2 Table 147). Default
+    /// `MediaBox` when absent.
+    pub(crate) view_clip: Option<PageBoxSelector>,
+    /// `/PrintArea` — which page box the printer should print
+    /// (ISO 32000-2 §12.2 Table 147). Default `MediaBox` when
+    /// absent.
+    pub(crate) print_area: Option<PageBoxSelector>,
+    /// `/PrintClip` — which page box the printer should clip page
+    /// contents to (ISO 32000-2 §12.2 Table 147). Default
+    /// `MediaBox` when absent.
+    pub(crate) print_clip: Option<PageBoxSelector>,
 }
 
 impl ViewerPreferences {
@@ -1214,6 +1523,61 @@ impl ViewerPreferences {
         self
     }
 
+    /// `/NumCopies` — default number of copies for the print dialog
+    /// (ISO 32000-2 §12.2 Table 147). The spec requires a positive
+    /// integer; `0` is silently coerced to `1` at the emission
+    /// boundary so a faithful round-trip of an author's intent is
+    /// always representable.
+    pub fn num_copies(mut self, copies: u32) -> Self {
+        self.num_copies = Some(copies);
+        self
+    }
+
+    /// `/PrintPageRange` — default page subset for the print dialog
+    /// (ISO 32000-2 §12.2 Table 147). Each `(from, to)` pair is an
+    /// inclusive 1-indexed range; the spec mandates an even-length
+    /// array with `from <= to` for every pair and `to <= page count`
+    /// for the document. An empty `ranges` slice clears the entry
+    /// (printers fall back to "all pages").
+    pub fn print_page_range(mut self, ranges: Vec<(u32, u32)>) -> Self {
+        self.print_page_range = Some(ranges);
+        self
+    }
+
+    /// `/ViewArea` — which page box the viewer should display
+    /// (ISO 32000-2 §12.2 Table 147). Default `MediaBox` when
+    /// absent. Pairs with the `BleedBox` / `TrimBox` / `ArtBox` /
+    /// `CropBox` page-box geometry authored elsewhere on the
+    /// document.
+    pub fn view_area(mut self, selector: PageBoxSelector) -> Self {
+        self.view_area = Some(selector);
+        self
+    }
+
+    /// `/ViewClip` — which page box the viewer should clip page
+    /// contents to (ISO 32000-2 §12.2 Table 147). Default
+    /// `MediaBox` when absent.
+    pub fn view_clip(mut self, selector: PageBoxSelector) -> Self {
+        self.view_clip = Some(selector);
+        self
+    }
+
+    /// `/PrintArea` — which page box the printer should print
+    /// (ISO 32000-2 §12.2 Table 147). Default `MediaBox` when
+    /// absent.
+    pub fn print_area(mut self, selector: PageBoxSelector) -> Self {
+        self.print_area = Some(selector);
+        self
+    }
+
+    /// `/PrintClip` — which page box the printer should clip page
+    /// contents to (ISO 32000-2 §12.2 Table 147). Default
+    /// `MediaBox` when absent.
+    pub fn print_clip(mut self, selector: PageBoxSelector) -> Self {
+        self.print_clip = Some(selector);
+        self
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.hide_toolbar.is_none()
             && self.hide_menubar.is_none()
@@ -1225,5 +1589,201 @@ impl ViewerPreferences {
             && self.print_scaling.is_none()
             && self.duplex.is_none()
             && self.pick_tray_by_pdf_size.is_none()
+            && self.num_copies.is_none()
+            && self.print_page_range.is_none()
+            && self.view_area.is_none()
+            && self.view_clip.is_none()
+            && self.print_area.is_none()
+            && self.print_clip.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewer_preferences_num_copies_builder_round_trips() {
+        let vp = ViewerPreferences::new().num_copies(3);
+        assert_eq!(vp.num_copies, Some(3));
+        // Empty viewer-preferences must report empty when no
+        // declarations have been set; setting num_copies makes it
+        // non-empty.
+        assert!(!vp.is_empty());
+    }
+
+    #[test]
+    fn viewer_preferences_print_page_range_builder_round_trips() {
+        let ranges = vec![(1, 5), (10, 12)];
+        let vp = ViewerPreferences::new().print_page_range(ranges.clone());
+        assert_eq!(vp.print_page_range.as_deref(), Some(ranges.as_slice()));
+    }
+
+    #[test]
+    fn viewer_preferences_page_box_selectors_round_trip() {
+        let vp = ViewerPreferences::new()
+            .view_area(PageBoxSelector::CropBox)
+            .view_clip(PageBoxSelector::TrimBox)
+            .print_area(PageBoxSelector::BleedBox)
+            .print_clip(PageBoxSelector::ArtBox);
+        assert_eq!(vp.view_area, Some(PageBoxSelector::CropBox));
+        assert_eq!(vp.view_clip, Some(PageBoxSelector::TrimBox));
+        assert_eq!(vp.print_area, Some(PageBoxSelector::BleedBox));
+        assert_eq!(vp.print_clip, Some(PageBoxSelector::ArtBox));
+    }
+
+    #[test]
+    fn page_box_selector_to_pdf_name_matches_spec() {
+        assert_eq!(PageBoxSelector::MediaBox.to_pdf_name().0, b"MediaBox");
+        assert_eq!(PageBoxSelector::CropBox.to_pdf_name().0, b"CropBox");
+        assert_eq!(PageBoxSelector::BleedBox.to_pdf_name().0, b"BleedBox");
+        assert_eq!(PageBoxSelector::TrimBox.to_pdf_name().0, b"TrimBox");
+        assert_eq!(PageBoxSelector::ArtBox.to_pdf_name().0, b"ArtBox");
+    }
+
+    #[test]
+    fn viewer_preferences_empty_by_default() {
+        assert!(ViewerPreferences::new().is_empty());
+    }
+
+    #[test]
+    fn metadata_piece_info_builder_stores_entries() {
+        let entry = PieceInfoEntry {
+            last_modified: DateTime::new(2026).month(5).day(28),
+            private: {
+                let mut map = BTreeMap::new();
+                map.insert("DocVersion".to_string(), "1.2".to_string());
+                map
+            },
+        };
+        let metadata = Metadata::new().piece_info("KrillaApp", entry);
+        assert!(metadata.piece_info.contains_key("KrillaApp"));
+        let stored = &metadata.piece_info["KrillaApp"];
+        assert_eq!(
+            stored.private.get("DocVersion").map(String::as_str),
+            Some("1.2")
+        );
+    }
+
+    #[test]
+    fn metadata_piece_info_empty_app_is_ignored() {
+        let entry = PieceInfoEntry {
+            last_modified: DateTime::new(2026),
+            private: BTreeMap::new(),
+        };
+        let metadata = Metadata::new().piece_info("", entry);
+        assert!(metadata.piece_info.is_empty());
+    }
+
+    #[test]
+    fn piece_info_without_creation_date_emits_required_moddate() {
+        // ISO 32000-2 §14.3.3 Table 349: `/ModDate` is *required* in the
+        // document information dictionary when `/PieceInfo` is present in
+        // the document catalogue. A piece-info-only document (no
+        // `creation_date`) must still emit `/ModDate` — derived from the
+        // entry's `/LastModified` — while `/CreationDate` stays absent
+        // because the caller supplied none.
+        let entry = PieceInfoEntry {
+            last_modified: DateTime::new(2026).month(5).day(28),
+            private: BTreeMap::new(),
+        };
+        let metadata = Metadata::new().piece_info("KrillaApp", entry);
+
+        let mut pdf = Pdf::new();
+        let mut ref_ = Ref::new(1);
+        metadata.serialize_document_info(&mut ref_, &mut pdf, Configuration::default());
+
+        let bytes = pdf.as_bytes();
+        let contains = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        assert!(
+            contains(b"/ModDate"),
+            "/ModDate must be emitted when /PieceInfo is present"
+        );
+        assert!(
+            !contains(b"/CreationDate"),
+            "/CreationDate must not be fabricated when no creation date was supplied"
+        );
+    }
+
+    #[test]
+    fn legal_content_is_empty_when_all_fields_unset() {
+        let lc = LegalContent::new();
+        assert!(lc.is_empty());
+    }
+
+    #[test]
+    fn legal_content_setters_round_trip() {
+        let lc = LegalContent::new()
+            .javascript_actions(true)
+            .uri_actions(false)
+            .non_embedded_fonts(7)
+            .attestation("Authenticated by acme.example");
+        assert_eq!(lc.javascript_actions, Some(true));
+        assert_eq!(lc.uri_actions, Some(false));
+        assert_eq!(lc.non_embedded_fonts, Some(7));
+        assert_eq!(
+            lc.attestation.as_deref(),
+            Some("Authenticated by acme.example")
+        );
+        assert!(!lc.is_empty());
+    }
+
+    #[test]
+    fn metadata_legal_content_empty_input_clears_the_slot() {
+        // First set a non-empty block, then call again with an empty
+        // one — the slot should be cleared so no `/LegalContent`
+        // entry is emitted.
+        let metadata = Metadata::new()
+            .legal_content(LegalContent::new().javascript_actions(true))
+            .legal_content(LegalContent::new());
+        assert!(metadata.legal_content.is_none());
+    }
+
+    #[test]
+    fn open_action_javascript_builder_constructs_variant() {
+        // E.9-CC3 — the `OpenAction::javascript(...)` builder must
+        // produce the matching enum variant verbatim so downstream
+        // consumers can pattern-match on the script payload.
+        let action = OpenAction::javascript("app.alert('hi');");
+        match action {
+            OpenAction::JavaScript(script) => {
+                assert_eq!(script, "app.alert('hi');");
+            }
+            other => panic!("expected OpenAction::JavaScript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_action_javascript_round_trips_through_metadata() {
+        // E.9-CC3 — round-trip the action through `Metadata` so the
+        // catalogue `/OpenAction` serialisation path in
+        // `chunk_container.rs` has a stable input shape to consume.
+        let metadata = Metadata::new().open_action(OpenAction::javascript("print();"));
+        let stored = metadata
+            .open_action
+            .as_ref()
+            .expect("open_action should be set after builder");
+        match stored {
+            OpenAction::JavaScript(script) => {
+                assert_eq!(script, "print();");
+            }
+            other => panic!("expected OpenAction::JavaScript, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn open_action_clones_javascript_payload() {
+        // E.9-CC3 — `OpenAction` lost `Copy` to accommodate the
+        // owned-`String` JavaScript variant. The clone path is the
+        // only way callers (and the serialiser) can read the payload
+        // without taking ownership; assert it preserves the bytes.
+        let original = OpenAction::javascript("foo();");
+        let copy = original.clone();
+        match (original, copy) {
+            (OpenAction::JavaScript(a), OpenAction::JavaScript(b)) => {
+                assert_eq!(a, b);
+            }
+            _ => panic!("clone produced a different variant"),
+        }
     }
 }

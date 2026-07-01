@@ -154,6 +154,46 @@ mod colr {
             );
         }
     }
+
+    /// Selecting a non-default CPAL palette via [`Font::new_with_palette`]
+    /// must change the rendered colour records — the COLR test font
+    /// carries three distinct palettes, so the serialised output for a
+    /// non-default palette must differ from the default. Requesting
+    /// palette 0 explicitly must equal the default-constructed font,
+    /// which also proves the difference is the palette and not
+    /// run-to-run nondeterminism.
+    #[test]
+    fn font_colr_non_default_palette_changes_output() {
+        use krilla::text::KrillaGlyph;
+
+        fn colr_pdf(font: Font) -> Vec<u8> {
+            let mut document = Document::new();
+            let mut page = document.start_page_with(PageSettings::from_wh(400.0, 400.0).unwrap());
+            let mut surface = page.surface();
+            let glyphs = (0..=220u32)
+                .map(|n| KrillaGlyph::new(GlyphId::new(n), 0.0, 0.0, 0.0, 0.0, 0..0, None))
+                .collect::<Vec<_>>();
+            surface.draw_glyphs(Point::from_xy(0.0, 0.0), &glyphs, font, "", 20.0, false);
+            surface.finish();
+            page.finish();
+            document.finish().unwrap()
+        }
+
+        let default_palette = colr_pdf(Font::new(COLR_TEST_GLYPHS.clone(), 0).unwrap());
+        let explicit_palette_0 =
+            colr_pdf(Font::new_with_palette(COLR_TEST_GLYPHS.clone(), 0, 0).unwrap());
+        let non_default_palette =
+            colr_pdf(Font::new_with_palette(COLR_TEST_GLYPHS.clone(), 0, 1).unwrap());
+
+        assert_eq!(
+            default_palette, explicit_palette_0,
+            "explicit palette 0 must equal the default palette output",
+        );
+        assert_ne!(
+            default_palette, non_default_palette,
+            "a non-default CPAL palette must alter the rendered output",
+        );
+    }
 }
 
 mod svg {
