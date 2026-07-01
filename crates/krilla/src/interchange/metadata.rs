@@ -8,7 +8,8 @@
 use pdf_writer::types::TrappingStatus;
 use pdf_writer::{Finish, Name, Pdf, Ref, TextStr};
 use std::cell::LazyCell;
-use xmp_writer::{LangId, Timezone, XmpWriter};
+use std::ops::DerefMut;
+use xmp_writer::{CustomNamespace, LangId, Namespace, Timezone, XmpWriter};
 
 use crate::configure::{Configuration, PdfVersion, ValidationError};
 use crate::serialize::SerializeContext;
@@ -52,6 +53,15 @@ pub struct Metadata {
     /// Table 200). One entry per event key; `set_document_event_script`
     /// overwrites a duplicate event.
     pub(crate) document_event_scripts: Vec<(DocumentEvent, String)>,
+    /// F18 — author-supplied custom entries written into the PDF
+    /// `/Info` dictionary (ISO 32000-2 §14.3.3 "any number of
+    /// additional entries containing application-specific data")
+    /// and mirrored into the XMP packet under the `pdfx:` namespace
+    /// (Adobe XMP Specification Part 3 §3.4 "PDF metadata extension
+    /// schema"). Order is preserved. Duplicate names retain the
+    /// later value (the builder calls
+    /// [`Metadata::custom_property`] with last-wins semantics).
+    pub(crate) custom_properties: Vec<(String, String)>,
 }
 
 /// PDF catalogue-level additional-action event keys (ISO 32000-2
@@ -321,6 +331,39 @@ impl Metadata {
         self
     }
 
+    /// Register a custom entry in the PDF `/Info` dictionary
+    /// (ISO 32000-2 §14.3.3 — "any number of additional entries
+    /// containing application-specific data") and mirror it into the
+    /// XMP packet under the `pdfx:` namespace (Adobe XMP Specification
+    /// Part 3 §3.4 "PDF metadata extension schema") so PDF/A
+    /// consumers (which require Info-dict entries to be reflected in
+    /// XMP per ISO 19005-1 §6.7.3) see the same metadata.
+    ///
+    /// Standard Info-dict slot names (`Title`, `Author`, `Subject`,
+    /// `Keywords`, `Creator`, `Producer`, `CreationDate`, `ModDate`,
+    /// `Trapped`, `GTS_PDFXVersion`) MUST NOT be supplied via this
+    /// setter — the caller is expected to filter them out before
+    /// reaching krilla. krilla writes the supplied `name` verbatim
+    /// as a PDF name token; the value is written as a PDF text
+    /// string (UTF-16BE BOM-prefixed when it contains non-ASCII,
+    /// per ISO 32000-2 §7.9.2.2).
+    ///
+    /// Duplicate `name`s retain the later value (last-wins).
+    pub fn custom_property(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        let name = name.into();
+        let value = value.into();
+        if name.is_empty() {
+            return self;
+        }
+        self.custom_properties.retain(|(existing, _)| existing != &name);
+        self.custom_properties.push((name, value));
+        self
+    }
+
 
     pub(crate) fn has_document_info(&self) -> bool {
         self.title.is_some()
@@ -330,6 +373,7 @@ impl Metadata {
             || self.creator.is_some()
             || self.creation_date.is_some()
             || self.description.is_some()
+            || !self.custom_properties.is_empty()
     }
 
     pub(crate) fn serialize_xmp_metadata(
@@ -479,6 +523,30 @@ impl Metadata {
                 Trapping::Unknown => {}
             }
         }
+
+        // F18 — mirror custom Info-dict entries into the XMP packet
+        // under the Adobe `pdfx:` namespace (Adobe XMP Specification
+        // Part 3 §3.4 "PDF metadata extension schema",
+        // <http://ns.adobe.com/pdfx/1.3/>). PDF/A consumers require
+        // Info-dict entries to be reflected in XMP (ISO 19005-1 §6.7.3
+        // — "metadata in the document information dictionary and any
+        // /Metadata stream attached to the document catalogue
+        // dictionary shall be the same"), so the mirror is unconditional
+        // whenever the caller has supplied custom properties. The
+        // namespace identifier strings are `'static` so they outlive
+        // the XmpWriter borrow without an extra allocation; the
+        // per-entry (name, value) borrows live on `self`.
+        for (name, value) in &self.custom_properties {
+            xmp.element(
+                name.as_str(),
+                Namespace::Custom(Box::new(CustomNamespace::new(
+                    "PDF Extension",
+                    "pdfx",
+                    "http://ns.adobe.com/pdfx/1.3/",
+                ))),
+            )
+            .value(value.as_str());
+        }
     }
 
     pub(crate) fn serialize_document_info(
@@ -501,6 +569,13 @@ impl Metadata {
             || config.validators().requires_trapping_metadata()
             || self.trapped.is_some();
 
+        // Custom Info-dict entries (ISO 32000-2 §14.3.3) are NOT
+        // deprecated in PDF 2.0 — only the standard string slots
+        // (Title, Author, …) are. Force the Info dict open whenever
+        // the caller has registered custom properties so the entries
+        // survive a PDF 2.0 emission.
+        let has_custom_properties = !self.custom_properties.is_empty();
+
         // Under PDF 2.0 the per-field string entries (title, producer,
         // etc.) are deprecated and not written — only `creation_date`
         // and the PDF/X-mandated entries remain. Guard the ref bump
@@ -511,7 +586,7 @@ impl Metadata {
         let will_write = if config.version() < PdfVersion::Pdf20 {
             self.has_document_info() || requires_pdfx_info
         } else {
-            self.creation_date.is_some() || requires_pdfx_info
+            self.creation_date.is_some() || requires_pdfx_info || has_custom_properties
         };
 
         if will_write {
@@ -569,6 +644,19 @@ impl Metadata {
             // the Info dict (see above) and carry the version solely in XMP.
             if let Some(version_str) = config.validators().gts_pdfx_version_string() {
                 document_info.pair(Name(b"GTS_PDFXVersion"), TextStr(version_str));
+            }
+
+            // F18 — author-supplied custom Info-dict entries
+            // (ISO 32000-2 §14.3.3). PDF allows arbitrary additional
+            // keys; the standard-slot deprecation in PDF 2.0 does NOT
+            // apply to application-defined keys, so these survive
+            // regardless of `config.version()`. The caller is
+            // responsible for not colliding with the spec-reserved
+            // names; krilla writes the supplied name verbatim.
+            for (name, value) in &self.custom_properties {
+                document_info
+                    .deref_mut()
+                    .pair(Name(name.as_bytes()), TextStr(value));
             }
         }
     }
