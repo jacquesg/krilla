@@ -102,42 +102,35 @@ fn extend_segments_from_group(
 ) {
     for child in group.children() {
         match child {
-            usvg::Node::Path(ref path) => {
-                if path.is_visible() {
-                    path.data().segments().for_each(|segment| match segment {
-                        PathSegment::MoveTo(mut p) => {
-                            transform.map_point(&mut p);
-                            path_builder.move_to(p.x, p.y);
-                        }
-                        PathSegment::LineTo(mut p) => {
-                            transform.map_point(&mut p);
-                            path_builder.line_to(p.x, p.y)
-                        }
-                        PathSegment::QuadTo(p1, p2) => {
-                            let mut points = [p1, p2];
-                            transform.map_points(&mut points);
-                            path_builder.quad_to(
-                                points[0].x,
-                                points[0].y,
-                                points[1].x,
-                                points[1].y,
-                            );
-                        }
-                        PathSegment::CubicTo(p1, p2, p3) => {
-                            let mut points = [p1, p2, p3];
-                            transform.map_points(&mut points);
-                            path_builder.cubic_to(
-                                points[0].x,
-                                points[0].y,
-                                points[1].x,
-                                points[1].y,
-                                points[2].x,
-                                points[2].y,
-                            );
-                        }
-                        PathSegment::Close => path_builder.close(),
-                    })
-                }
+            usvg::Node::Path(ref path) if path.is_visible() => {
+                path.data().segments().for_each(|segment| match segment {
+                    PathSegment::MoveTo(mut p) => {
+                        transform.map_point(&mut p);
+                        path_builder.move_to(p.x, p.y);
+                    }
+                    PathSegment::LineTo(mut p) => {
+                        transform.map_point(&mut p);
+                        path_builder.line_to(p.x, p.y)
+                    }
+                    PathSegment::QuadTo(p1, p2) => {
+                        let mut points = [p1, p2];
+                        transform.map_points(&mut points);
+                        path_builder.quad_to(points[0].x, points[0].y, points[1].x, points[1].y);
+                    }
+                    PathSegment::CubicTo(p1, p2, p3) => {
+                        let mut points = [p1, p2, p3];
+                        transform.map_points(&mut points);
+                        path_builder.cubic_to(
+                            points[0].x,
+                            points[0].y,
+                            points[1].x,
+                            points[1].y,
+                            points[2].x,
+                            points[2].y,
+                        );
+                    }
+                    PathSegment::Close => path_builder.close(),
+                })
             }
             usvg::Node::Group(ref group) => {
                 let group_transform = transform.pre_concat(group.transform());

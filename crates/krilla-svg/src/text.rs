@@ -35,6 +35,38 @@ pub(crate) fn render(
             path::render(underline, surface, process_context);
         }
 
+        // usvg lays glyphs out in visual order after BIDI reordering, with
+        // `byte_idx` giving each glyph's logical (source) offset. When the
+        // reordering makes visual order differ from logical reading order
+        // (RTL / bidi), wrap the span's glyphs in an /ActualText marked-content
+        // region carrying the source text in logical order — recovered by
+        // sorting on `byte_idx` — so the text extracts in reading order
+        // (ISO 32000-2 §14.9.4). Glyphs are still painted in visual order;
+        // /ActualText only overrides extraction. A non-decreasing byte_idx
+        // sequence is already in logical order (the common LTR / single-glyph
+        // case), so we detect that cheaply and skip building the strings and
+        // the redundant marked content entirely — emitting it would needlessly
+        // override a consumer's position-based extraction. Even when a glyph
+        // runs backwards we still confirm the strings differ, guarding the case
+        // where reordering leaves the concatenated text equal.
+        let reordered = span
+            .positioned_glyphs
+            .windows(2)
+            .any(|w| w[0].byte_idx > w[1].byte_idx);
+        let actual_text_started = if reordered {
+            let visual_text: String = span
+                .positioned_glyphs
+                .iter()
+                .map(|glyph| glyph.text.as_str())
+                .collect();
+            let mut logical: Vec<_> = span.positioned_glyphs.iter().collect();
+            logical.sort_by_key(|glyph| glyph.byte_idx);
+            let actual_text: String = logical.iter().map(|glyph| glyph.text.as_str()).collect();
+            (actual_text != visual_text) && surface.begin_actual_text_content(&actual_text)
+        } else {
+            false
+        };
+
         for glyph in &span.positioned_glyphs {
             // Ignore glyph if font can't be fetched.
             let Some(font) = process_context.fonts.retrieve(span, glyph.font) else {
@@ -140,6 +172,8 @@ pub(crate) fn render(
 
             surface.pop();
         }
+
+        surface.end_actual_text_content(actual_text_started);
 
         if let Some(line_through) = &span.line_through {
             path::render(line_through, surface, process_context);
