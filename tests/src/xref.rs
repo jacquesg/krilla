@@ -119,7 +119,7 @@ fn count_indirect_objects(pdf: &[u8]) -> usize {
             while cursor.last().is_some_and(|b| b.is_ascii_digit()) {
                 cursor = &cursor[..cursor.len() - 1];
             }
-            if gen_end == cursor.len() || !cursor.last().is_some_and(|b| *b == b' ') {
+            if gen_end == cursor.len() || cursor.last().is_none_or(|b| *b != b' ') {
                 return false;
             }
             cursor = &cursor[..cursor.len() - 1];

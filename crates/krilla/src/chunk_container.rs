@@ -89,6 +89,10 @@ impl ChunkContainer {
     /// runs so the catalogue-emit path can pick up the placeholder
     /// reservation and metadata to write into the `/Sig`
     /// dictionary.
+    // The parameters mirror the eight `SignatureEmissionSettings` fields
+    // one-to-one; bundling them into a parameter struct would just
+    // duplicate that type at the sole call site.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn set_signature_emission_settings(
         &mut self,
         sub_filter: crate::interactive::signature::SignatureSubFilter,
@@ -780,12 +784,12 @@ impl ChunkContainer {
                 // written ahead of every `EmbedLocation::After`
                 // entry, with alphabetical order preserved within
                 // each partition (BTreeMap iteration order).
-                for (_name, (ref_, location)) in &embedded_files {
+                for (ref_, location) in embedded_files.values() {
                     if matches!(location, crate::embed::EmbedLocation::Before) {
                         associated_files.item(remapper[ref_]).finish();
                     }
                 }
-                for (_name, (ref_, location)) in &embedded_files {
+                for (ref_, location) in embedded_files.values() {
                     if matches!(location, crate::embed::EmbedLocation::After) {
                         associated_files.item(remapper[ref_]).finish();
                     }

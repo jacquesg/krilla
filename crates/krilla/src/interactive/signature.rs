@@ -48,7 +48,7 @@ use crate::error::KrillaResult;
 /// `/Contents`. Per ISO 32000-2 §12.8.1, the `/Filter` is always
 /// `/Adobe.PPKLite` for signatures krilla writes — `/SubFilter`
 /// selects between the two interoperable CMS profiles.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SignatureSubFilter {
     /// PKCS#7 detached — the legacy Adobe profile and the default
     /// for `signPDF` output from PDFreactor, Prince, Antenna House
@@ -56,6 +56,7 @@ pub enum SignatureSubFilter {
     /// `SignedData` structure whose `encapContentInfo.eContent`
     /// is **absent** (detached); the signed message is the
     /// document byte range described by `/ByteRange`.
+    #[default]
     AdbePkcs7Detached,
     /// CAdES detached — ETSI TS 102 778 / ETSI EN 319 142 profile
     /// over the same `SignedData` container as
@@ -74,12 +75,6 @@ impl SignatureSubFilter {
             Self::AdbePkcs7Detached => b"adbe.pkcs7.detached",
             Self::EtsiCAdesDetached => b"ETSI.CAdES.detached",
         }
-    }
-}
-
-impl Default for SignatureSubFilter {
-    fn default() -> Self {
-        Self::AdbePkcs7Detached
     }
 }
 
@@ -257,9 +252,9 @@ pub(crate) const BYTE_RANGE_PLACEHOLDER_DECIMAL: &[u8] = b"1000000000";
 ///    bookkeeping; we re-derive them here by searching for the
 ///    distinctive marker.
 /// 3. Compute the byte range `[0 a b c]` where:
-///       a = byte offset of the opening `<` of `/Contents`
-///       b = byte offset of the byte AFTER the closing `>`
-///       c = total length - b
+///    a = byte offset of the opening `<` of `/Contents`
+///    b = byte offset of the byte AFTER the closing `>`
+///    c = total length - b
 /// 4. Overwrite the placeholder integers in `/ByteRange`.
 /// 5. Concatenate the two byte-range slices (`0..a` and `b..b+c`),
 ///    invoke the signer, hex-encode the result, right-pad with

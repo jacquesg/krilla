@@ -147,6 +147,11 @@ impl Resourceable for DeviceNColorSpace {
 /// output values. A single `roll` brings the tints to the top of the
 /// stack and `M` `pop`s discard them, leaving the M outputs as the
 /// function's return values.
+// The indices `m` and `i` drive PostScript operand-stack depth
+// arithmetic (`depth = (colorant_count - 1 - i) + m`), and `m` selects
+// a column across the per-colorant rows; neither is a plain sequential
+// walk, so index-free iterators would obscure the stack layout.
+#[allow(clippy::needless_range_loop)]
 fn build_linear_postscript<'a>(
     colorant_count: usize,
     num_alt_components: usize,

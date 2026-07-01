@@ -252,8 +252,8 @@ impl Metadata {
     /// Two flavours are exposed:
     ///
     /// - [`OpenAction::go_to_page_with_zoom`] — direct-link to a
-    ///   page-and-zoom destination (moegoe G5b: `-bd-initial-page`
-    ///   + `-bd-initial-zoom`). The 0-indexed page reference is
+    ///   page-and-zoom destination (moegoe G5b: `-bd-initial-page` +
+    ///   `-bd-initial-zoom`). The 0-indexed page reference is
     ///   resolved at serialise time against the `PageInfo` table;
     ///   an out-of-range page index is not detected here (it would
     ///   panic during serialisation mirroring

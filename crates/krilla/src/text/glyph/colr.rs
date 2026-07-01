@@ -269,15 +269,15 @@ impl ColrBuilder {
             // array. The palette base is clamped to palette `0` when
             // the embedder selected an out-of-range palette so the
             // glyph still draws with a defined colour.
-            let palette_base = if num_palette_entries == 0 {
-                0
-            } else {
-                let palette_count = records.len() / num_palette_entries;
-                let raw_base = usize::from(self.font.palette_base());
-                if raw_base < palette_count {
-                    raw_base
-                } else {
-                    0
+            let palette_base = match records.len().checked_div(num_palette_entries) {
+                None => 0,
+                Some(palette_count) => {
+                    let raw_base = usize::from(self.font.palette_base());
+                    if raw_base < palette_count {
+                        raw_base
+                    } else {
+                        0
+                    }
                 }
             };
             let absolute_index = palette_base

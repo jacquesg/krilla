@@ -1089,6 +1089,11 @@ fn write_form_xobject(chunk: &mut Chunk, stream: &AppearanceStream, helv_ref: Re
 }
 
 /// A type of annotation.
+// `AnnotationType` is public API: downstream code constructs and matches
+// these variants directly, so boxing the largest variant would be a
+// breaking change. Annotations are not held in bulk, so the size
+// difference between variants is not a concern here.
+#[allow(clippy::large_enum_variant)]
 pub enum AnnotationType {
     /// A link annotation.
     Link(LinkAnnotation),
