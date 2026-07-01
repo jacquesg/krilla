@@ -229,18 +229,24 @@ impl Metadata {
     /// Set the document's `/OpenAction` (ISO 32000-2 §12.6.4.3).
     ///
     /// The viewer executes this action when the document is opened.
-    /// Krilla supports the `[<page-ref> <destination>]` direct-link
-    /// form via [`OpenAction::go_to_page_with_zoom`]; this is the only
-    /// form needed for the moegoe G5b PDFreactor parity surface
-    /// (`-bd-initial-page` + `-bd-initial-zoom`). Other forms
-    /// (`/JavaScript`, `/Named`, `/SubmitForm`, etc.) are not exposed.
+    /// Two flavours are exposed:
     ///
-    /// The 0-indexed page reference is resolved at serialise time
-    /// against the `PageInfo` table; an out-of-range page index is
-    /// not detected here (it would panic during serialisation
-    /// mirroring `XyzDestination::serialize`'s behaviour). Callers
-    /// must clamp into `[0, page_count)` before invoking this
-    /// setter.
+    /// - [`OpenAction::go_to_page_with_zoom`] — direct-link to a
+    ///   page-and-zoom destination (moegoe G5b: `-bd-initial-page`
+    ///   + `-bd-initial-zoom`). The 0-indexed page reference is
+    ///   resolved at serialise time against the `PageInfo` table;
+    ///   an out-of-range page index is not detected here (it would
+    ///   panic during serialisation mirroring
+    ///   `XyzDestination::serialize`'s behaviour). Callers must
+    ///   clamp into `[0, page_count)` before invoking this setter.
+    /// - [`OpenAction::named`] — named-action dispatch
+    ///   (ISO 32000-2 §12.6.4.9 Table 200). Used by the PDFreactor
+    ///   `printDialogPrompt` parity surface to raise the print
+    ///   dialog on document open via [`NamedAction::Print`].
+    ///
+    /// Other action types (`/JavaScript`, `/SubmitForm`, etc.) are
+    /// not exposed at this entry; use the appropriate annotation
+    /// or document-event setter instead.
     pub fn open_action(mut self, action: OpenAction) -> Self {
         self.open_action = Some(action);
         self
@@ -723,26 +729,82 @@ fn xmp_date(datetime: DateTime) -> xmp_writer::DateTime {
 
 /// `/OpenAction` document action (ISO 32000-2 §12.6.4.3).
 ///
-/// Currently only the direct-link `[<page-ref> <destination>]`
-/// form is exposed. Krilla serialises this as a single-line
-/// array entry on the catalogue dictionary; the destination
-/// flavour comes from [`OpenZoom`].
+/// Two flavours are exposed:
+///
+/// - [`OpenAction::go_to_page_with_zoom`] — the direct-link
+///   `[<page-ref> <destination>]` form serialised as a single-line
+///   array entry on the catalogue dictionary.
+/// - [`OpenAction::named`] — the named-action form serialised as
+///   a `<< /S /Named /N /<NamedAction> >>` dictionary. Used to
+///   trigger viewer-side commands such as the print dialog on
+///   document open (ISO 32000-2 §12.6.4.9 Table 200).
 #[derive(Copy, Clone, Debug)]
-pub struct OpenAction {
-    /// 0-indexed page the viewer should open on. Resolved against
-    /// the document's `PageInfo` table at serialise time; an
+pub enum OpenAction {
+    /// Direct-link destination — opens `page_index` (0-indexed)
+    /// at the given destination flavour. Resolved against the
+    /// document's `PageInfo` table at serialise time; an
     /// out-of-range index panics in the same way `XyzDestination`
     /// does.
-    pub(crate) page_index: usize,
-    /// Destination flavour.
-    pub(crate) zoom: OpenZoom,
+    GoToPage {
+        /// 0-indexed page the viewer should open on.
+        page_index: usize,
+        /// Destination flavour.
+        zoom: OpenZoom,
+    },
+    /// Named action — opens the document and immediately
+    /// dispatches a viewer-side command (ISO 32000-2 §12.6.4.9).
+    Named(NamedAction),
 }
 
 impl OpenAction {
     /// Build an `/OpenAction` direct-link entry that opens
     /// `page_index` (0-indexed) at the given destination flavour.
     pub fn go_to_page_with_zoom(page_index: usize, zoom: OpenZoom) -> Self {
-        Self { page_index, zoom }
+        Self::GoToPage { page_index, zoom }
+    }
+
+    /// Build an `/OpenAction` named-action entry that dispatches
+    /// `action` on document open (ISO 32000-2 §12.6.4.9 Table 200).
+    ///
+    /// The most common use is [`NamedAction::Print`] to raise the
+    /// viewer's print dialog immediately — mirroring PDFreactor's
+    /// `printDialogPrompt` configuration property.
+    pub fn named(action: NamedAction) -> Self {
+        Self::Named(action)
+    }
+}
+
+/// Named-action targets for [`OpenAction::Named`] and other
+/// `/Type /Action /S /Named` slots (ISO 32000-2 §12.6.4.9
+/// Table 200).
+///
+/// The PDF spec defines four standard named actions; viewers may
+/// recognise vendor extensions but krilla only emits the standard
+/// set. Each variant serialises to the matching `/N` name.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum NamedAction {
+    /// `/N /NextPage` — advance to the next page.
+    NextPage,
+    /// `/N /PrevPage` — return to the previous page.
+    PrevPage,
+    /// `/N /FirstPage` — jump to the first page.
+    FirstPage,
+    /// `/N /LastPage` — jump to the last page.
+    LastPage,
+    /// `/N /Print` — raise the viewer's print dialog. Used by the
+    /// PDFreactor `printDialogPrompt` parity surface.
+    Print,
+}
+
+impl NamedAction {
+    pub(crate) fn to_name(self) -> Name<'static> {
+        match self {
+            NamedAction::NextPage => Name(b"NextPage"),
+            NamedAction::PrevPage => Name(b"PrevPage"),
+            NamedAction::FirstPage => Name(b"FirstPage"),
+            NamedAction::LastPage => Name(b"LastPage"),
+            NamedAction::Print => Name(b"Print"),
+        }
     }
 }
 
