@@ -487,3 +487,735 @@ fn text_variable_font_cff2(surface: &mut Surface) {
         "I love variable fonts!",
     );
 }
+
+/// Render the word "Hi" once with [`TextRendering::Glyphs`] and once
+/// with [`TextRendering::Vector`], then assert the byte stream emits
+/// text-showing operators in the first case and path operators in the
+/// second.
+///
+/// Both passes disable content-stream compression
+/// ([`SerializeSettings::compress_content_streams`] = `false`) so the
+/// page content stream is inspectable as ASCII PDF operators. krilla
+/// writes several auxiliary streams (CID-to-GID maps, embedded font
+/// programmes) interleaved with the page content stream — rather than
+/// trying to identify "the" page stream we scan the entire PDF for the
+/// presence and absence of the operators of interest, which is
+/// equivalent because the auxiliary streams never contain `BT`/`ET`
+/// text-block markers.
+#[test]
+fn text_rendering_setting_switches_glyph_to_vector_emission() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    fn render(setting: TextRendering) -> Vec<u8> {
+        let settings = SerializeSettings {
+            pretty: true,
+            compress_content_streams: false,
+            text_rendering: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            // `outlined: false` — the document-level setting must be the
+            // only thing that flips the emission path.
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn contains_op(pdf: &[u8], op: &[u8]) -> bool {
+        pdf.windows(op.len()).any(|w| w == op)
+    }
+
+    let glyphs_pdf = render(TextRendering::Glyphs);
+    let vector_pdf = render(TextRendering::Vector);
+
+    // Glyphs mode: text-block operators (`BT`/`ET`) frame a `Tj` call.
+    assert!(
+        contains_op(&glyphs_pdf, b"\nBT\n") || contains_op(&glyphs_pdf, b" BT\n"),
+        "glyphs mode must emit a `BT` text-block operator",
+    );
+    assert!(
+        contains_op(&glyphs_pdf, b"\nET\n") || contains_op(&glyphs_pdf, b" ET\n"),
+        "glyphs mode must emit a matching `ET` text-block operator",
+    );
+
+    // Vector mode: text-block operators absent in the page content
+    // stream. (Auxiliary streams produced by krilla — font programmes,
+    // CMap, /ToUnicode — never embed `BT`/`ET`.)
+    assert!(
+        !contains_op(&vector_pdf, b"\nBT\n") && !contains_op(&vector_pdf, b" BT\n"),
+        "vector mode must NOT emit a `BT` text-block operator",
+    );
+
+    // Vector mode: path operators (`m`/`l`/`c`/`h`/`f`) are present.
+    // We assert on at least `moveto` + `fill`; the curve/line operator
+    // is glyph-shape-dependent and not strictly required.
+    let has_moveto = contains_op(&vector_pdf, b" m\n") || contains_op(&vector_pdf, b"\nm\n");
+    let has_fill = contains_op(&vector_pdf, b" f\n") || contains_op(&vector_pdf, b"\nf\n");
+    assert!(
+        has_moveto && has_fill,
+        "vector mode must emit path operators (`m` and `f`); \
+             moveto={has_moveto} fill={has_fill}",
+    );
+}
+
+/// `Surface::push_text_rendering(Vector)` must scope vector-outline
+/// emission to the push range. Glyphs drawn outside the push pair
+/// must remain in `Tj`/`TJ` mode (the document-level default), and
+/// glyphs drawn inside the push pair must emit path operators
+/// (`m`/`l`/`c`/`h`/`f`).
+///
+/// This verifies the per-call scoping contract documented on
+/// [`Surface::push_text_rendering`].
+#[test]
+fn push_text_rendering_scopes_vector_emission_to_push_range() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        // Default document is glyph-mode; only the per-call push
+        // promotes the middle range to vector.
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        font.clone(),
+        32.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    surface.push_text_rendering(TextRendering::Vector);
+    surface.draw_text(
+        Point::from_xy(50.0, 90.0),
+        font.clone(),
+        32.0,
+        "Vec",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    surface.draw_text(
+        Point::from_xy(50.0, 130.0),
+        font,
+        32.0,
+        "By",
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    fn contains_op(pdf: &[u8], op: &[u8]) -> bool {
+        pdf.windows(op.len()).any(|w| w == op)
+    }
+
+    // Glyph mode must still be active for the outer draws: at least one
+    // `BT` text-block opener must survive.
+    assert!(
+        contains_op(
+            &pdf, b"
+BT
+"
+        ) || contains_op(
+            &pdf, b" BT
+"
+        ),
+        "outer (default-glyph-mode) draws must emit a `BT` text-block operator",
+    );
+    // The push range must have produced fill / moveto path operators
+    // for the outlined glyphs.
+    let has_moveto = contains_op(
+        &pdf, b" m
+",
+    ) || contains_op(
+        &pdf, b"
+m
+",
+    );
+    let has_fill = contains_op(
+        &pdf, b" f
+",
+    ) || contains_op(
+        &pdf, b"
+f
+",
+    );
+    assert!(
+        has_moveto && has_fill,
+        "push_text_rendering(Vector) range must emit path operators          (`m` and `f`); moveto={has_moveto} fill={has_fill}",
+    );
+}
+
+/// `Surface::push_text_rendering` must nest correctly with
+/// `push_text_rendering`/`pop` of other instruction kinds, and the
+/// outer document-level setting must take over again once every push
+/// has been popped.
+#[test]
+fn push_text_rendering_nests_with_other_push_instructions() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.push_transform(&krilla::geom::Transform::from_translate(10.0, 10.0));
+    surface.push_text_rendering(TextRendering::Vector);
+    surface.draw_text(
+        Point::from_xy(0.0, 0.0),
+        Font::new(NOTO_SANS.clone(), 0).unwrap(),
+        24.0,
+        "X",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    surface.pop();
+    surface.finish();
+    page.finish();
+    // The matching pops in the inverse order must leave the surface
+    // in a balanced state — `document.finish()` panics if any push
+    // is unmatched.
+    let _pdf = document.finish().unwrap();
+}
+
+/// Helper for the `TextRendering::Invisible` tests: substring scan over
+/// the (uncompressed) PDF bytes.
+#[cfg(test)]
+fn pdf_contains(pdf: &[u8], needle: &[u8]) -> bool {
+    pdf.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `TextRendering::Invisible` must emit the PDF text-rendering-mode
+/// operator `3 Tr` for the glyph run, AND the glyph showing operator
+/// (`Tj` / `TJ`) so consumers can still extract the text. This is the
+/// load-bearing assertion for a text-extraction-preserving ActualText
+/// overlay: invisible mode is useless if either side is missing.
+///
+/// `pdf-writer` emits operators with single-space separation and a
+/// trailing newline, so the exact byte sequences are `3 Tr\n`, `] TJ\n`
+/// (or `) Tj\n`), `BT\n`, and `ET\n`. See `pdf-writer::Operation::drop`
+/// for the formatting contract.
+#[test]
+fn text_rendering_invisible_emits_tr3_and_glyph_show() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        text_rendering: TextRendering::Invisible,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        Font::new(NOTO_SANS.clone(), 0).unwrap(),
+        32.0,
+        "Hi",
+        // `outlined: false` — invisible mode must override.
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    // `3 Tr` is the load-bearing operator. `TextRenderingMode::to_int()`
+    // formats as an integer, so the exact bytes are `3 Tr\n`.
+    assert!(
+        pdf_contains(&pdf, b"3 Tr\n"),
+        "invisible mode must emit `3 Tr` (text rendering mode 3)",
+    );
+    // Glyph showing operator must still be present — invisible mode
+    // is text-extraction-preserving by design. `pdf-writer` formats
+    // both `Tj` and `TJ` with a leading space.
+    let has_tj = pdf_contains(&pdf, b" Tj\n") || pdf_contains(&pdf, b" TJ\n");
+    assert!(
+        has_tj,
+        "invisible mode must still emit a glyph-showing operator \
+         (`Tj` or `TJ`) so text remains extractable",
+    );
+    // And the text-block markers, since the glyphs go through the
+    // normal `BT`/`ET` framing.
+    assert!(
+        pdf_contains(&pdf, b"BT\n"),
+        "invisible mode must still open a `BT` text block",
+    );
+    assert!(
+        pdf_contains(&pdf, b"ET\n"),
+        "invisible mode must close the text block with `ET`",
+    );
+}
+
+/// `TextRendering::Invisible` must not emit any fill- or stroke-colour
+/// setting operator (`rg` / `RG` / `k` / `K` / `sc` / `SC` / `scn` /
+/// `SCN`) for the invisible glyph run. The whole point of mode 3 is to
+/// skip painting; emitting a colour change is a leak that hurts blend
+/// modes and overprint state.
+///
+/// The control case is a fill-coloured visible run (we explicitly set a
+/// non-default red fill so krilla emits the `rg` operator), proving the
+/// scan would detect colour-set ops if they were emitted. We then
+/// render the same string in invisible mode under the same fill and
+/// assert no colour-set operator survives.
+#[test]
+fn text_rendering_invisible_skips_fill_and_stroke_colour() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    fn render(setting: TextRendering) -> Vec<u8> {
+        let settings = SerializeSettings {
+            pretty: true,
+            compress_content_streams: false,
+            text_rendering: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        // Set a non-default red fill so the visible-mode control
+        // emits an `rg` operator we can detect.
+        surface.set_fill(Some(red_fill(1.0)));
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    // Glyph mode with a red fill must emit an `rg` operator — the
+    // control that proves the scan below would catch any colour-set
+    // operator emitted by invisible mode.
+    let glyphs_pdf = render(TextRendering::Glyphs);
+    assert!(
+        pdf_contains(&glyphs_pdf, b" rg\n"),
+        "control: visible-glyph mode with a red fill must emit an \
+         `rg` operator (sanity check for the scan below)",
+    );
+
+    let invisible_pdf = render(TextRendering::Invisible);
+    // The eight PDF colour-set operators that would tell a consumer
+    // to change paint state. Invisible mode must emit none of them.
+    let banned: &[&[u8]] = &[
+        b" rg\n", b" RG\n", b" k\n", b" K\n", b" sc\n", b" SC\n", b" scn\n", b" SCN\n",
+    ];
+    for op in banned {
+        assert!(
+            !pdf_contains(&invisible_pdf, op),
+            "invisible mode must not emit colour-set operator {:?}",
+            std::str::from_utf8(op).unwrap_or("?"),
+        );
+    }
+    // Defence-in-depth: `3 Tr` must still be emitted so consumers
+    // know not to paint anyway.
+    assert!(
+        pdf_contains(&invisible_pdf, b"3 Tr\n"),
+        "invisible mode must still emit `3 Tr` even when a fill is \
+         set on the surface",
+    );
+}
+
+/// `Surface::push_text_rendering(Invisible)` must nest: the push range
+/// emits `3 Tr` and produces no painted marks, but glyphs drawn before
+/// the push and after the pop must remain in the document-level glyph
+/// mode (which paints with the active fill).
+#[test]
+fn push_text_rendering_invisible_scopes_to_push_range() {
+    use krilla::{SerializeSettings, TextRendering};
+
+    let settings = SerializeSettings {
+        pretty: true,
+        compress_content_streams: false,
+        // Default to glyph mode so the surrounding draws are visible.
+        text_rendering: TextRendering::Glyphs,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let mut page = document.start_page();
+    let mut surface = page.surface();
+    // Outer fill: red. We use a non-default colour so the outer
+    // glyph-mode draws emit an `rg` operator we can assert on.
+    surface.set_fill(Some(red_fill(1.0)));
+    let font = Font::new(NOTO_SANS.clone(), 0).unwrap();
+    // Outer draw: default glyph mode with the red fill.
+    surface.draw_text(
+        Point::from_xy(50.0, 50.0),
+        font.clone(),
+        32.0,
+        "Hi",
+        false,
+        TextDirection::Auto,
+    );
+    // Inner draw: invisible.
+    surface.push_text_rendering(TextRendering::Invisible);
+    surface.draw_text(
+        Point::from_xy(50.0, 90.0),
+        font.clone(),
+        32.0,
+        "Inv",
+        false,
+        TextDirection::Auto,
+    );
+    surface.pop();
+    // After the pop the state must restore: outer draw is glyph mode
+    // again. `document.finish()` would panic if the push were
+    // unbalanced.
+    surface.draw_text(
+        Point::from_xy(50.0, 130.0),
+        font,
+        32.0,
+        "By",
+        false,
+        TextDirection::Auto,
+    );
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    // The invisible push range must have emitted `3 Tr`.
+    assert!(
+        pdf_contains(&pdf, b"3 Tr\n"),
+        "push_text_rendering(Invisible) range must emit `3 Tr`",
+    );
+    // The outer draws must still paint with red — an `rg` operator
+    // must be present somewhere in the PDF.
+    assert!(
+        pdf_contains(&pdf, b" rg\n"),
+        "outer (default-glyph-mode) draws must emit a fill-colour \
+         operator (`rg`)",
+    );
+    // The outer draws must also restore visible mode — `0 Tr` must
+    // appear (krilla resets the rendering mode at the start of each
+    // glyph run).
+    assert!(
+        pdf_contains(&pdf, b"0 Tr\n"),
+        "after the invisible push is popped, subsequent glyph runs \
+         must restore `0 Tr` (visible fill)",
+    );
+    // Sanity: glyph-showing operators are still emitted (text-
+    // extraction works for both the visible and invisible runs).
+    let has_tj = pdf_contains(&pdf, b" Tj\n") || pdf_contains(&pdf, b" TJ\n");
+    assert!(
+        has_tj,
+        "both visible and invisible glyphs must produce a glyph-\
+         showing operator (`Tj` or `TJ`)",
+    );
+}
+
+/// Render the same string under each [`FontEmbedding`] mode and verify
+/// the embedded font programme behaves as documented:
+///
+/// - `Subset`: the document references `/FontFile2` and the resulting
+///   PDF is small (subset of NOTO_SANS).
+/// - `Full`: the document references `/FontFile2` and the resulting
+///   PDF is materially larger than the subset PDF — the full NOTO_SANS
+///   font programme is several hundred kilobytes, whereas a one-word
+///   subset is well under twenty kilobytes.
+/// - `None`: the document does not reference `/FontFile2` or
+///   `/FontFile3` at all.
+#[test]
+fn font_embedding_setting_controls_fontfile_emission() {
+    use krilla::{FontEmbedding, SerializeSettings};
+
+    fn render(setting: FontEmbedding) -> Vec<u8> {
+        let settings = SerializeSettings {
+            compress_content_streams: false,
+            font_embedding: setting,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn contains(pdf: &[u8], needle: &[u8]) -> bool {
+        pdf.windows(needle.len()).any(|w| w == needle)
+    }
+
+    let subset_pdf = render(FontEmbedding::Subset);
+    let full_pdf = render(FontEmbedding::Full);
+    let none_pdf = render(FontEmbedding::None);
+
+    // Subset and Full both reference `/FontFile2` (NOTO_SANS is
+    // TrueType, so the descriptor entry is FontFile2, not FontFile3).
+    assert!(
+        contains(&subset_pdf, b"/FontFile2"),
+        "subset embedding must reference /FontFile2",
+    );
+    assert!(
+        contains(&full_pdf, b"/FontFile2"),
+        "full embedding must reference /FontFile2",
+    );
+
+    // None embedding omits the font programme entirely.
+    assert!(
+        !contains(&none_pdf, b"/FontFile2") && !contains(&none_pdf, b"/FontFile3"),
+        "none embedding must not reference /FontFile2 or /FontFile3",
+    );
+
+    // The font programme dominates the PDF size for these tiny
+    // documents. Full-embedding the entire NOTO_SANS file produces a
+    // document at least four times the size of the two-glyph subset.
+    // (NOTO_SANS Regular ships at ~500 KiB on disk; a "Hi" subset is
+    // well under 20 KiB.) We use a 4x ratio as the assertion to leave
+    // generous head-room for any future flate-encoding wins, while
+    // still cleanly distinguishing the two embedding modes.
+    let subset_len = subset_pdf.len();
+    let full_len = full_pdf.len();
+    assert!(
+        full_len >= subset_len * 4,
+        "full embedding must produce a materially larger PDF than \
+             subset embedding (subset={subset_len} bytes, full={full_len} bytes)",
+    );
+
+    // None embedding strips the largest stream from the PDF, so it
+    // must be smaller than the subset PDF.
+    let none_len = none_pdf.len();
+    assert!(
+        none_len < subset_len,
+        "none embedding must produce a smaller PDF than subset \
+             embedding (none={none_len} bytes, subset={subset_len} bytes)",
+    );
+}
+
+/// `SerializeSettings::glyph_layout` must select between
+/// `TJ`-array per-glyph individual positioning (`Optical`, the
+/// default) and a single `Tj`-string advance-width-only emission
+/// (`Metric`).
+///
+/// Verification rests on three text-showing operators in the PDF
+/// content stream: the `TJ` (positioned-show) operator, the `Tj`
+/// (show) operator, and the `[`/`]` array delimiters that frame
+/// the `TJ` payload. `Optical` mode must emit at least one `TJ`
+/// occurrence for the multi-glyph "Hi" run; `Metric` mode must
+/// emit only `Tj` strings and no `TJ` operator. As a consequence
+/// the `Metric` content stream is strictly smaller than the
+/// `Optical` one.
+///
+/// We disable `compress_content_streams` so the operator bytes
+/// are visible in the raw PDF buffer, then byte-scan because
+/// krilla's serialiser interleaves auxiliary streams (CMap,
+/// `/ToUnicode`, font programmes) with the page content stream.
+/// Those auxiliary streams do not embed text-showing operators,
+/// so a global scan is equivalent to a content-stream scan and
+/// avoids the need to walk the PDF object graph.
+#[test]
+fn glyph_layout_metric_emits_smaller_text_stream_than_optical() {
+    use krilla::{GlyphLayout, SerializeSettings};
+
+    fn render(layout: GlyphLayout) -> Vec<u8> {
+        let settings = SerializeSettings {
+            pretty: true,
+            compress_content_streams: false,
+            glyph_layout: layout,
+            ..Default::default()
+        };
+        let mut document = Document::new_with(settings);
+        let mut page = document.start_page();
+        let mut surface = page.surface();
+        surface.draw_text(
+            Point::from_xy(50.0, 50.0),
+            Font::new(NOTO_SANS.clone(), 0).unwrap(),
+            32.0,
+            "Hi",
+            false,
+            TextDirection::Auto,
+        );
+        surface.finish();
+        page.finish();
+        document.finish().unwrap()
+    }
+
+    fn count_op(pdf: &[u8], op: &[u8]) -> usize {
+        pdf.windows(op.len()).filter(|w| *w == op).count()
+    }
+
+    let optical_pdf = render(GlyphLayout::Optical);
+    let metric_pdf = render(GlyphLayout::Metric);
+
+    // Optical: positioned-show (`TJ`) is the canonical emission
+    // path for runs of two or more glyphs.
+    let optical_tj_array = count_op(&optical_pdf, b" TJ\n") + count_op(&optical_pdf, b"\nTJ\n");
+    assert!(
+        optical_tj_array >= 1,
+        "Optical mode must emit at least one `TJ` array for the \
+             multi-glyph run (found {optical_tj_array})",
+    );
+
+    // Metric: no `TJ` array anywhere. The whole run collapses to
+    // one or more `Tj` strings.
+    let metric_tj_array = count_op(&metric_pdf, b" TJ\n") + count_op(&metric_pdf, b"\nTJ\n");
+    assert_eq!(
+        metric_tj_array, 0,
+        "Metric mode must NOT emit a `TJ` positioned-show array \
+             (found {metric_tj_array})",
+    );
+    let metric_tj_string = count_op(&metric_pdf, b" Tj\n") + count_op(&metric_pdf, b"\nTj\n");
+    assert!(
+        metric_tj_string >= 1,
+        "Metric mode must emit at least one `Tj` show string \
+             (found {metric_tj_string})",
+    );
+
+    // Content-stream size: collapsing the `[ ... ] TJ` array
+    // into a single `Tj` string drops per-glyph numeric
+    // adjustments, so the Metric PDF must be strictly smaller.
+    let optical_len = optical_pdf.len();
+    let metric_len = metric_pdf.len();
+    assert!(
+        metric_len < optical_len,
+        "Metric mode must produce a smaller PDF than Optical \
+             mode (metric={metric_len} bytes, optical={optical_len} \
+             bytes)",
+    );
+}
+
+/// RTL/bidi SVG text must remain extractable in LOGICAL (reading) order.
+/// The krilla-svg text path paints the shaped glyphs in VISUAL order (usvg
+/// lays them out left-to-right after BIDI reordering) but wraps the run in a
+/// `/Span <</ActualText …>>` marked-content region carrying the source text in
+/// logical order (ISO 32000-2 §14.9.4). `/ActualText` overrides only
+/// extraction, not the painted (visual) glyph order — see
+/// `crates/krilla-svg/src/text.rs`.
+///
+/// This renders a pure-Arabic run through the same `draw_svg` path the other
+/// SVG tests use and asserts the emitted `/ActualText` is the logical-order
+/// string, encoded as UTF-16BE with the mandatory U+FEFF byte-order mark — not
+/// the visual (reversed) order the glyphs are painted in. `pdf-writer`'s
+/// `TextStr` writes a non-ASCII string as an uppercase-hex UTF-16BE string
+/// `<FEFF…>`, so the exact needle is `<`, `FEFF`, each UTF-16 code unit
+/// big-endian, then `>`. Content-stream compression is disabled so the needle
+/// is scannable in the raw PDF bytes.
+#[test]
+fn svg_rtl_actual_text_is_logical_order_utf16be() {
+    use krilla::SerializeSettings;
+    use krilla_svg::{SurfaceExt, SvgSettings};
+
+    // Arabic "marhaba" (hello) in logical (source / reading) order. Pure RTL:
+    // usvg shapes and lays these glyphs out left-to-right in VISUAL order,
+    // i.e. reversed from the source, so visual != logical and the krilla-svg
+    // path emits the /ActualText override.
+    const LOGICAL: &str = "مرحبا";
+
+    // Minimal inline SVG. `Amiri` is loaded into `FONTDB` (assets/svg_fonts)
+    // and shapes Arabic; no `direction` attribute is needed — usvg's BIDI
+    // resolution makes the Arabic run right-to-left on its own. The source
+    // text sits inline with no surrounding whitespace so the run is exactly
+    // `LOGICAL`.
+    let svg = format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><text x="180" y="60" font-family="Amiri" font-size="32">{LOGICAL}</text></svg>"#
+    );
+    let tree = usvg::Tree::from_data(
+        svg.as_bytes(),
+        &usvg::Options {
+            fontdb: crate::FONTDB.clone(),
+            ..usvg::Options::default()
+        },
+    )
+    .unwrap();
+
+    // Uncompressed content streams so the marked-content /ActualText hex string
+    // is scannable in the raw PDF bytes.
+    let settings = SerializeSettings {
+        compress_content_streams: false,
+        ..Default::default()
+    };
+    let mut document = Document::new_with(settings);
+    let size = krilla::geom::Size::from_wh(tree.size().width(), tree.size().height()).unwrap();
+    let mut page = document.start_page_with(krilla::page::PageSettings::new(size));
+    let mut surface = page.surface();
+    // `SvgSettings::default()` has `embed_text: true`, so glyphs are embedded as
+    // text (not outlined) and the /ActualText extraction override is meaningful.
+    surface.draw_svg(&tree, size, SvgSettings::default());
+    surface.finish();
+    page.finish();
+    let pdf = document.finish().unwrap();
+
+    // Build a `/ActualText` value the way `pdf-writer` writes a non-ASCII
+    // `TextStr`: UTF-16BE, U+FEFF BOM first, uppercase hex, wrapped in `<…>`.
+    fn actual_text_hex(s: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFE_u8, 0xFF];
+        for unit in s.encode_utf16() {
+            bytes.extend_from_slice(&unit.to_be_bytes());
+        }
+        let mut hex = vec![b'<'];
+        for b in bytes {
+            hex.extend_from_slice(format!("{b:02X}").as_bytes());
+        }
+        hex.push(b'>');
+        hex
+    }
+
+    let logical_needle = actual_text_hex(LOGICAL);
+    // Visual order is the reverse of the (all-BMP) Arabic run; encoded the same
+    // way so we can prove the emitted /ActualText is NOT the painted order.
+    let visual: String = LOGICAL.chars().rev().collect();
+    let visual_needle = actual_text_hex(&visual);
+
+    // The run must genuinely reorder, otherwise the assertion proves nothing.
+    assert_ne!(
+        logical_needle, visual_needle,
+        "test string must reorder under BIDI (logical != visual order)",
+    );
+
+    // A /Span marked-content region carrying /ActualText must be present.
+    assert!(
+        pdf_contains(&pdf, b"/ActualText"),
+        "RTL SVG run must emit an /ActualText marked-content span",
+    );
+
+    // Load-bearing: /ActualText carries the LOGICAL-order string as UTF-16BE
+    // with the U+FEFF BOM.
+    assert!(
+        pdf_contains(&pdf, &logical_needle),
+        "/ActualText must be the logical-order UTF-16BE string (BOM 0xFEFF), \
+         expected needle {}",
+        String::from_utf8_lossy(&logical_needle),
+    );
+
+    // And it must NOT carry the visual (painted, reversed) glyph order —
+    // overriding extraction to reading order is the entire point.
+    assert!(
+        !pdf_contains(&pdf, &visual_needle),
+        "/ActualText must not carry the visual (reversed) glyph order",
+    );
+}

@@ -145,6 +145,204 @@ pub struct SerializeSettings {
     /// krilla does not enforce cross-intent agreement — that is the
     /// caller's responsibility.
     pub output_intents: Vec<CustomOutputIntent>,
+    /// Fallback CMYK destination profile, emitted as a default
+    /// `/OutputIntents` entry when the document declares no other intent.
+    ///
+    /// This is the colour-managed fallback for documents that contain CMYK
+    /// content but neither activate a validator (PDF/A, PDF/X) that
+    /// generates its own output intent, nor supply caller-driven entries
+    /// via [`output_intents`]. When set under those conditions, krilla
+    /// emits a single `/Type /OutputIntent` dictionary with
+    /// `/S /GTS_PDFX` referencing the supplied ICC profile, so colour-
+    /// managed consumers can transform device CMYK content to the
+    /// destination space.
+    ///
+    /// When any of the following is true, this setting is ignored:
+    ///
+    /// - The active validator (via [`configuration`]) already produces
+    ///   an output intent (PDF/A or PDF/X variants).
+    /// - [`output_intents`] is non-empty.
+    ///
+    /// The default is `None`, preserving existing behaviour.
+    ///
+    /// This is distinct from [`cmyk_profile`], which is consulted only by
+    /// `no_device_cs` mode and the PDF/X embedded-output-intent variants.
+    /// Setting [`cmyk_profile`] does not emit an output intent on its own.
+    ///
+    /// [`output_intents`]: SerializeSettings::output_intents
+    /// [`cmyk_profile`]: SerializeSettings::cmyk_profile
+    /// [`configuration`]: SerializeSettings::configuration
+    pub fallback_cmyk_profile: Option<ICCProfile<4>>,
+    /// How text drawn through [`Surface::draw_glyphs`] and
+    /// [`Surface::draw_text`] should be emitted into the content stream.
+    ///
+    /// [`TextRendering::Glyphs`] (the default) preserves searchable,
+    /// selectable, copy-pasteable text by writing `Tj`-family text-showing
+    /// operators. [`TextRendering::Vector`] emits the same glyphs as
+    /// filled vector outlines (`m`/`l`/`c`/`h`/`f`), which is required by
+    /// some print workflows (e.g. PDF/X embedders that cannot rely on the
+    /// consumer to rasterise the embedded fonts) at the cost of text
+    /// extraction.
+    ///
+    /// Per-call `outlined: true` arguments to [`Surface::draw_glyphs`]
+    /// still force outline emission even when this setting is
+    /// [`TextRendering::Glyphs`]; the setting is therefore a one-way
+    /// global override that promotes all text to vector mode but never
+    /// downgrades a caller's per-call request.
+    ///
+    /// [`Surface::draw_glyphs`]: crate::surface::Surface::draw_glyphs
+    /// [`Surface::draw_text`]: crate::surface::Surface::draw_text
+    pub text_rendering: TextRendering,
+    /// How embedded font programmes are written into the PDF.
+    ///
+    /// [`FontEmbedding::Subset`] (the default) keeps krilla's existing
+    /// behaviour: each CID font is reduced to the set of glyphs actually
+    /// referenced by the document and that subset is written as the
+    /// `/FontFile2` (or `/FontFile3`) stream on the font descriptor.
+    ///
+    /// [`FontEmbedding::Full`] skips the subsetter and embeds the
+    /// unmodified font programme. This is useful in workflows where the
+    /// PDF will be re-edited downstream (a subset would make later
+    /// glyph access fail) or for licensed fonts that explicitly permit
+    /// full embedding.
+    ///
+    /// [`FontEmbedding::None`] omits the font programme entirely. The
+    /// font descriptor is written without `/FontFile2` or `/FontFile3`,
+    /// so consumers must resolve the glyph data from a host-installed
+    /// font matching the descriptor name. This is permitted by
+    /// ISO 32000-2 §9.9 but produces a fragile PDF — PDF/A and PDF/UA
+    /// forbid it. It is the caller's responsibility to ensure the
+    /// active validator (if any) tolerates the choice.
+    ///
+    /// Note that this setting only affects CID font emission. Type3
+    /// bitmap fonts (used for colour-emoji glyphs) never carry an
+    /// embedded `/FontFile*` programme to begin with, so this setting
+    /// is a no-op for them.
+    pub font_embedding: FontEmbedding,
+    /// How glyph positions are emitted into the PDF content stream.
+    ///
+    /// [`GlyphLayout::Optical`] (the default) preserves krilla's
+    /// existing behaviour: every glyph run is written via a `TJ`-style
+    /// positioned-show array (`encode_glyphs_with_individual_positioning`),
+    /// which encodes per-glyph `x_offset` adjustments and reconciles
+    /// caller-supplied advances against the font's intrinsic advances.
+    /// This is the quality mode -- it preserves kerning and any
+    /// per-character placement the shaper produced.
+    ///
+    /// [`GlyphLayout::Metric`] short-circuits the positioned-show path
+    /// and emits glyph runs as a single `Tj` string per consecutive
+    /// run, relying on the font's intrinsic advance widths for
+    /// inter-glyph spacing. The content stream is smaller (no `[ ... ]
+    /// TJ` array with per-glyph numeric adjustments) but kerning and
+    /// any `x_offset` the shaper supplied are discarded. This is the
+    /// speed/size mode, prioritising a compact content stream over
+    /// exact glyph placement.
+    ///
+    /// The setting only governs whether krilla writes a `TJ` array or
+    /// a plain `Tj` string for runs of two or more glyphs. Single-glyph
+    /// runs without an `x_offset` always use `Tj` regardless (this
+    /// predates the setting and is unrelated to it).
+    pub glyph_layout: GlyphLayout,
+}
+
+/// How embedded font programmes are written into the PDF.
+///
+/// See [`SerializeSettings::font_embedding`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum FontEmbedding {
+    /// Embed only the glyphs the document references.
+    ///
+    /// Each CID font is run through the subsetter and only the
+    /// referenced glyphs are written as the `/FontFile2` (or
+    /// `/FontFile3`) stream. This is the default and what every PDF/A
+    /// and PDF/UA validator expects.
+    #[default]
+    Subset,
+    /// Embed the full font programme without subsetting.
+    ///
+    /// The original font data (as supplied to [`Font::new`]) is written
+    /// verbatim as the `/FontFile2` (or `/FontFile3`) stream. Useful
+    /// for downstream editing workflows and for licensed fonts whose
+    /// licence requires full embedding.
+    ///
+    /// [`Font::new`]: crate::text::Font::new
+    Full,
+    /// Do not embed the font programme.
+    ///
+    /// The font descriptor is written without a `/FontFile2` or
+    /// `/FontFile3` entry; consumers must resolve the glyph data from
+    /// a host-installed font matching the descriptor name. This is
+    /// fragile and incompatible with PDF/A and PDF/UA — callers must
+    /// audit their validator configuration.
+    None,
+}
+
+/// How glyph positions are emitted into the PDF content stream.
+///
+/// See [`SerializeSettings::glyph_layout`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum GlyphLayout {
+    /// Per-glyph individual positioning with kerning preserved.
+    ///
+    /// Glyph runs are written via a `TJ` positioned-show array. Each
+    /// per-glyph `x_offset` and any discrepancy between the caller's
+    /// supplied advance and the font's intrinsic advance is encoded as
+    /// a numeric adjustment in the array. This is the default and
+    /// produces the highest-quality output at the cost of a larger
+    /// content stream.
+    #[default]
+    Optical,
+    /// Advance-width-only glyph emission.
+    ///
+    /// Multi-glyph runs are written as a single `Tj` string and the
+    /// consumer is expected to lay out the glyphs using the font's
+    /// intrinsic advances. Per-glyph `x_offset` adjustments supplied
+    /// by the caller are discarded; the content stream is smaller but
+    /// kerning may degrade.
+    Metric,
+}
+
+/// How text should be emitted into the PDF content stream.
+///
+/// Selects between glyph-based text-showing operators
+/// ([`TextRendering::Glyphs`]) and vector-outline emission
+/// ([`TextRendering::Vector`]). See
+/// [`SerializeSettings::text_rendering`] for the full contract.
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Hash)]
+pub enum TextRendering {
+    /// Emit text as PDF text-showing operators (`Tj`, `TJ`, etc.).
+    ///
+    /// Glyphs are referenced by CID into embedded fonts, preserving
+    /// searchable, copy-pasteable text. This is the default.
+    #[default]
+    Glyphs,
+    /// Emit text as filled vector paths (`m`, `l`, `c`, `h`, `f`).
+    ///
+    /// Glyph outlines are extracted from the font (via the OpenType
+    /// `glyf`/`CFF`/`CFF2` tables) and stroked into the content stream
+    /// as path operators. Text is no longer selectable or searchable
+    /// after this transformation, but the output is independent of the
+    /// consumer's ability to render the embedded fonts.
+    Vector,
+    /// Emit text using PDF text rendering mode 3 (Invisible).
+    ///
+    /// Glyphs are shaped, positioned, and CID-mapped exactly as in
+    /// [`TextRendering::Glyphs`] mode so consumers can still extract
+    /// the text via copy/paste, search, screen readers, and
+    /// `/ActualText` overrides. The text-rendering-mode operator
+    /// `3 Tr` is emitted before the showing operator so the glyphs
+    /// produce no marks on the page. No fill or stroke colour is
+    /// set in the content stream — the glyphs are never painted.
+    ///
+    /// This is distinct from drawing with a fully transparent fill
+    /// (`rgba(_, _, _, 0)`): a transparent fill still issues a paint
+    /// operation (which may interact with overprint, blend modes,
+    /// and tagged-PDF structure), whereas mode 3 instructs the
+    /// consumer not to paint the glyph at all.
+    ///
+    /// Per ISO 32000-2 §9.3.6 Table 105 (text rendering modes) and
+    /// §14.9.4 (`/ActualText`).
+    Invisible,
 }
 
 pub type RenderSvgGlyphFn = fn(&[u8], rgb::Color, GlyphId, (f32, f32), &mut Surface) -> Option<()>;
@@ -441,6 +639,10 @@ impl Default for SerializeSettings {
             render_svg_glyph_fn: |_, _, _, _, _| None,
             external_output_profile: None,
             output_intents: Vec::new(),
+            text_rendering: TextRendering::Glyphs,
+            font_embedding: FontEmbedding::Subset,
+            glyph_layout: GlyphLayout::Optical,
+            fallback_cmyk_profile: None,
         }
     }
 }
@@ -1260,8 +1462,20 @@ impl SerializeContext {
         let validators = self.serialize_settings.validators();
         let subtypes = validators.output_intents();
         let custom_intents = self.serialize_settings.output_intents.clone();
+        // Fallback CMYK profile fires only when no other intent source is
+        // present. It is the colour-management default for documents that
+        // contain CMYK content but neither pick a validator-driven intent
+        // nor supply explicit caller intents.
+        let fallback_cmyk = if subtypes.is_empty()
+            && custom_intents.is_empty()
+            && self.serialize_settings.fallback_cmyk_profile.is_some()
+        {
+            self.serialize_settings.fallback_cmyk_profile.clone()
+        } else {
+            None
+        };
 
-        if subtypes.is_empty() && custom_intents.is_empty() {
+        if subtypes.is_empty() && custom_intents.is_empty() && fallback_cmyk.is_none() {
             return;
         }
 
@@ -1446,6 +1660,26 @@ impl SerializeContext {
             if let Some(registry) = intent.registry_name() {
                 oi.registry_name(TextStr(registry));
             }
+            oi.finish();
+            oi_refs.push(oi_ref);
+        }
+
+        // Fallback CMYK output intent: when no validator-generated and no
+        // caller-supplied intents exist, emit a single default intent
+        // referencing the fallback profile so colour-managed consumers can
+        // resolve device CMYK content.
+        if let Some(profile) = fallback_cmyk {
+            let oi_ref = self.new_ref();
+            let major = profile.metadata().major;
+            let minor = profile.metadata().minor;
+            let profile_ref = self.register_cacheable(chunk_container, profile);
+            let mut oi = chunk.indirect(oi_ref).start::<OutputIntent>();
+            oi.dest_output_profile(profile_ref)
+                .subtype(pdf_writer::types::OutputIntentSubtype::PDFX)
+                .output_condition_identifier(TextStr("Custom"))
+                .output_condition(TextStr("CMYK"))
+                .registry_name(TextStr(""))
+                .info(TextStr(format!("CMYK v{}.{}", major, minor).as_str()));
             oi.finish();
             oi_refs.push(oi_ref);
         }

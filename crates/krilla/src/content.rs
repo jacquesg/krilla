@@ -32,7 +32,7 @@ use crate::interchange::tagging::ContentTag;
 use crate::num::NormalizedF32;
 use crate::resource;
 use crate::resource::{Resource, ResourceDictionaryBuilder};
-use crate::serialize::{MaybeDeviceColorSpace, SerializeContext};
+use crate::serialize::{GlyphLayout, MaybeDeviceColorSpace, SerializeContext};
 use crate::stream::Stream;
 use crate::text::group::{use_text_spanner, GlyphGroup, GlyphGrouper, GlyphSpan, GlyphSpanner};
 use crate::text::type3::ColoredGlyph;
@@ -548,6 +548,66 @@ impl ContentBuilder {
         self.graphics_states.restore_state();
     }
 
+    /// Emit a glyph run with PDF text rendering mode 3 (Invisible).
+    ///
+    /// Glyphs are shaped, positioned, and CID-mapped exactly as in
+    /// the fill/stroke path so consumers can still extract the text
+    /// via copy/paste, search, screen readers, and `/ActualText`
+    /// overrides. No fill or stroke colour is set in the content
+    /// stream and no paint operator is emitted — `3 Tr` instructs
+    /// the consumer to produce no marks on the page.
+    ///
+    /// Per ISO 32000-2 §9.3.6 Table 104.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn draw_invisible_glyphs(
+        &mut self,
+        start: Point,
+        sc: &mut SerializeContext,
+        chunk_container: &mut ChunkContainer,
+        context_color: rgb::Color,
+        glyphs: &[impl Glyph],
+        font: Font,
+        text: &str,
+        font_size: f32,
+    ) {
+        if glyphs.is_empty() {
+            return;
+        }
+
+        let (x, y) = (start.x, start.y);
+        self.graphics_states.save_state();
+
+        // Glyph-bbox expansion still matters for invisible text — the
+        // glyphs participate in the page bbox so tagged-PDF readers
+        // and `pdfium` text-extraction code see a sensible bounding
+        // box. Invisible text is by definition uncoloured, so a
+        // unit-rect bbox would understate the extent; compute the
+        // real glyph bbox and feed it in.
+        let bbox_important = self.bbox_important;
+        if bbox_important {
+            let bbox = get_glyphs_bbox(glyphs, x, y, font_size, font.clone());
+            self.expand_bbox(bbox);
+        }
+
+        self.fill_stroke_glyph_run(
+            x,
+            y,
+            sc,
+            chunk_container,
+            TextRenderingMode::Invisible,
+            // No fill/stroke setup — invisible glyphs produce no
+            // marks, so the colour state is irrelevant.
+            |_, _, _| {},
+            glyphs,
+            font,
+            context_color,
+            text,
+            font_size,
+        );
+
+        self.graphics_states.restore_state();
+    }
+
     /// Encode a successive sequence of glyphs that share the same properties and
     /// can be encoded with one text showing operator.
     #[allow(clippy::too_many_arguments)]
@@ -593,6 +653,17 @@ impl ContentBuilder {
                 self.encode_single_glyph(cur_x, pdf_font, size, context_color, glyph);
                 return;
             }
+        }
+
+        // `GlyphLayout::Metric` emits the whole run as a single `Tj`
+        // string and lets the consumer
+        // advance using the font's intrinsic widths. The per-glyph
+        // numeric adjustments that `TJ` would carry are discarded, so
+        // any kerning supplied by the shaper is lost; the trade-off is
+        // a substantially smaller content stream.
+        if matches!(sc.serialize_settings().glyph_layout, GlyphLayout::Metric) {
+            self.encode_glyphs_metric(cur_x, pdf_font, size, context_color, glyphs);
+            return;
         }
 
         self.encode_glyphs_with_individual_positioning(
@@ -682,6 +753,43 @@ impl ContentBuilder {
 
         items.finish();
         positioned.finish();
+    }
+
+    /// Advance-width-only glyph emission for
+    /// [`GlyphLayout::Metric`].
+    ///
+    /// Writes the entire run as a single `Tj` string. The consumer
+    /// advances using the font's intrinsic widths declared in the
+    /// `/Widths` (or CID `/W`) array; any caller-supplied advance
+    /// discrepancy or `x_offset` adjustment is discarded. The result
+    /// is a smaller content stream, no per-glyph numeric adjustments,
+    /// kerning degraded to whatever the font's own advance widths
+    /// produce.
+    fn encode_glyphs_metric(
+        &mut self,
+        cur_x: &mut f32,
+        pdf_font: &dyn PdfFont,
+        size: f32,
+        context_color: rgb::Color,
+        glyphs: &[impl Glyph],
+    ) {
+        self.scratch.clear();
+        let encoded = &mut self.scratch;
+
+        for glyph in glyphs {
+            let pdf_glyph = pdf_font
+                .get_gid(ColoredGlyph::new(glyph.glyph_id(), context_color))
+                .unwrap();
+            pdf_glyph.encode_into(encoded);
+            // cur_x is the layout cursor; it must keep tracking the
+            // caller-supplied advances so that downstream paint stages
+            // (and any subsequent glyph runs) see a consistent x.
+            *cur_x += glyph.x_advance(size);
+        }
+
+        if !encoded.is_empty() {
+            self.content.show(Str(encoded));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -850,7 +958,13 @@ impl ContentBuilder {
             .get_from_identifier(glyph_group.font_identifier.clone())
             .unwrap();
 
-        if fill_render_mode == TextRenderingMode::Fill || pdf_font.force_fill() {
+        if fill_render_mode == TextRenderingMode::Invisible {
+            // Mode 3 (Invisible) is honoured even for fonts that
+            // would normally force fill — the caller asked for an
+            // accessibility-only overlay with no marks on the page.
+            self.content
+                .set_text_rendering_mode(TextRenderingMode::Invisible);
+        } else if fill_render_mode == TextRenderingMode::Fill || pdf_font.force_fill() {
             self.content
                 .set_text_rendering_mode(TextRenderingMode::Fill);
         } else if fill_render_mode == TextRenderingMode::FillStroke {

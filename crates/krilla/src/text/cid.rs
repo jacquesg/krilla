@@ -17,7 +17,7 @@ use crate::chunk_container::ChunkContainer;
 use crate::configure::ValidationError;
 use crate::error::{KrillaError, KrillaResult};
 use crate::geom::Rect;
-use crate::serialize::SerializeContext;
+use crate::serialize::{FontEmbedding, SerializeContext};
 use crate::stream::FilterStreamBuilder;
 use crate::surface::Location;
 use crate::text::outline::OutlineBuilder;
@@ -198,6 +198,7 @@ impl CIDFont {
         let cmap_ref = sc.new_ref();
         let cid_set_ref = sc.new_ref();
         let data_ref = sc.new_ref();
+        let cid_to_gid_ref = sc.new_ref();
 
         let glyph_remapper = &self.glyph_remapper;
 
@@ -234,26 +235,122 @@ impl CIDFont {
             sc.register_validation_error(ValidationError::RestrictedLicense(self.font.clone()));
         }
 
-        let (subsetted, global_bbox) = subset_font(self.font.clone(), glyph_remapper)?;
-        let num_glyphs = subsetted.num_glyphs();
-        let subsetted_data = subsetted.font_data().0;
-
-        let font_stream = {
-            let mut data = subsetted_data.as_ref().as_ref();
-
-            // If we have a CFF font, only embed the standalone CFF program.
-            let subsetted_ref = skrifa::FontRef::new(data).map_err(|_| {
-                KrillaError::Font(self.font.clone(), "failed to read font subset".to_string())
-            })?;
-
-            if let Some(cff) = subsetted_ref.data_for_tag(Cff::TAG) {
-                data = cff.as_bytes();
-            }
-
-            FilterStreamBuilder::new_from_binary_data(data).finish(&sc.serialize_settings())
+        // `SerializeSettings::font_embedding` decides how the CID font's
+        // `/FontFile*` stream (if any) is produced:
+        //
+        //   - `Subset` (default): run the subsetter, embed only the
+        //     referenced glyphs.
+        //   - `Full`: skip the subsetter, embed the original font
+        //     programme. For TrueType (Type2) we additionally write an
+        //     explicit `/CIDToGIDMap` stream that maps the (still
+        //     remapped) CIDs back to their original GIDs in the
+        //     embedded font, so glyph lookups in the consumer remain
+        //     correct. For CFF (Type0/CFF2) full embedding is more
+        //     intricate because the CFF CID/SID space is rewritten by
+        //     the subsetter; rather than synthesise a broken stream we
+        //     transparently fall back to subset embedding for CFF
+        //     fonts.
+        //   - `None`: omit the `/FontFile*` stream entirely.
+        // A TrueType Collection ('ttcf') blob holds several faces; embedding it
+        // verbatim as a single `/FontFile2` would be malformed (ISO 32000-2
+        // §9.9, "Embedded font programs") and `/Length1` would span the whole
+        // collection. Subset embedding extracts just the selected face, so force
+        // the same fallback used for CFF.
+        let is_collection = self
+            .font
+            .font_data()
+            .0
+            .as_ref()
+            .as_ref()
+            .starts_with(b"ttcf");
+        let font_embedding = sc.serialize_settings().font_embedding;
+        // Besides CFF/CFF2 and collections, a variable font pinned to a
+        // specific instance via explicit variation coordinates must fall
+        // back to subsetting too: `Full` embeds the original programme
+        // verbatim, which still spans the whole variation space, so a
+        // consumer would render the default instance and silently lose the
+        // selected one. `subset_with_variations` bakes the chosen
+        // coordinates into a static outline.
+        let effective_embedding = match (
+            font_embedding,
+            is_cff || is_cff2 || is_collection || !self.font.variation_coordinates().is_empty(),
+        ) {
+            (FontEmbedding::Full, true) => FontEmbedding::Subset,
+            (mode, _) => mode,
         };
 
-        let base_font = base_font_name(&self.font, &self.glyph_remapper);
+        // Keep the source-data binding alive across the
+        // `FilterStreamBuilder::new_from_binary_data` borrow. The
+        // builder borrows the slice during construction; once
+        // `add_filter` runs (via `new_from_binary_data` -> flate) the
+        // payload becomes a `Cow::Owned`, but the `'a` lifetime is
+        // still tied to the input.
+        let subsetted_data;
+        let full_data;
+        let (font_stream, length1, num_glyphs, global_bbox) = match effective_embedding {
+            FontEmbedding::Subset => {
+                let (subsetted, global_bbox) = subset_font(self.font.clone(), glyph_remapper)?;
+                let num_glyphs = subsetted.num_glyphs();
+                subsetted_data = subsetted.font_data().0;
+
+                let (stream, length1) = {
+                    let mut data = subsetted_data.as_ref().as_ref();
+
+                    // If we have a CFF font, only embed the standalone CFF program.
+                    let subsetted_ref = skrifa::FontRef::new(data).map_err(|_| {
+                        KrillaError::Font(
+                            self.font.clone(),
+                            "failed to read font subset".to_string(),
+                        )
+                    })?;
+
+                    if let Some(cff) = subsetted_ref.data_for_tag(Cff::TAG) {
+                        data = cff.as_bytes();
+                    }
+
+                    // `/Length1` is Required for a TrueType (`/FontFile2`)
+                    // programme and is the decoded length of the whole
+                    // embedded program. CFF programmes go in `/FontFile3`
+                    // and must not carry it, so only compute it for the
+                    // non-CFF (`data` == the full subsetted sfnt) case.
+                    let length1 = (!is_cff).then_some(data.len() as i32);
+                    let stream = FilterStreamBuilder::new_from_binary_data(data)
+                        .finish(&sc.serialize_settings());
+                    (stream, length1)
+                };
+                (Some(stream), length1, num_glyphs, global_bbox)
+            }
+            FontEmbedding::Full => {
+                // CFF is filtered out above; we are guaranteed Type2 here.
+                debug_assert!(is_glyf);
+                full_data = self.font.font_data().0;
+                let stream = FilterStreamBuilder::new_from_binary_data(full_data.as_ref().as_ref())
+                    .finish(&sc.serialize_settings());
+                // Always a TrueType (`/FontFile2`) programme here, so
+                // `/Length1` is Required and equals the decoded length
+                // of the embedded program.
+                let length1 = Some(full_data.as_ref().as_ref().len() as i32);
+                let num_glyphs = self.glyph_remapper.num_gids() as u32;
+                let global_bbox = self.font.bbox();
+                (Some(stream), length1, num_glyphs, global_bbox)
+            }
+            FontEmbedding::None => {
+                // Omitting the font programme yields a non-conformant file under
+                // every validator that mandates embedding (all PDF/A, PDF/UA and
+                // PDF/X profiles). Register the signal; the profile `prohibits`
+                // table decides whether it actually fires.
+                sc.register_validation_error(ValidationError::NonEmbeddedFont(self.font.clone()));
+                let num_glyphs = self.glyph_remapper.num_gids() as u32;
+                let global_bbox = self.font.bbox();
+                (None, None, num_glyphs, global_bbox)
+            }
+        };
+
+        let base_font = base_font_name(
+            &self.font,
+            &self.glyph_remapper,
+            matches!(effective_embedding, FontEmbedding::Subset),
+        );
         let base_font_type0 = if is_cff {
             format!("{base_font}-{IDENTITY_H}")
         } else {
@@ -279,7 +376,21 @@ impl CIDFont {
         cid.default_width(0.0);
 
         if !is_cff {
-            cid.cid_to_gid_map_predefined(Name(b"Identity"));
+            // With full embedding of a Type2 (TrueType) font we keep the
+            // subsetter's GID remapping (so CIDs in the content stream
+            // still run 0..N), but the embedded font programme retains
+            // the original GIDs. Write an explicit CIDToGIDMap stream
+            // that translates the remapped CID back to the original
+            // GID so glyph lookups remain correct. In every other
+            // mode (Subset and None) the legacy `Identity` mapping is
+            // correct: Subset emits a font programme whose GIDs match
+            // the remapped CIDs by construction, and None has no
+            // embedded font programme at all.
+            if matches!(effective_embedding, FontEmbedding::Full) {
+                cid.cid_to_gid_map_stream(cid_to_gid_ref);
+            } else {
+                cid.cid_to_gid_map_predefined(Name(b"Identity"));
+            }
         }
 
         // IN CID fonts, a upem value of 1000 is assumed for all fonts, so we need to convert.
@@ -367,10 +478,21 @@ impl CIDFont {
             font_descriptor.cid_set(cid_set_ref);
         }
 
-        if is_cff {
-            font_descriptor.font_file3(data_ref);
-        } else {
-            font_descriptor.font_file2(data_ref);
+        // Only reference the font programme stream when one was emitted.
+        // `FontEmbedding::None` deliberately omits `/FontFile2` /
+        // `/FontFile3`. Because the content-stream codes are
+        // Identity-ordered subset CIDs (`Adobe-Identity-0`) with no
+        // character meaning, per ISO 32000-2 §9.7.4.2 a non-embedded
+        // Type 2 CIDFont ignores `/CIDToGIDMap` and CIDs do not
+        // participate in glyph selection, so no host font can resolve
+        // the glyphs by descriptor name or GID; only the `/ToUnicode`
+        // CMap allows text recovery.
+        if font_stream.is_some() {
+            if is_cff {
+                font_descriptor.font_file3(data_ref);
+            } else {
+                font_descriptor.font_file2(data_ref);
+            }
         }
 
         font_descriptor.finish();
@@ -397,13 +519,35 @@ impl CIDFont {
         cmap.writing_mode(WMode::Horizontal);
         cmap.finish();
 
-        let mut stream = stream_chunk.stream(data_ref, font_stream.encoded_data());
-        font_stream.write_filters(stream.deref_mut());
-        if is_cff {
-            stream.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
+        if let Some(font_stream) = font_stream {
+            let mut stream = stream_chunk.stream(data_ref, font_stream.encoded_data());
+            font_stream.write_filters(stream.deref_mut());
+            if is_cff {
+                stream.pair(Name(b"Subtype"), Name(b"CIDFontType0C"));
+            } else if let Some(len1) = length1 {
+                stream.pair(Name(b"Length1"), len1);
+            }
+
+            stream.finish();
         }
 
-        stream.finish();
+        // For `FontEmbedding::Full` (Type2) we wrote a stream reference
+        // above; emit the actual stream contents here. The map is a
+        // big-endian array of `u16` GIDs indexed by CID, where
+        // `map[new_cid] = original_gid` — exactly the order produced
+        // by `GlyphRemapper::remapped_gids`.
+        if matches!(effective_embedding, FontEmbedding::Full) && !is_cff {
+            let mut bytes = Vec::with_capacity(self.glyph_remapper.num_gids() as usize * 2);
+            for old_gid in self.glyph_remapper.remapped_gids() {
+                bytes.extend_from_slice(&old_gid.to_be_bytes());
+            }
+            let cid_to_gid_stream =
+                FilterStreamBuilder::new_from_binary_data(&bytes).finish(&sc.serialize_settings());
+            let mut stream = stream_chunk.stream(cid_to_gid_ref, cid_to_gid_stream.encoded_data());
+            cid_to_gid_stream.write_filters(stream.deref_mut());
+            stream.finish();
+        }
+
         chunk_container.streams.fonts.push(stream_chunk);
 
         Ok(())
@@ -422,15 +566,23 @@ pub(crate) fn subset_tag<T: Hash>(data: &T) -> String {
     std::str::from_utf8(&letter).unwrap().to_string()
 }
 
-pub(crate) fn base_font_name<T: Hash>(font: &Font, data: &T) -> String {
+pub(crate) fn base_font_name<T: Hash>(font: &Font, data: &T, is_subset: bool) -> String {
     const REST_LEN: usize = SUBSET_TAG_LEN + 1 + 1 + IDENTITY_H.len();
 
     let postscript_name = font.postscript_name().unwrap_or("unknown");
     let max_len = 127 - REST_LEN;
     let trimmed = &postscript_name[..postscript_name.len().min(max_len)];
-    let subset_tag = subset_tag(&data);
 
-    format!("{subset_tag}+{trimmed}")
+    // Per ISO 32000-2 §9.9.2 the six-letter tag + `+` prefix marks a
+    // *font subset*; emit it only when the embedded programme is really a
+    // subset. Full/non-embedded fonts use the bare PostScript name so
+    // consumers do not mistake the font for an independent subset.
+    if is_subset {
+        let subset_tag = subset_tag(&data);
+        format!("{subset_tag}+{trimmed}")
+    } else {
+        trimmed.to_string()
+    }
 }
 
 #[cfg_attr(feature = "comemo", comemo::memoize)]

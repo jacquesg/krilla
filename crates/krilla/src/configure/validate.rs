@@ -110,6 +110,17 @@ pub enum ValidationError {
     /// A font has a license that requires explicit permission of the legal owner for embedding
     /// but the standard requires font programs to be legally embeddable for universal rendering.
     RestrictedLicense(Font),
+    /// A font's programme was not embedded (via [`FontEmbedding::None`]), even
+    /// though the standard mandates embedded fonts. Every PDF/A, PDF/UA and
+    /// PDF/X profile requires embedding.
+    ///
+    /// [`FontEmbedding::None`]: crate::FontEmbedding::None
+    NonEmbeddedFont(Font),
+    /// The document uses a non-embedded standard-14 font — krilla's built-in
+    /// Helvetica for AcroForm widget appearance streams — under a validator
+    /// that mandates embedded fonts. In PDF 2.0 and every PDF/A, PDF/UA and
+    /// PDF/X profile the standard-14 fonts must be embedded like any other font.
+    NonEmbeddedStandardFont(Option<Location>),
     /// No document language was set via the metadata, even though it is required
     /// by the standard.
     NoDocumentLanguage,

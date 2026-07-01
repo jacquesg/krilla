@@ -76,6 +76,16 @@ pub struct Surface<'a> {
     stroke: Option<Stroke>,
     bd: Builders,
     push_instructions: Vec<PushInstruction>,
+    /// Stack of per-call [`crate::serialize::TextRendering`] overrides.
+    ///
+    /// Each [`Surface::push_text_rendering`] pushes a value onto this
+    /// stack; the matching [`Surface::pop`] removes the top entry.
+    /// [`Surface::draw_glyphs`] consults `top()` when deciding whether
+    /// to emit glyph-mode (`Tj`/`TJ`) or vector-outline (`m`/`l`/`c`/
+    /// `h`/`f`) operators, falling back to
+    /// [`crate::SerializeSettings::text_rendering`] when the stack is
+    /// empty.
+    text_rendering_stack: Vec<crate::serialize::TextRendering>,
     page_identifier: Option<PageTagIdentifier>,
     finish_fn: Box<dyn FnMut(Stream, i32) + 'a>,
 }
@@ -96,6 +106,7 @@ impl<'a> Surface<'a> {
             fill: None,
             stroke: None,
             push_instructions: vec![],
+            text_rendering_stack: vec![],
             finish_fn,
         }
     }
@@ -272,6 +283,25 @@ impl<'a> Surface<'a> {
     /// This is a very low-level method, which gives you full control over how to place
     /// the glyphs that make up the text. This means that you must have your own text processing
     /// logic for dealing with bidirectional text, font fallback, text layouting, etc.
+    ///
+    /// When the active document was constructed with
+    /// [`SerializeSettings::text_rendering`] set to
+    /// [`TextRendering::Vector`], the `outlined` argument is ignored and
+    /// glyphs are emitted as filled vector paths regardless. The
+    /// document-level setting therefore acts as a one-way override that
+    /// can promote text-as-glyphs emission to vector emission, but never
+    /// downgrades an explicit per-call `outlined: true` request.
+    ///
+    /// When the active mode is [`TextRendering::Invisible`], the
+    /// `outlined` argument and any active fill/stroke state are
+    /// ignored. Glyphs are emitted with text rendering mode 3 (`Tr 3`)
+    /// — they remain in the content stream for accessibility and text
+    /// extraction but produce no marks on the page.
+    ///
+    /// [`SerializeSettings::text_rendering`]:
+    ///     crate::SerializeSettings::text_rendering
+    /// [`TextRendering::Vector`]: crate::TextRendering::Vector
+    /// [`TextRendering::Invisible`]: crate::TextRendering::Invisible
     pub fn draw_glyphs(
         &mut self,
         start: Point,
@@ -282,6 +312,41 @@ impl<'a> Surface<'a> {
         outlined: bool,
     ) {
         let context_color = self.context_color();
+        // Per-call `push_text_rendering` overrides the document-level
+        // `SerializeSettings::text_rendering`. When the override stack
+        // is empty, fall through to the document-level setting (the
+        // pre-existing behaviour).
+        let active_text_rendering = self
+            .text_rendering_stack
+            .last()
+            .copied()
+            .unwrap_or(self.sc.serialize_settings().text_rendering);
+        // Invisible mode takes precedence over the per-call
+        // `outlined` argument: the caller has explicitly asked for
+        // an accessibility-only ActualText overlay, so vector
+        // outlining (which produces a painted shape) would defeat
+        // the purpose.
+        if matches!(
+            active_text_rendering,
+            crate::serialize::TextRendering::Invisible,
+        ) {
+            self.bd.get_mut().draw_invisible_glyphs(
+                start,
+                self.sc,
+                self.chunk_container,
+                context_color,
+                glyphs,
+                font,
+                text,
+                font_size,
+            );
+            return;
+        }
+        let outlined = outlined
+            || matches!(
+                active_text_rendering,
+                crate::serialize::TextRendering::Vector,
+            );
         if outlined {
             self.outline_glyphs(glyphs, context_color, start, font, font_size);
         } else {
@@ -448,6 +513,38 @@ impl<'a> Surface<'a> {
         self.bd.get_mut().set_overprint(overprint);
     }
 
+    /// Push a per-call text-rendering mode.
+    ///
+    /// Subsequent [`Surface::draw_glyphs`] calls (up to the matching
+    /// [`Surface::pop`]) honour `mode` instead of the document-level
+    /// [`crate::SerializeSettings::text_rendering`]:
+    ///
+    /// * [`crate::serialize::TextRendering::Glyphs`] emits PDF text-
+    ///   showing operators (`Tj`/`TJ`), keeping the text searchable
+    ///   and selectable.
+    /// * [`crate::serialize::TextRendering::Vector`] outlines every
+    ///   glyph into filled vector paths (`m`/`l`/`c`/`h`/`f`),
+    ///   matching the document-level vector mode but scoped to the
+    ///   current push range.
+    /// * [`crate::serialize::TextRendering::Invisible`] emits the
+    ///   glyphs with text rendering mode 3 (`3 Tr`), keeping the
+    ///   text extractable and selectable while producing no marks
+    ///   on the page, mirroring the document-level invisible mode
+    ///   but scoped to the current push range.
+    ///
+    /// Pushes nest: the topmost active value applies to every
+    /// `draw_glyphs` call. When every push has been popped the
+    /// document-level setting takes over again.
+    ///
+    /// Like every other `push_*` method this must be paired with
+    /// [`Surface::pop`]; the unbalanced-push panic in
+    /// [`Surface::finish`] catches mismatches at end-of-surface.
+    pub fn push_text_rendering(&mut self, mode: crate::serialize::TextRendering) {
+        self.push_instructions
+            .push(PushInstruction::TextRendering);
+        self.text_rendering_stack.push(mode);
+    }
+
     /// Push a new clip path.
     pub fn push_clip_path(&mut self, path: &Path, clip_rule: &FillRule) {
         self.push_instructions.push(PushInstruction::ClipPath);
@@ -536,6 +633,17 @@ impl<'a> Surface<'a> {
             PushInstruction::ClipPath => self.bd.get_mut().pop_clip_path(),
             PushInstruction::BlendMode => self.bd.get_mut().restore_graphics_state(),
             PushInstruction::Overprint => self.bd.get_mut().restore_graphics_state(),
+            PushInstruction::TextRendering => {
+                // `push_text_rendering` does not touch the graphics
+                // state — the override is consulted in Rust, not via
+                // a PDF operator — so popping it is symmetrical: just
+                // remove the top entry from the override stack.
+                let popped = self.text_rendering_stack.pop();
+                debug_assert!(
+                    popped.is_some(),
+                    "text_rendering_stack popped without a matching push",
+                );
+            }
             PushInstruction::Mask(mask) => {
                 let stream = self.bd.sub_builders.pop().unwrap().finish(self.sc);
                 self.bd
@@ -687,6 +795,11 @@ pub(crate) enum PushInstruction {
     ClipPath,
     BlendMode,
     Overprint,
+    /// Per-call `text_rendering` override. The payload lives on
+    /// [`Surface::text_rendering_stack`]; this marker only sequences
+    /// the pop so it interleaves correctly with the other push
+    /// instructions.
+    TextRendering,
     Mask(Box<Mask>),
     Isolated,
 }
